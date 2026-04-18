@@ -1,0 +1,27 @@
+steps:
+  # 1. Build the container
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/booklets-web:latest', '.']
+
+  # 2. Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/booklets-web:latest']
+
+  # 3. Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'booklets'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/booklets-web:latest'
+      - '--region'
+      - 'europe-west1'
+      - '--set-secrets'
+      - 'DATABASE_URL=DATABASE_URL:latest,GEMINI_API_KEY=GEMINI_API_KEY:latest,HOSTAWAY_CLIENT_ID=HOSTAWAY_CLIENT_ID:latest,HOSTAWAY_CLIENT_SECRET=HOSTAWAY_CLIENT_SECRET:latest,HOSTAWAY_ACCOUNT_ID=HOSTAWAY_ACCOUNT_ID:latest'
+      - '--vpc-connector'
+      - 'projects/$PROJECT_ID/locations/europe-west1/connectors/booklets-connector'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
