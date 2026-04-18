@@ -1,0 +1,251 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+// Business & Properties Domain
+// -----------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  properties     Property[]
+  fiscalPeriods  FiscalPeriod[]
+  accounts       Account[]
+}
+
+model Property {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  address        String
+  type           String
+  status         String
+  hostawayId     String?  @unique // Mapping to Hostaway Listing ID
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  ownerships     PropertyOwnership[]
+  bookings       Booking[]
+  expenses       Expense[]
+}
+
+model Owner {
+  id        String   @id @default(cuid())
+  name      String
+  email     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownerships      PropertyOwnership[]
+  ownerStatements OwnerStatement[]
+}
+
+model PropertyOwnership {
+  id           String   @id @default(cuid())
+  propertyId   String
+  ownerId      String
+  revenueShare Float    // Percentage, 0-100
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  property Property @relation(fields: [propertyId], references: [id])
+  owner    Owner    @relation(fields: [ownerId], references: [id])
+}
+
+// -----------------------------------------------------------------------------
+// Accounting Core Domain (Double-Entry)
+// -----------------------------------------------------------------------------
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+model Account {
+  id             String      @id @default(cuid())
+  organizationId String
+  name           String
+  type           AccountType
+  currency       String      @default("EUR")
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  organization Organization  @relation(fields: [organizationId], references: [id])
+  journalLines JournalLine[]
+}
+
+enum JournalStatus {
+  DRAFT
+  POSTED
+  VOIDED
+}
+
+model JournalEntry {
+  id        String        @id @default(cuid())
+  date      DateTime
+  memo      String?
+  status    JournalStatus @default(DRAFT)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  lines JournalLine[]
+}
+
+model JournalLine {
+  id             String   @id @default(cuid())
+  journalEntryId String
+  accountId      String
+  amount         Float    // Positive for debit, negative for credit based on normal balance rules (or positive/negative strictly debit/credit)
+  isDebit        Boolean
+  currency       String   @default("EUR")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id])
+  account      Account      @relation(fields: [accountId], references: [id])
+}
+
+model FiscalPeriod {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  startDate      DateTime
+  endDate        DateTime
+  isClosed       Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+}
+
+// -----------------------------------------------------------------------------
+// Rental Domain
+// -----------------------------------------------------------------------------
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+model Channel {
+  id        String   @id @default(cuid())
+  name      String   // Airbnb, Booking.com, Direct
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  bookings Booking[]
+}
+
+model Booking {
+  id           String        @id @default(cuid())
+  propertyId   String
+  channelId    String
+  checkIn      DateTime
+  checkOut     DateTime
+  totalAmount  Float
+  status       BookingStatus @default(CONFIRMED)
+  hostawayId   String?       @unique // External ID from Hostaway
+  hostawayStatus String?             // Raw status from Hostaway
+  deferredPosted Boolean @default(false)
+  overchargeEnabled Boolean @default(false)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  property Property        @relation(fields: [propertyId], references: [id])
+  channel  Channel         @relation(fields: [channelId], references: [id])
+  charges  BookingCharge[]
+
+  @@index([propertyId])
+  @@index([hostawayId])
+}
+
+model BookingCharge {
+  id          String   @id @default(cuid())
+  bookingId   String
+  description String   // Nightly Rate, Cleaning Fee, Platform Commission
+  amount      Float
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+}
+
+model GuestPayout {
+  id        String   @id @default(cuid())
+  date      DateTime
+  amount    Float
+  reference String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model OwnerStatement {
+  id        String   @id @default(cuid())
+  ownerId   String
+  period    String
+  totalDue  Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner Owner @relation(fields: [ownerId], references: [id])
+}
+
+// -----------------------------------------------------------------------------
+// Expenses & Operations
+// -----------------------------------------------------------------------------
+
+model ExpenseCategory {
+  id        String   @id @default(cuid())
+  name      String
+  accountId String?  // Default GL Account for this category
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+}
+
+model Vendor {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+}
+
+model Expense {
+  id                String   @id @default(cuid())
+  propertyId        String
+  expenseCategoryId String
+  vendorId          String
+  amount            Float
+  date              DateTime
+  description       String?
+  receiptCloudId    String?    // Cloud ID for the scanned document
+  confidenceScore   Float?     // AI extraction confidence (0-1)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  property        Property        @relation(fields: [propertyId], references: [id])
+  expenseCategory ExpenseCategory @relation(fields: [expenseCategoryId], references: [id])
+  vendor          Vendor          @relation(fields: [vendorId], references: [id])
+}
