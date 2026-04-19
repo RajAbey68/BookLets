@@ -24,9 +24,16 @@ export class AutomationService {
     console.log(`[Middleware Agent] Processing receipt from ${metadata.source} for Org: ${organizationId}`);
     
     // 1. Vision Extraction via SymbiOS
+    // NOTE: confidence is unknown at extraction time; send a sentinel of 1.0
+    // and the real confidence returned by SymbiOS is used for all downstream calls.
     const response = await fetch(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-maker-identity': 'booklets-automation-service',
+        'x-tenant-id': organizationId,
+        'x-agent-confidence': '1.0', // updated after extraction in subsequent calls
+      },
       body: JSON.stringify({ image: imageBase64 }),
     });
 
@@ -86,12 +93,16 @@ export class AutomationService {
         }
       });
 
-      // Create Ledger Entry
+      // Create Ledger Entry — status driven by real SymbiOS confidence score
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
         memo: `AUTOMATED: Receipt for ${vendorName}`,
         status: confidence > 0.9 ? JournalStatus.POSTED : JournalStatus.DRAFT,
+        // 4-Eyes governance metadata passed through for audit trail
+        makerIdentity: 'booklets-automation-service',
+        tenantId: organizationId,
+        agentConfidence: confidence,
         lines: [
           { accountId: expenseAccountId, amount: totalAmount, isDebit: true },
           { accountId: bankAccountId, amount: totalAmount, isDebit: false },

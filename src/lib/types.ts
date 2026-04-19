@@ -19,6 +19,10 @@ export interface JournalEntryInput {
   memo?: string;
   status?: JournalStatus;
   lines: JournalLineInput[];
+  // 4-Eyes governance metadata (optional — populated by automated agents)
+  makerIdentity?: string;
+  tenantId?: string;
+  agentConfidence?: number;
 }
 
 export interface LedgerValidationResult {
