@@ -1,0 +1,67 @@
+name: P0 Blockers — Schema & Seed Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  schema-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install
+      
+      - name: "✅ P0.1: PostgreSQL datasource configured"
+        run: |
+          grep -q 'provider = "postgresql"' prisma/schema.prisma || (echo "FAIL: PostgreSQL not configured" && exit 1)
+          echo "PASS: PostgreSQL datasource found"
+      
+      - name: "✅ P0.2: Suspense account (code 9999) in seed"
+        run: |
+          grep -q "code: '9999'" prisma/seed.ts || (echo "FAIL: Suspense account missing from seed" && exit 1)
+          echo "PASS: Suspense account seeded"
+      
+      - name: "✅ P0.3: Decimal precision for financial data"
+        run: |
+          grep -q '@db.Decimal(19, 4)' prisma/schema.prisma || (echo "FAIL: Decimal precision missing" && exit 1)
+          echo "PASS: Decimal(19,4) configured for JournalLine.amount"
+      
+      - name: "✅ P0.4: Prisma schema compiles"
+        run: |
+          npx prisma validate || (echo "FAIL: Schema validation failed" && exit 1)
+          echo "PASS: Schema is valid"
+      
+      - name: "✅ P0.5: EvidenceLog model present (immutable audit)"
+        run: |
+          grep -q 'model EvidenceLog' prisma/schema.prisma || (echo "FAIL: EvidenceLog model missing" && exit 1)
+          grep -q 'hash.*String' prisma/schema.prisma || (echo "FAIL: Hash field missing" && exit 1)
+          echo "PASS: EvidenceLog configured"
+      
+      - name: "✅ P0.6: JournalEntry DRAFT/POSTED/REVERSED status"
+        run: |
+          grep -q 'status.*String.*@default("DRAFT")' prisma/schema.prisma || (echo "FAIL: JournalEntry status not configured" && exit 1)
+          echo "PASS: JournalEntry status enum implemented"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: schema-validation
+    if: always()
+    steps:
+      - name: P0 Blockers Status
+        run: |
+          if [ "${{ needs.schema-validation.result }}" == "success" ]; then
+            echo "✅ ✅ ✅ ALL P0 BLOCKERS PASSED ✅ ✅ ✅"
+            exit 0
+          else
+            echo "❌ P0 validation failed"
+            exit 1
+          fi

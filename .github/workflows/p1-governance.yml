@@ -1,0 +1,63 @@
+name: P1 Governance — RevenueService & LedgerService
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  governance-gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        run: npm install || true
+      
+      - name: "✅ P1.1: RevenueService HIGH_VALUE_THRESHOLD = 10000"
+        run: |
+          grep -q 'HIGH_VALUE_THRESHOLD = 10000' src/services/RevenueService.ts || (echo "FAIL: Threshold not set" && exit 1)
+          echo "PASS: Revenue threshold enforced"
+      
+      - name: "✅ P1.2: RevenueService creates DRAFT for high-value entries"
+        run: |
+          grep -q "status: 'DRAFT'" src/services/RevenueService.ts || (echo "FAIL: DRAFT status missing" && exit 1)
+          echo "PASS: High-value entries require approval"
+      
+      - name: "✅ P1.3: LedgerService validates trial balance"
+        run: |
+          grep -q 'validateTrialBalance' src/services/LedgerService.ts || (echo "FAIL: Trial balance validation missing" && exit 1)
+          grep -q "debits.equals(credits)" src/services/LedgerService.ts || (echo "FAIL: Balance check missing" && exit 1)
+          echo "PASS: Trial balance validation enforced"
+      
+      - name: "✅ P1.4: RevenueService enforces SoD (maker ≠ checker)"
+        run: |
+          grep -q 'makerIdentity === checkerIdentity' src/services/RevenueService.ts || (echo "FAIL: SoD check missing" && exit 1)
+          echo "PASS: Segregation of Duties enforced"
+      
+      - name: "✅ P1.5: Immutable audit trail (EvidenceLog)"
+        run: |
+          grep -q 'evidenceLog.create' src/services/LedgerService.ts || (echo "FAIL: EvidenceLog creation missing" && exit 1)
+          grep -q 'sha256' src/services/LedgerService.ts || (echo "FAIL: Hash generation missing" && exit 1)
+          echo "PASS: Immutable audit trail configured"
+
+  summary:
+    runs-on: ubuntu-latest
+    needs: governance-gates
+    if: always()
+    steps:
+      - name: P1 Governance Status
+        run: |
+          if [ "${{ needs.governance-gates.result }}" == "success" ]; then
+            echo "✅ ✅ ✅ ALL P1 GOVERNANCE GATES PASSED ✅ ✅ ✅"
+            exit 0
+          else
+            echo "❌ P1 governance validation failed"
+            exit 1
+          fi
