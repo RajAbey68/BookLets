@@ -3,50 +3,46 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('--- Starting BookLets Seeding ---');
+  console.log('🌱 Seeding database...');
 
-  // 1. Create Default Organization
+  // 1. Create default organization
   const org = await prisma.organization.upsert({
-    where: { id: 'primary_org' },
+    where: { slug: 'default' },
     update: {},
     create: {
-      id: 'primary_org',
-      name: 'Asimov Lettings Portfolio',
-      slug: 'asimov-lettings',
+      name: 'Default Organization',
+      slug: 'default',
     },
   });
-  console.log(`Organization created: ${org.name}`);
 
-  // 2. Initialize Chart of Accounts (COA)
-  // Codes follow the standard ledger numbering: 1xxx Assets, 2xxx Liabilities,
-  // 4xxx Revenue, 5xxx Expenses, 9999 Suspense (P0.2 governance gate).
+  console.log('✅ Organization created:', org.id);
+
+  // 2. Seed Chart of Accounts (COA)
   const accounts = [
-    { code: '1000', name: 'Operating Cash', type: 'ASSET' },
-    { code: '2000', name: 'Guest Pre-payments', type: 'LIABILITY' },
-    { code: '4000', name: 'Rental Income', type: 'REVENUE' },
-    { code: '4001', name: 'Cleaning Fee Income', type: 'REVENUE' },
-    { code: '5000', name: 'Commission Expense', type: 'EXPENSE' },
-    { code: '5001', name: 'General Operating Expense', type: 'EXPENSE' },
-    { code: '9999', name: 'Suspense', type: 'ASSET' },
+    { name: 'Operating Cash', code: '1000', accountType: 'ASSET' },
+    { name: 'Guest Pre-payments', code: '2000', accountType: 'LIABILITY' },
+    { name: 'Rental Income', code: '4000', accountType: 'REVENUE' },
+    { name: 'Cleaning Fee Income', code: '4100', accountType: 'REVENUE' },
+    { name: 'Commission Expense', code: '6000', accountType: 'EXPENSE' },
+    { name: 'Suspense', code: '9999', accountType: 'SUSPENSE' },
   ];
 
   for (const acc of accounts) {
     await prisma.account.upsert({
-      where: { id: `acc_${acc.name.replace(/\s+/g, '_').toLowerCase()}` },
-      update: { code: acc.code },
+      where: { code: acc.code },
+      update: {},
       create: {
-        id: `acc_${acc.name.replace(/\s+/g, '_').toLowerCase()}`,
         organizationId: org.id,
         name: acc.name,
         code: acc.code,
-        type: acc.type,
-        currency: 'EUR',
+        accountType: acc.accountType,
+        createdBy: 'seed',
       },
     });
   }
-  console.log('Chart of Accounts initialized.');
+  console.log('✅ Chart of Accounts seeded');
 
-  // 3. Create Fiscal Period
+  // 3. Seed Fiscal Period
   const today = new Date();
   const yearStart = new Date(today.getFullYear(), 0, 1);
   const yearEnd = new Date(today.getFullYear(), 11, 31);
@@ -60,12 +56,12 @@ async function main() {
       name: `FY ${today.getFullYear()}`,
       startDate: yearStart,
       endDate: yearEnd,
-      isClosed: false,
+      createdBy: 'seed',
     },
   });
-  console.log(`Fiscal Period opened for ${today.getFullYear()}.`);
+  console.log(`✅ Fiscal Period opened for ${today.getFullYear()}`);
 
-  // 4. Initialize Channels
+  // 4. Seed Channels
   const channels = ['Airbnb', 'Booking.com', 'Direct'];
   for (const channelName of channels) {
     await prisma.channel.upsert({
@@ -77,14 +73,14 @@ async function main() {
       },
     });
   }
-  console.log('Booking Channels initialized.');
+  console.log('✅ Booking channels seeded');
 
-  console.log('--- Seeding Complete ---');
+  console.log('✅ Database seeded successfully');
 }
 
 main()
   .catch((e) => {
-    console.error(e);
+    console.error('❌ Seed failed:', e);
     process.exit(1);
   })
   .finally(async () => {
