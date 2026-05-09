@@ -64,7 +64,16 @@ export class LedgerService {
    * Posts a new Journal Entry atomically after validating the balance and fiscal period.
    */
   static async postEntry(input: JournalEntryInput) {
-    const { organizationId, date, memo, status = JournalStatus.POSTED, lines } = input;
+    const {
+      organizationId,
+      date,
+      memo,
+      status = JournalStatus.POSTED,
+      lines,
+      makerIdentity,
+      tenantId,
+      agentConfidence,
+    } = input;
 
     // 1. Strict Validation for POSTED entries
     if (status === JournalStatus.POSTED) {
@@ -86,9 +95,13 @@ export class LedgerService {
     return await prisma.$transaction(async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
+          organizationId,
           date,
           memo,
-          status: status as any,
+          status,
+          makerIdentity,
+          tenantId,
+          agentConfidence,
           lines: {
             create: lines.map(line => ({
               accountId: line.accountId,
@@ -135,6 +148,7 @@ export class LedgerService {
     return await prisma.$transaction(async (tx) => {
       const reversal = await tx.journalEntry.create({
         data: {
+          organizationId: originalEntry.organizationId,
           date: new Date(),
           memo: `AUTO-REVERSAL: [Original Entry ID: ${entryId}] - Reason: ${reason}`,
           status: 'POSTED',

@@ -3,9 +3,9 @@ generator client {
   provider = "prisma-client-js"
 }
 
+// Prisma 7: connection URL is configured in prisma.config.ts, not here.
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 model Organization {
@@ -68,14 +68,14 @@ model Account {
   id             String @id @default(cuid())
   organizationId String
   name           String
-  code           String @unique
-  accountType    String
-  currency       String @default("EUR")
-  closedAt    DateTime?
-  locked      Boolean @default(false)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  createdBy   String
+  code           String? @unique
+  type           String
+  currency       String  @default("EUR")
+  closedAt       DateTime?
+  locked         Boolean @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  createdBy      String?
   organization   Organization @relation(fields: [organizationId], references: [id])
   journalLines   JournalLine[]
   @@index([organizationId])
@@ -83,20 +83,20 @@ model Account {
 }
 
 model JournalEntry {
-  id             String @id @default(cuid())
-  organizationId String
-  date           DateTime
-  memo           String?
-  status         String @default("DRAFT")
+  id              String   @id @default(cuid())
+  organizationId  String
+  date            DateTime
+  memo            String?
+  status          String   @default("DRAFT")
   makerIdentity   String?
   tenantId        String?
   agentConfidence Float?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  createdBy String
-  updatedBy String?
-  organization Organization  @relation(fields: [organizationId], references: [id])
-  lines        JournalLine[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  createdBy       String?
+  updatedBy       String?
+  organization    Organization  @relation(fields: [organizationId], references: [id])
+  lines           JournalLine[]
   @@index([organizationId])
   @@index([status])
 }
@@ -106,12 +106,12 @@ model JournalLine {
   journalEntryId String
   accountId      String
   amount         Decimal  @db.Decimal(19, 4)
-  debitCredit    String
+  isDebit        Boolean
   currency       String   @default("EUR")
-  createdAt DateTime @default(now())
-  createdBy String
-  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id])
-  account      Account      @relation(fields: [accountId], references: [id])
+  createdAt      DateTime @default(now())
+  createdBy      String?
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id])
+  account        Account      @relation(fields: [accountId], references: [id])
   @@index([journalEntryId])
   @@index([accountId])
 }
@@ -122,12 +122,12 @@ model FiscalPeriod {
   name           String
   startDate      DateTime
   endDate        DateTime
-  closedAt DateTime?
-  locked   Boolean @default(false)
-  createdAt DateTime @default(now())
-  createdBy String
+  isClosed       Boolean  @default(false)
+  closedAt       DateTime?
+  locked         Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  createdBy      String?
   organization   Organization   @relation(fields: [organizationId], references: [id])
-  journalEntries JournalEntry[]
   @@index([organizationId])
 }
 

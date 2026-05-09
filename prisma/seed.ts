@@ -12,29 +12,34 @@ async function main() {
     create: {
       id: 'primary_org',
       name: 'Asimov Lettings Portfolio',
+      slug: 'asimov-lettings',
     },
   });
   console.log(`Organization created: ${org.name}`);
 
   // 2. Initialize Chart of Accounts (COA)
+  // Codes follow the standard ledger numbering: 1xxx Assets, 2xxx Liabilities,
+  // 4xxx Revenue, 5xxx Expenses, 9999 Suspense (P0.2 governance gate).
   const accounts = [
-    { name: 'Operating Cash', type: 'ASSET' },
-    { name: 'Guest Pre-payments', type: 'LIABILITY' },
-    { name: 'Rental Income', type: 'REVENUE' },
-    { name: 'Cleaning Fee Income', type: 'REVENUE' },
-    { name: 'Commission Expense', type: 'EXPENSE' },
-    { name: 'General Operating Expense', type: 'EXPENSE' },
+    { code: '1000', name: 'Operating Cash', type: 'ASSET' },
+    { code: '2000', name: 'Guest Pre-payments', type: 'LIABILITY' },
+    { code: '4000', name: 'Rental Income', type: 'REVENUE' },
+    { code: '4001', name: 'Cleaning Fee Income', type: 'REVENUE' },
+    { code: '5000', name: 'Commission Expense', type: 'EXPENSE' },
+    { code: '5001', name: 'General Operating Expense', type: 'EXPENSE' },
+    { code: '9999', name: 'Suspense', type: 'ASSET' },
   ];
 
   for (const acc of accounts) {
     await prisma.account.upsert({
       where: { id: `acc_${acc.name.replace(/\s+/g, '_').toLowerCase()}` },
-      update: {},
+      update: { code: acc.code },
       create: {
-        id: `acc_${acc.name.replace(/\s+/g, '_').toLowerCase()}` ,
+        id: `acc_${acc.name.replace(/\s+/g, '_').toLowerCase()}`,
         organizationId: org.id,
         name: acc.name,
-        type: acc.type as any,
+        code: acc.code,
+        type: acc.type,
         currency: 'EUR',
       },
     });

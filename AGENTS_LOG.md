@@ -45,7 +45,11 @@ Update it when you start, hand off, or finish.
     to `Decimal(19, 4)` — needs migration + decimal.js plumbing.
   - Real auth/session and multi-tenant `organizationId` resolution (currently
     hardcoded as `primary_org`).
-  - Wire `EvidenceLog` writes + sha256 hash chain in `LedgerService`.
+  - Wire `EvidenceLog` writes + sha256 hash chain in `LedgerService`
+    (re-enable P1.5 in `.github/workflows/p1-governance.yml` once landed).
+  - Enforce Segregation of Duties (`makerIdentity !== checkerIdentity`) in
+    `RevenueService` / `LedgerService` once session/auth identity exists
+    (re-enable P1.4 in `.github/workflows/p1-governance.yml` once landed).
   - Replace hardcoded `organizationId="org_123"` / `propertyId="prop_abc"`
     in `src/app/page.tsx`.
   - Install Tailwind (or strip Tailwind classnames from components) and define

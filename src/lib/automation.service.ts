@@ -55,28 +55,37 @@ export class AutomationService {
       });
     }
 
-    // 3. Resolve Category and GL Account
+    // 3. Resolve Category and GL Account.
+    // Both Suspense (code 9999) and Primary Bank (code 1000) must be seeded
+    // before this service runs — see prisma/seed.ts.
+    const suspenseAccount = await prisma.account.findFirst({
+      where: { organizationId, code: '9999' }
+    });
+    if (!suspenseAccount) {
+      throw new Error('Automation Setup Error: Suspense account (code 9999) is not seeded for this organization.');
+    }
+
     let category = await prisma.expenseCategory.findFirst({
       where: { name: { contains: categorySuggestion } }
     });
 
     if (!category) {
       category = await prisma.expenseCategory.create({
-        data: { 
+        data: {
           name: categorySuggestion,
-          // Default to a 'Suspense' account if no mapping exists
-          accountId: 'SUSPENSE_ACC_ID' 
+          // Default to the Suspense account if no mapping exists
+          accountId: suspenseAccount.id,
         }
       });
     }
 
-    const expenseAccountId = category.accountId || 'SUSPENSE_ACC_ID';
-    
-    // Resolve Bank Account
-    const bankAccount = await prisma.account.findFirst({
-      where: { organizationId, name: { contains: 'Cash' } }
-    });
-    const bankAccountId = bankAccount?.id || 'PRIMARY_BANK_ACC_ID'; 
+    const expenseAccountId = category.accountId || suspenseAccount.id;
+
+    // Resolve Bank Account by code, fall back to name match, then Suspense.
+    const bankAccount =
+      (await prisma.account.findFirst({ where: { organizationId, code: '1000' } })) ??
+      (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
+    const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
 
     // 4. Record the Expense and Journal Entry
     return await prisma.$transaction(async (tx) => {
