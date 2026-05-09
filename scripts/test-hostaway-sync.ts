@@ -17,7 +17,7 @@ async function testSync() {
   const org = await prisma.organization.upsert({
     where: { id: 'org_test_001' },
     update: {},
-    create: { id: 'org_test_001', name: 'Test Rentals' }
+    create: { id: 'org_test_001', name: 'Test Rentals', slug: 'test-rentals' }
   });
 
   const property = await prisma.property.upsert({

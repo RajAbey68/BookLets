@@ -19,6 +19,7 @@ async function main() {
 
   await prisma.journalEntry.create({
     data: {
+      organizationId: org.id,
       date: new Date(),
       memo: 'Test Automated Entry',
       status: 'POSTED',

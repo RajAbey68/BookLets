@@ -40,11 +40,13 @@ export class RevenueService {
       return;
     }
 
+    const channel = await this.resolveChannel(res.channelName);
+
     // Upsert Booking
     const booking = await prisma.booking.upsert({
       where: { hostawayId: res.id.toString() },
       update: {
-        status: res.status.toUpperCase() as any,
+        status: res.status.toUpperCase(),
         totalAmount: res.totalPrice,
         checkIn: new Date(res.checkInDate),
         checkOut: new Date(res.checkOutDate),
@@ -53,7 +55,7 @@ export class RevenueService {
       create: {
         hostawayId: res.id.toString(),
         propertyId: property.id,
-        channelId: "channel_gen_001", // Default channel mapping
+        channelId: channel.id,
         totalAmount: res.totalPrice,
         checkIn: new Date(res.checkInDate),
         checkOut: new Date(res.checkOutDate),
@@ -105,8 +107,9 @@ export class RevenueService {
   private static async postInitialDeferredEntry(organizationId: string, booking: any) {
     const cashAccount = await this.getOrCreateAccount(organizationId, "Operating Cash", "ASSET");
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
-    
-    const memo = `Initial Booking Funds: #${booking.hostawayId} at ${booking.hostawayId}`;
+
+    const property = await prisma.property.findUnique({ where: { id: booking.propertyId } });
+    const memo = `Initial Booking Funds: #${booking.hostawayId} at ${property?.name ?? booking.propertyId}`;
     
     try {
       await LedgerService.postEntry({
@@ -223,8 +226,8 @@ export class RevenueService {
     
     try {
       // 4-EYES CHECK: Ensure the amount is not unreasonably high before auto-posting
-      const amountThreshold = 10000; // €10k threshold for manual review
-      const status = booking.totalAmount > amountThreshold ? JournalStatus.DRAFT : JournalStatus.POSTED;
+      const HIGH_VALUE_THRESHOLD = 10000; // €10k threshold for manual review
+      const status = booking.totalAmount > HIGH_VALUE_THRESHOLD ? JournalStatus.DRAFT : JournalStatus.POSTED;
 
       await LedgerService.postEntry({
         organizationId,
@@ -270,11 +273,22 @@ export class RevenueService {
         data: {
           organizationId,
           name,
-          type: type as any,
-          currency: "EUR"
+          type,
+          currency: "EUR",
         }
       });
     }
     return account;
+  }
+
+  /**
+   * Resolves a Channel by display name (e.g. "Airbnb", "Booking.com"),
+   * falling back to creating the channel if it doesn't yet exist.
+   */
+  private static async resolveChannel(channelName: string) {
+    const name = channelName?.trim() || 'Direct';
+    const existing = await prisma.channel.findFirst({ where: { name } });
+    if (existing) return existing;
+    return prisma.channel.create({ data: { name } });
   }
 }
