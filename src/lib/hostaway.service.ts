@@ -35,10 +35,14 @@ export class HostawayService {
   static async fetchReservations(limit: number = 50): Promise<HostawayReservation[]> {
     const isProd = process.env.NODE_ENV === 'production';
     const isStrict = process.env.STRICT_HOSTAWAY === 'true';
-    const clientId = process.env.HOSTAWAY_CLIENT_ID;
     const accountId = process.env.HOSTAWAY_ACCOUNT_ID;
-    
-    // 1. Token retrieval
+
+    // Check accountId before requesting a token: a misconfigured deploy
+    // shouldn't burn an OAuth round-trip just to fail the next check.
+    if (!accountId && (isProd || isStrict)) {
+      throw new Error('[HostawayService] CRITICAL: HOSTAWAY_ACCOUNT_ID is missing in production/strict mode.');
+    }
+
     const accessToken = await this.getAccessToken();
 
     if (!accessToken) {
@@ -49,13 +53,9 @@ export class HostawayService {
       return this.getMockReservations();
     }
 
-    if (!accountId && (isProd || isStrict)) {
-       throw new Error('[HostawayService] CRITICAL: HOSTAWAY_ACCOUNT_ID is missing in production/strict mode.');
-    }
-
     try {
       console.log(`[HostawayService] Fetching ${limit} reservations from live API...`);
-      
+
       const res = await fetchWithRetry(`${this.API_BASE}/reservations?limit=${limit}`, {
         headers: {
           'Authorization': `Bearer ${accessToken}`,
@@ -63,16 +63,17 @@ export class HostawayService {
           'X-Hostaway-Account-Id': accountId || ""
         }
       });
-      
+
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}));
         throw new Error(`Hostaway API Error: ${res.status} ${res.statusText} - ${JSON.stringify(errorData)}`);
       }
-      
+
       const data = await res.json();
       return data.result || [];
-    } catch (err: any) {
-      console.error('[HostawayService] API Call Failed:', err.message);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('[HostawayService] API Call Failed:', message);
       if (isProd || isStrict) throw err; // Bubble up in production or strict mode
       return this.getMockReservations();
     }

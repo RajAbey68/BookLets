@@ -13,11 +13,24 @@ export interface ManualSyncResult {
 
 const MAX_REASONS_IN_MESSAGE = 3;
 
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 /**
  * Triggers a manual sync from Hostaway and processes revenue recognition.
  * Returns success only when every reservation and recognition succeeded;
  * a run with any per-record failure is reported as partial so callers can
  * surface the failure count instead of silently treating it as success.
+ *
+ * Pre-flight failures (no organization, no chart of accounts) return a
+ * non-partial failure result instead of letting the run proceed and
+ * surface cryptic ledger errors per booking.
  */
 export async function triggerManualSync(): Promise<ManualSyncResult> {
   // For production launch, we fetch the primary organization.
@@ -25,14 +38,22 @@ export async function triggerManualSync(): Promise<ManualSyncResult> {
   const organization = await prisma.organization.findFirst();
 
   if (!organization) {
-    throw new Error('CRITICAL: No organization found. Please initialize the system via seed or setup.');
+    return {
+      success: false,
+      partial: false,
+      message: 'No organization found. Initialize the system via seed or setup before syncing.',
+    };
   }
 
-  // Pre-sync check: Ensure organization has a chart of accounts
+  // A sync with no chart of accounts cannot post any ledger entries;
+  // every booking would fail with a confusing per-record error.
   const accountCount = await prisma.account.count({ where: { organizationId: organization.id } });
   if (accountCount === 0) {
-     console.warn(`[SyncAction] Organization ${organization.name} has no accounts. Initializing default accounts...`);
-     // We could auto-init here, but for now we'll just report readiness
+    return {
+      success: false,
+      partial: false,
+      message: `Organization "${organization.name}" has no chart of accounts. Run the seed before syncing.`,
+    };
   }
 
   console.log(`[SyncAction] Triggering live sync for organization: ${organization.name} (${organization.id})`);
@@ -67,8 +88,9 @@ export async function triggerManualSync(): Promise<ManualSyncResult> {
       message: `Sync completed with ${report.failures.length} failure(s): ${reasons}${more}`,
       report,
     };
-  } catch (err: any) {
-    console.error('[SyncAction] Sync failed:', err.message);
-    return { success: false, partial: false, message: err.message };
+  } catch (err) {
+    const message = describeError(err);
+    console.error('[SyncAction] Sync failed:', message);
+    return { success: false, partial: false, message };
   }
 }
