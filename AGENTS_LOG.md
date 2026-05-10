@@ -61,6 +61,52 @@ Update it when you start, hand off, or finish.
 
 (none)
 
+## Roadmap (low priority)
+
+### Objective-Driven Adoption (ODA) for agentic implementation
+
+A methodology proposal raised by the human operator and independently
+echoed by the Antigravity agent. Worth capturing here so the next pass
+can fold it into the architecture.
+
+**Premise.** TDD makes the *test* the contract: code is "done" when the
+test goes green. ODA generalises that for agent-driven (BMAD-style) work
+by making the *objective* the contract. An agent finishes when an
+evaluator confirms the declared outcome — which can be a unit test, a
+SQL invariant, a metric threshold, an LLM-graded rubric, or a human
+4-eyes approval.
+
+**Why it fits BookLets.** Two pieces of the schema are already
+proto-ODA:
+- `EvidenceLog` (immutable hash chain) — the green-test ledger.
+- `ActionIntentQueue` (maker/checker/confidence) — the proposal queue.
+
+Sketch of what would close the loop:
+- `Objective` model: declarative goal (e.g. "trial balance == 0",
+  "revenue recognised within 24h of checkout", "receipt confidence
+  >= 0.9 ⇒ auto-post").
+- `Evaluator`: deterministic check or graded judgement that scores an
+  attempt against an objective.
+- Runner: agents propose into `ActionIntentQueue`, evaluators score,
+  `EvidenceLog` records pass/fail. Failed objectives drive retries or
+  escalate to human-in-the-loop.
+
+**Properties this buys.**
+1. Termination — agents stop when the objective is met, not when
+   tokens run out.
+2. Regression safety — once-passed objectives become a lockfile.
+3. Cost control — per-objective retry budgets; route hard cases to
+   higher-tier models or humans.
+
+**Adjacent prior art.** Outcome-based evals (Anthropic et al.),
+MAPE-K loops in autonomic computing, ODD in autonomous-vehicle
+spec, GA-style fitness functions.
+
+**Status.** Not on the critical path. Pick up after the in-flight
+followups (auth/session, Float→Decimal, EvidenceLog hash writes,
+SoD enforcement) — those are prerequisites for a non-trivial
+evaluator surface.
+
 ## Conventions for log entries
 
 ```
