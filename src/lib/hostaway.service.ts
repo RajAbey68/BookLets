@@ -24,6 +24,9 @@ export class HostawayService {
 
   private static CACHED_TOKEN: string | null = null;
   private static TOKEN_EXPIRY: number = 0;
+  // Single-flight guard: concurrent callers share one in-flight refresh
+  // instead of each hitting /access-tokens independently.
+  private static REFRESH_INFLIGHT: Promise<string | null> | null = null;
 
   /**
    * Fetches reservations from Hostaway API.
@@ -91,6 +94,20 @@ export class HostawayService {
       return this.CACHED_TOKEN;
     }
 
+    // Single-flight: if a refresh is already running, await the same promise.
+    if (this.REFRESH_INFLIGHT) {
+      return this.REFRESH_INFLIGHT;
+    }
+
+    this.REFRESH_INFLIGHT = this.refreshAccessToken(clientId, clientSecret);
+    try {
+      return await this.REFRESH_INFLIGHT;
+    } finally {
+      this.REFRESH_INFLIGHT = null;
+    }
+  }
+
+  private static async refreshAccessToken(clientId: string, clientSecret: string): Promise<string | null> {
     try {
       console.log(`[HostawayService] Authenticating with Hostaway (Client ID: ${clientId})...`);
       const response = await fetchWithTimeout('https://api.hostaway.com/v1/access-tokens', {
@@ -112,7 +129,7 @@ export class HostawayService {
       const data = await response.json();
       this.CACHED_TOKEN = data.access_token;
       // Hostaway tokens usually last 24h, but we handle the expiry provided by them
-      this.TOKEN_EXPIRY = Date.now() + (data.expires_in * 1000) - 60000; 
+      this.TOKEN_EXPIRY = Date.now() + (data.expires_in * 1000) - 60000;
 
       return this.CACHED_TOKEN;
     } catch (err) {
