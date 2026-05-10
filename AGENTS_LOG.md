@@ -4,6 +4,13 @@ This file is a lightweight lockboard for AI agents (Claude Code, Antigravity,
 Gemini, etc.) working concurrently on this repo. Read it before starting work.
 Update it when you start, hand off, or finish.
 
+## Read me first
+
+Operational charter for this repo: [`docs/BRIEFING_FOR_OTHER_SERVICES.md`](docs/BRIEFING_FOR_OTHER_SERVICES.md).
+That document is the source of truth for canonical IDs, write surfaces,
+non-negotiable rules, deprecated paths, and access model. Every agent
+joining this repo should read it before claiming scope here.
+
 ## Rules of engagement
 
 1. **Never push directly to `main`.** Each agent works on a branch named
@@ -18,46 +25,64 @@ Update it when you start, hand off, or finish.
 
 ## Active work
 
-### Claude (claude/evidence-log-hashchain) — EvidenceLog hash chain (re-enable P1.5)
+### Claude — prime process-handling agent (claude/agent-briefing) — operational briefing for BookLets
 - **Started:** 2026-05-10
-- **Goal:** Make `EvidenceLog` writes real: every `LedgerService.postEntry` /
-  `reverseEntry` records an immutable, sha256-chained evidence row. Re-enable
-  the P1.5 governance gate (`evidenceLog.create` + `sha256` greps in
-  `.github/workflows/p1-governance.yml`).
+- **Goal:** Produce `docs/BRIEFING_FOR_OTHER_SERVICES.md` as the operational
+  charter for cross-agent coordination, modelled on the Skool MCP briefing
+  pattern. Refresh this lockboard for the current `main` state.
 - **Touching:**
-  - `src/lib/evidence-log.service.ts` (new)
-  - `src/lib/ledger.service.ts` (add hook into postEntry / reverseEntry)
-  - `src/lib/types.ts` (only if a shared interface needs to move)
-  - `.github/workflows/p1-governance.yml` (re-enable P1.5)
-  - `prisma/seed.ts` (only if a genesis evidence row needs seeding — TBD)
-- **NOT touching (free for other agents):**
-  - All UI / components / pages
-  - `src/lib/automation.service.ts`, `src/lib/revenue.service.ts`,
-    `src/lib/hostaway.service.ts` (PR #2 / PR #3 territory)
-  - Any money columns (`Booking.totalAmount`, `Expense.amount`, etc. —
-    PR #4-equivalent Float→Decimal scope, claimed by lead coordinator)
-- **Out of scope for this PR (followups):**
-  - SoD enforcement (`makerIdentity !== checkerIdentity`) — needs auth/session
-    first; will re-enable P1.4 in a separate PR.
-  - Per-tenant serialisation of evidence writes (currently relies on Postgres
-    transaction; concurrent writers could fork the chain — flagged as a
-    known limitation, not blocking).
+  - `docs/BRIEFING_FOR_OTHER_SERVICES.md` (new)
+  - `AGENTS_LOG.md` (this file: move merged PRs to Recently completed,
+    add upstream context, claim scope)
+- **NOT touching:** all source code, schema, CI workflows.
 
 ### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
-- See PR #2 description. Currently `dirty` post-PR-#1-merge; awaiting rebase.
+- See PR #2 description. Rebased on `main`. Build is no longer blocked
+  on this PR (PR #8 carved out the `ReceiptUploader → server action`
+  commit with attribution); PR #2 still owns the design-system CSS
+  primitives and page-wiring commits. Held in draft for human visual
+  signoff per PR #2's own test plan.
 
-### Other Claude session (claude/improve-process-handling-aaZJP, PR #3) — fetch timeouts + sync failure reporting
-- See PR #3 description. Currently `dirty` post-PR-#1-merge; awaiting rebase.
+### Lead coordinator (claude/float-to-decimal, PR #5) — Float → Decimal money columns
+- See PR #5 description. Draft. Rebased on `main` after PR #3 + PR #8
+  landed. No further conflicts expected.
 
 ## Recently completed
 
-- **PR #1 (merged 2026-05-10, `main` @ a39b3e1)** — schema/services drift fix,
-  Node 20 CI bump, ODA roadmap entry, AGENTS_LOG.md lockboard. Aligned
-  Prisma schema with service code (renamed `Account.accountType→type`,
-  `JournalLine.debitCredit→isDebit`, added `FiscalPeriod.isClosed`),
-  added Suspense (9999) + chart-of-accounts codes to seed, moved Prisma
-  7's `datasource.url` to `prisma.config.ts`, repointed CI greps from the
-  non-existent `src/services/` to `src/lib/`.
+- **PR #8 (merged 2026-05-10, `main` @ bbcf03b)** — Carve-out from PR #2:
+  `ReceiptUploader` moved to `processReceiptAction` server action,
+  removing Prisma from the client bundle; SSR-unsafe `document.createElement`
+  removed; Tailwind classes replaced with design-system primitives that
+  PR #2's CSS commit will define. Also widened `EvidenceLogClient` args
+  from `unknown` to `any` to fix a contravariance regression at the
+  Prisma callsite. `npm run build` now passes end-to-end.
+- **PR #7 (merged 2026-05-10, `main` @ d8809e9)** — `force-dynamic` on
+  `/ledger` and `/properties` so the build does not query Postgres at
+  static prerender time.
+- **PR #6 (merged 2026-05-10, `main` @ 5cacd56)** — Prisma 7 client
+  factory now wires `@prisma/adapter-pg` driver adapter; resolves the
+  `PrismaClientConstructorValidationError` at runtime; `tsc --noEmit`
+  reports 0 errors.
+- **PR #4 (merged 2026-05-10, `main` @ c52ed8a)** — `EvidenceLogService`
+  with sha256 hash chain (per-tenant, chained via `previousHash`).
+  Hooks into `LedgerService.postEntry` (`JOURNAL_POSTED` event) and
+  `reverseEntry` (`JOURNAL_REVERSED` event). Re-enabled P1.5 governance
+  gate in CI.
+- **PR #3 (merged 2026-05-10, `main` @ efc8d88, 5 commits)** — Fetch
+  timeouts (`fetchWithTimeout`) + retry with jittered backoff
+  (`fetchWithRetry`) in `src/lib/http.ts`; single-flight Hostaway OAuth
+  token refresh; `SyncReport` per-record failure aggregation;
+  `triggerManualSync` returns typed `ManualSyncResult` with `partial`
+  state; pre-flight property+org validation in `AutomationService`;
+  richer SymbiOS error responses.
+- **PR #1 (merged 2026-05-10, `main` @ a39b3e1)** — Schema/services
+  drift fix, Node 20 CI bump, ODA roadmap entry, AGENTS_LOG.md
+  lockboard. Aligned Prisma schema with service code (renamed
+  `Account.accountType→type`, `JournalLine.debitCredit→isDebit`, added
+  `FiscalPeriod.isClosed`), added Suspense (9999) + chart-of-accounts
+  codes to seed, moved Prisma 7's `datasource.url` to
+  `prisma.config.ts`, repointed CI greps from the non-existent
+  `src/services/` to `src/lib/`.
 
 ## Roadmap (low priority)
 
@@ -101,9 +126,16 @@ MAPE-K loops in autonomic computing, ODD in autonomous-vehicle
 spec, GA-style fitness functions.
 
 **Status.** Not on the critical path. Pick up after the in-flight
-followups (auth/session, Float→Decimal, EvidenceLog hash writes,
-SoD enforcement) — those are prerequisites for a non-trivial
-evaluator surface.
+followups (auth/session, Float→Decimal, SoD enforcement) — those are
+prerequisites for a non-trivial evaluator surface.
+
+### Agent-scope-guard CI workflow
+
+A pre-merge check that fails any PR touching files outside its
+`AGENTS_LOG.md` claim, converting the lockboard from a polite convention
+into an enforced contract. Sketch in
+[`docs/BRIEFING_FOR_OTHER_SERVICES.md`](docs/BRIEFING_FOR_OTHER_SERVICES.md)
+backlog.
 
 ## Conventions for log entries
 
