@@ -4,6 +4,30 @@ import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { Decimal } from 'decimal.js';
 
+export type SyncStage = 'sync' | 'recognition';
+
+export interface SyncFailure {
+  stage: SyncStage;
+  bookingRef: string;
+  reason: string;
+}
+
+export interface SyncReport {
+  reservationsFetched: number;
+  bookingsProcessed: number;
+  bookingsRecognized: number;
+  failures: SyncFailure[];
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 /**
  * Revenue Service
  * 
@@ -15,19 +39,41 @@ export class RevenueService {
 
   /**
    * Syncs data from Hostaway and manages the financial lifecycle of bookings.
+   * Returns a report describing how many records were processed and which failed.
+   * Per-record errors are collected so a single bad booking does not abort the run.
    */
-  static async syncAndProcess(organizationId: string) {
+  static async syncAndProcess(organizationId: string): Promise<SyncReport> {
     console.log(`[RevenueService] Starting sync for Organization: ${organizationId}`);
-    
-    // 1. Fetch from Hostaway
+
+    const report: SyncReport = {
+      reservationsFetched: 0,
+      bookingsProcessed: 0,
+      bookingsRecognized: 0,
+      failures: [],
+    };
+
+    // 1. Fetch from Hostaway (fatal if this throws — the whole run is unusable)
     const reservations = await HostawayService.fetchReservations();
-    
+    report.reservationsFetched = reservations.length;
+
     for (const res of reservations) {
-      await this.processReservationSync(organizationId, res);
+      try {
+        await this.processReservationSync(organizationId, res);
+        report.bookingsProcessed += 1;
+      } catch (err) {
+        report.failures.push({
+          stage: 'sync',
+          bookingRef: res.id.toString(),
+          reason: describeError(err),
+        });
+        console.error(`[RevenueService] Sync failed for reservation ${res.id}:`, describeError(err));
+      }
     }
 
     // 2. Process recognition for all bookings that have checked out
-    await this.recognizeRevenue(organizationId);
+    await this.recognizeRevenue(organizationId, report);
+
+    return report;
   }
 
   /**
@@ -110,44 +156,47 @@ export class RevenueService {
 
     const property = await prisma.property.findUnique({ where: { id: booking.propertyId } });
     const memo = `Initial Booking Funds: #${booking.hostawayId} at ${property?.name ?? booking.propertyId}`;
-    
-    try {
-      await LedgerService.postEntry({
-        organizationId,
-        date: new Date(),
-        memo,
-        status: JournalStatus.POSTED,
-        lines: [
-          {
-            accountId: cashAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: true // DR Cash
-          },
-          {
-            accountId: deferredAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: false // CR Liability
-          }
-        ]
-      });
 
-      await prisma.booking.update({
-        where: { id: booking.id },
-        data: { deferredPosted: true }
-      });
+    await LedgerService.postEntry({
+      organizationId,
+      date: new Date(),
+      memo,
+      status: JournalStatus.POSTED,
+      lines: [
+        {
+          accountId: cashAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: true // DR Cash
+        },
+        {
+          accountId: deferredAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: false // CR Liability
+        }
+      ]
+    });
 
-      console.log(`[RevenueService] Posted Initial Deferred Entry for Booking ${booking.id}`);
-    } catch (err: any) {
-      console.error(`[RevenueService] Failed Initial Deferred Posting:`, err.message);
-    }
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { deferredPosted: true }
+    });
+
+    console.log(`[RevenueService] Posted Initial Deferred Entry for Booking ${booking.id}`);
   }
 
   /**
    * Moves funds from Deferred Revenue to Rental Income for all checked-out guests.
    */
-  static async recognizeRevenue(organizationId: string) {
+  static async recognizeRevenue(organizationId: string, report?: SyncReport): Promise<SyncReport> {
+    const localReport: SyncReport = report ?? {
+      reservationsFetched: 0,
+      bookingsProcessed: 0,
+      bookingsRecognized: 0,
+      failures: [],
+    };
+
     const today = new Date();
-    
+
     // Find all CONFIRMED bookings where checkOut has passed
     const pendingRecognition = await prisma.booking.findMany({
       where: {
@@ -163,12 +212,24 @@ export class RevenueService {
     console.log(`[RevenueService] Found ${pendingRecognition.length} bookings ready for revenue recognition.`);
 
     for (const booking of pendingRecognition) {
-      if (booking.status === "CANCELLED") {
-        await this.postCancellationReversal(organizationId, booking);
-      } else {
-        await this.postRecognitionEntry(organizationId, booking);
+      try {
+        if (booking.status === "CANCELLED") {
+          await this.postCancellationReversal(organizationId, booking);
+        } else {
+          await this.postRecognitionEntry(organizationId, booking);
+        }
+        localReport.bookingsRecognized += 1;
+      } catch (err) {
+        localReport.failures.push({
+          stage: 'recognition',
+          bookingRef: booking.hostawayId ?? booking.id,
+          reason: describeError(err),
+        });
+        console.error(`[RevenueService] Recognition failed for booking ${booking.id}:`, describeError(err));
       }
     }
+
+    return localReport;
   }
 
   /**
@@ -181,36 +242,32 @@ export class RevenueService {
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
     
     const memo = `Cancellation Reversal: Refund for Booking #${booking.hostawayId} at ${booking.property.name}`;
-    
-    try {
-      await LedgerService.postEntry({
-        organizationId,
-        date: new Date(),
-        memo,
-        status: JournalStatus.POSTED,
-        lines: [
-          {
-            accountId: deferredAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: true // DR Liability (Decrease)
-          },
-          {
-            accountId: cashAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: false // CR Cash (Decrease)
-          }
-        ]
-      });
 
-      await prisma.booking.update({
-        where: { id: booking.id },
-        data: { deferredPosted: false }
-      });
+    await LedgerService.postEntry({
+      organizationId,
+      date: new Date(),
+      memo,
+      status: JournalStatus.POSTED,
+      lines: [
+        {
+          accountId: deferredAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: true // DR Liability (Decrease)
+        },
+        {
+          accountId: cashAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: false // CR Cash (Decrease)
+        }
+      ]
+    });
 
-      console.log(`[RevenueService] Reversed Initial Deferred Entry for Cancelled Booking ${booking.id}`);
-    } catch (err: any) {
-      console.error(`[RevenueService] Failed Cancellation Reversal:`, err.message);
-    }
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { deferredPosted: false }
+    });
+
+    console.log(`[RevenueService] Reversed Initial Deferred Entry for Cancelled Booking ${booking.id}`);
   }
 
   /**
@@ -223,41 +280,37 @@ export class RevenueService {
 
     // 2. Post the Entry
     const memo = `Revenue Recognition: Guest checkout for Booking #${booking.hostawayId} at ${booking.property.name}`;
-    
-    try {
-      // 4-EYES CHECK: Ensure the amount is not unreasonably high before auto-posting
-      const HIGH_VALUE_THRESHOLD = 10000; // €10k threshold for manual review
-      const status = booking.totalAmount > HIGH_VALUE_THRESHOLD ? JournalStatus.DRAFT : JournalStatus.POSTED;
 
-      await LedgerService.postEntry({
-        organizationId,
-        date: booking.checkOut,
-        memo,
-        status,
-        lines: [
-          {
-            accountId: deferredAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: true // DR Liability (Decrease)
-          },
-          {
-            accountId: revenueAccount.id,
-            amount: new Decimal(booking.totalAmount),
-            isDebit: false // CR Revenue (Increase)
-          }
-        ]
-      });
+    // 4-EYES CHECK: Ensure the amount is not unreasonably high before auto-posting
+    const HIGH_VALUE_THRESHOLD = 10000; // €10k threshold for manual review
+    const status = booking.totalAmount > HIGH_VALUE_THRESHOLD ? JournalStatus.DRAFT : JournalStatus.POSTED;
 
-      // 3. Mark the booking as COMPLETED
-      await prisma.booking.update({
-        where: { id: booking.id },
-        data: { status: "COMPLETED" }
-      });
+    await LedgerService.postEntry({
+      organizationId,
+      date: booking.checkOut,
+      memo,
+      status,
+      lines: [
+        {
+          accountId: deferredAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: true // DR Liability (Decrease)
+        },
+        {
+          accountId: revenueAccount.id,
+          amount: new Decimal(booking.totalAmount),
+          isDebit: false // CR Revenue (Increase)
+        }
+      ]
+    });
 
-      console.log(`[RevenueService] Successfully recognized €${booking.totalAmount} for Booking ${booking.id} (${status})`);
-    } catch (err: any) {
-      console.error(`[RevenueService] Failed to post recognition for Booking ${booking.id}:`, err.message);
-    }
+    // 3. Mark the booking as COMPLETED
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { status: "COMPLETED" }
+    });
+
+    console.log(`[RevenueService] Successfully recognized €${booking.totalAmount} for Booking ${booking.id} (${status})`);
   }
 
   /**
