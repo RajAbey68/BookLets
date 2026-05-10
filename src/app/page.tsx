@@ -14,9 +14,13 @@ const IconTrendingDown = () => (
 
 import { ReceiptUploader } from '../components/ReceiptUploader';
 import { getDashboardMetrics } from './actions/portfolio.actions';
+import { getDefaultUploadContext } from './actions/context.actions';
 
 export default async function Home() {
-  const metricsResult = await getDashboardMetrics();
+  const [metricsResult, uploadContext] = await Promise.all([
+    getDashboardMetrics(),
+    getDefaultUploadContext(),
+  ]);
   const metrics = (metricsResult.success && metricsResult.data) ? metricsResult.data : {
     totalRevenue: 0,
     netIncome: 0,
@@ -88,7 +92,20 @@ export default async function Home() {
       </div>
       
       <div style={{ marginBottom: '2.5rem' }}>
-        <ReceiptUploader organizationId="org_123" propertyId="prop_abc" />
+        {uploadContext ? (
+          <ReceiptUploader
+            organizationId={uploadContext.organizationId}
+            propertyId={uploadContext.propertyId}
+          />
+        ) : (
+          <div className="glass-card" style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
+            <h3 style={{ marginBottom: '0.5rem' }}>Receipt upload unavailable</h3>
+            <p style={{ fontSize: '0.875rem' }}>
+              No properties configured for this organization yet. Add a property to start
+              uploading receipts.
+            </p>
+          </div>
+        )}
       </div>
 
       <div className="dashboard-grid">
