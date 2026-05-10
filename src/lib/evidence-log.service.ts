@@ -13,11 +13,18 @@ export interface EvidenceLogInput {
  * Minimal client surface so the service can accept either the extended
  * Prisma client or the transaction-scoped client without dragging the
  * Prisma 7 generated types through the public signature.
+ *
+ * `any` is required (instead of `unknown`) on the args because Prisma's
+ * generated method signatures use generic narrow types; a parameter
+ * typed `unknown` would be contravariantly incompatible and reject the
+ * Prisma client at the call site.
  */
 interface EvidenceLogClient {
   evidenceLog: {
-    findFirst: (args: unknown) => Promise<{ hash: string } | null>;
-    create: (args: unknown) => Promise<{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    findFirst: (args: any) => Promise<{ hash: string } | null>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    create: (args: any) => Promise<{
       id: string;
       hash: string;
       previousHash: string | null;
