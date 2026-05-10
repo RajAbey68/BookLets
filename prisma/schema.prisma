@@ -145,7 +145,7 @@ model Booking {
   channelId      String
   checkIn        DateTime
   checkOut       DateTime
-  totalAmount    Float
+  totalAmount    Decimal  @db.Decimal(19, 4)
   status         String @default("CONFIRMED")
   hostawayId     String?  @unique
   hostawayStatus String?
@@ -163,7 +163,7 @@ model BookingCharge {
   id          String   @id @default(cuid())
   bookingId   String
   description String
-  amount      Float
+  amount      Decimal  @db.Decimal(19, 4)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   booking Booking @relation(fields: [bookingId], references: [id])
@@ -173,7 +173,7 @@ model GuestPayout {
   id             String @id @default(cuid())
   organizationId String
   date           DateTime
-  amount         Float
+  amount         Decimal  @db.Decimal(19, 4)
   reference      String?
   status         String @default("PENDING")
   createdAt DateTime @default(now())
@@ -186,7 +186,7 @@ model OwnerStatement {
   id        String   @id @default(cuid())
   ownerId   String
   period    String
-  totalDue  Float
+  totalDue  Decimal  @db.Decimal(19, 4)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   owner Owner @relation(fields: [ownerId], references: [id])
@@ -214,7 +214,7 @@ model Expense {
   propertyId        String
   expenseCategoryId String
   vendorId          String
-  amount            Float
+  amount            Decimal  @db.Decimal(19, 4)
   date              DateTime
   description       String?
   receiptCloudId    String?
