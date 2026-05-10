@@ -18,10 +18,9 @@ export default function AppShell({ children }: AppShellProps) {
     <div className="app-shell">
       {/* Overlay for mobile when sidebar is open */}
       {isSidebarOpen && (
-        <div 
+        <div
           onClick={closeSidebar}
-          className="fixed inset-0 bg-black/50 z-[90] lg:hidden backdrop-blur-sm"
-          style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 90, backdropFilter: 'blur(4px)' }}
+          className="mobile-overlay lg-hidden"
         />
       )}
       
