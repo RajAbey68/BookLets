@@ -1,6 +1,7 @@
 import { prisma } from './prisma';
 import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
+import { fetchWithTimeout } from './http';
 
 export interface AutomationResult {
   expenseId: string;
@@ -26,7 +27,7 @@ export class AutomationService {
     // 1. Vision Extraction via SymbiOS
     // NOTE: confidence is unknown at extraction time; send a sentinel of 1.0
     // and the real confidence returned by SymbiOS is used for all downstream calls.
-    const response = await fetch(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
+    const response = await fetchWithTimeout(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

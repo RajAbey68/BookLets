@@ -1,4 +1,5 @@
 import { prisma } from './prisma';
+import { fetchWithTimeout } from './http';
 
 export interface HostawayReservation {
   id: number;
@@ -52,7 +53,7 @@ export class HostawayService {
     try {
       console.log(`[HostawayService] Fetching ${limit} reservations from live API...`);
       
-      const res = await fetch(`${this.API_BASE}/reservations?limit=${limit}`, {
+      const res = await fetchWithTimeout(`${this.API_BASE}/reservations?limit=${limit}`, {
         headers: { 
           'Authorization': `Bearer ${accessToken}`, 
           'Cache-Control': 'no-cache',
@@ -92,7 +93,7 @@ export class HostawayService {
 
     try {
       console.log(`[HostawayService] Authenticating with Hostaway (Client ID: ${clientId})...`);
-      const response = await fetch('https://api.hostaway.com/v1/access-tokens', {
+      const response = await fetchWithTimeout('https://api.hostaway.com/v1/access-tokens', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
