@@ -33,12 +33,12 @@ export async function fetchPortfolioMetrics() {
     // but here we can calculate from Bookings associated with this property.
     const totalRevenue = prop.bookings
       .filter(b => b.status === 'COMPLETED' || b.status === 'CONFIRMED')
-      .reduce((acc, b) => acc + b.totalAmount, 0);
+      .reduce<Decimal>((acc, b) => acc.plus(new Decimal(b.totalAmount)), new Decimal(0));
 
     // 2. Calculate Occupancy (Last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
+
     const bookedDays = prop.bookings
       .filter(b => b.checkIn >= thirtyDaysAgo || b.checkOut >= thirtyDaysAgo)
       .reduce((acc, b) => {
@@ -47,7 +47,7 @@ export async function fetchPortfolioMetrics() {
         const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
         return acc + Math.max(0, days);
       }, 0);
-    
+
     const occupancyRate = Math.min(100, Math.round((bookedDays / 30) * 100));
 
     // 3. ADR (Average Daily Rate)
@@ -55,16 +55,16 @@ export async function fetchPortfolioMetrics() {
       const nights = Math.ceil((b.checkOut.getTime() - b.checkIn.getTime()) / (1000 * 60 * 60 * 24));
       return acc + nights;
     }, 0);
-    
-    const adr = totalNights > 0 ? totalRevenue / totalNights : 0;
+
+    const adr = totalNights > 0 ? totalRevenue.dividedBy(totalNights) : new Decimal(0);
 
     // 4. RevPAR
-    const revpar = (adr * occupancyRate) / 100;
+    const revpar = adr.times(occupancyRate).dividedBy(100);
 
     // 5. Yield (Simplified calc: Revenue / Assumed Asset Value if we had it, or just a mock score)
-    const yieldPercentage = (revenue: number) => {
-        if (revenue > 10000) return "8.2%";
-        if (revenue > 5000) return "5.4%";
+    const yieldPercentage = (revenue: Decimal) => {
+        if (revenue.greaterThan(10000)) return "8.2%";
+        if (revenue.greaterThan(5000)) return "5.4%";
         return "3.1%";
     };
 
@@ -74,10 +74,10 @@ export async function fetchPortfolioMetrics() {
       location: prop.address,
       units: 1, // Defaulting to 1 unit per property record for now
       occupancy: occupancyRate || 0,
-      revenue: `€${totalRevenue.toLocaleString()}`,
+      revenue: `€${totalRevenue.toNumber().toLocaleString()}`,
       yield: yieldPercentage(totalRevenue),
-      adr: `€${Math.round(adr)}`,
-      revpar: `€${Math.round(revpar)}`,
+      adr: `€${adr.toFixed(0)}`,
+      revpar: `€${revpar.toFixed(0)}`,
       status: occupancyRate > 80 ? 'High Yield' : (occupancyRate > 50 ? 'Stable' : 'Seasonal'),
       color: occupancyRate > 80 ? '#10b981' : (occupancyRate > 50 ? '#3b82f6' : '#f59e0b')
     };
