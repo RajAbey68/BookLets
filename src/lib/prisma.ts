@@ -1,13 +1,25 @@
 import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
 import { Decimal } from 'decimal.js';
+
+// Prisma 7 requires either a driver adapter or accelerateUrl on the
+// PrismaClient constructor — there is no engineType: "library" escape.
+// Construct the pg adapter once at module load using DATABASE_URL.
+function buildPrismaClient(): PrismaClient {
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error('DATABASE_URL is not set; cannot construct PrismaClient.');
+  }
+  const adapter = new PrismaPg({ connectionString });
+  return new PrismaClient({
+    adapter,
+    log: ['query'],
+  });
+}
 
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
-const basePrisma =
-  globalForPrisma.prisma ||
-  new PrismaClient({
-    log: ['query'],
-  });
+const basePrisma = globalForPrisma.prisma || buildPrismaClient();
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = basePrisma;
 
