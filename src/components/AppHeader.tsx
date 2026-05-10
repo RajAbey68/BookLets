@@ -30,15 +30,15 @@ export default function AppHeader({ onMenuClick }: { onMenuClick?: () => void })
   return (
     <header className="app-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <button 
+        <button
           onClick={onMenuClick}
-          className="lg:hidden"
+          className="lg-hidden"
           style={{ background: 'none', border: 'none', color: 'var(--text-primary)', cursor: 'pointer', display: 'flex', alignItems: 'center', padding: '0.5rem' }}
         >
           <IconMenu />
         </button>
 
-        <div style={{ display: 'none', alignItems: 'center', gap: '0.75rem', cursor: 'pointer', padding: '0.5rem 0.75rem', borderRadius: '10px' }} className="lg:flex">
+        <div className="lg-only-flex" style={{ alignItems: 'center', gap: '0.75rem', cursor: 'pointer', padding: '0.5rem 0.75rem', borderRadius: '10px' }}>
           <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #3b82f6, #60a5fa)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: '800' }}>AC</div>
           <div>
             <div style={{ fontSize: '0.875rem', fontWeight: '700' }}>Acme Portfolio</div>
@@ -47,27 +47,22 @@ export default function AppHeader({ onMenuClick }: { onMenuClick?: () => void })
           <IconChevronDown />
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', background: 'var(--surface-color)', padding: '0.5rem 1rem', borderRadius: '10px', gap: '0.75rem', border: '1px solid var(--surface-border)' }} className="hidden sm:flex transition-all w-[40px] focus-within:w-[300px] lg:w-[300px]">
+        <div className="search-shell sm-only-flex" style={{ width: '300px' }}>
           <IconSearch />
-          <input 
-            type="text" 
-            placeholder="Search..." 
-            style={{ background: 'none', border: 'none', color: 'var(--text-primary)', outline: 'none', fontSize: '0.875rem', width: '100%' }}
-            className="hidden lg:block focus:block"
-          />
+          <input type="text" placeholder="Search..." />
         </div>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-        <div style={{ position: 'relative', cursor: 'pointer' }} className="p-2">
+        <div style={{ position: 'relative', cursor: 'pointer', padding: '0.5rem' }}>
           <IconBell />
           <div style={{ position: 'absolute', top: '6px', right: '6px', width: '8px', height: '8px', background: 'var(--danger-color)', borderRadius: '50%', border: '2px solid var(--bg-color)' }} />
         </div>
-        
-        <div style={{ height: '24px', width: '1px', background: 'var(--surface-border)' }} className="hidden sm:block" />
-        
+
+        <div className="sm-only-block" style={{ height: '24px', width: '1px', background: 'var(--surface-border)' }} />
+
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer' }}>
-          <div style={{ textAlign: 'right' }} className="hidden md:block">
+          <div className="md-only-block" style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '0.875rem', fontWeight: '600' }}>John Doe</div>
             <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Admin</div>
           </div>
