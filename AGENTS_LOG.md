@@ -18,48 +18,46 @@ Update it when you start, hand off, or finish.
 
 ## Active work
 
-### Claude (claude/review-booklets-code-YSiGa) — schema/services drift
-- **Started:** 2026-05-09
-- **Goal:** Align Prisma schema with service code so the app actually compiles
-  and seeds. Fix CI grep paths. No UI/CSS/Tailwind changes in this pass.
+### Claude (claude/evidence-log-hashchain) — EvidenceLog hash chain (re-enable P1.5)
+- **Started:** 2026-05-10
+- **Goal:** Make `EvidenceLog` writes real: every `LedgerService.postEntry` /
+  `reverseEntry` records an immutable, sha256-chained evidence row. Re-enable
+  the P1.5 governance gate (`evidenceLog.create` + `sha256` greps in
+  `.github/workflows/p1-governance.yml`).
 - **Touching:**
-  - `prisma/schema.prisma`
-  - `prisma/seed.ts`
-  - `src/lib/prisma.ts`
-  - `src/lib/ledger.service.ts`
-  - `src/lib/revenue.service.ts`
-  - `src/lib/metrics.service.ts`
-  - `src/lib/automation.service.ts`
-  - `src/app/actions/*.ts` (read-mostly; only if a field rename leaks through)
-  - `.github/workflows/p0-blockers.yml`
-  - `.github/workflows/p1-governance.yml`
+  - `src/lib/evidence-log.service.ts` (new)
+  - `src/lib/ledger.service.ts` (add hook into postEntry / reverseEntry)
+  - `src/lib/types.ts` (only if a shared interface needs to move)
+  - `.github/workflows/p1-governance.yml` (re-enable P1.5)
+  - `prisma/seed.ts` (only if a genesis evidence row needs seeding — TBD)
 - **NOT touching (free for other agents):**
-  - `src/components/**` (Tailwind / glass-card / ReceiptUploader SSR fix)
-  - `src/app/globals.css`, `src/app/layout.tsx`, `src/app/page.tsx`
-  - `src/app/bookings/page.tsx`, `src/app/properties/page.tsx`,
-    `src/app/ledger/page.tsx`
-  - `Dockerfile`, `docker-compose.yml`, `cloudbuild.yaml`, `next.config.ts`
-- **Out of scope (followups, anyone can pick up):**
-  - Convert `Float` money columns (`Booking.totalAmount`, `Expense.amount`,
-    `BookingCharge.amount`, `GuestPayout.amount`, `OwnerStatement.totalDue`)
-    to `Decimal(19, 4)` — needs migration + decimal.js plumbing.
-  - Real auth/session and multi-tenant `organizationId` resolution (currently
-    hardcoded as `primary_org`).
-  - Wire `EvidenceLog` writes + sha256 hash chain in `LedgerService`
-    (re-enable P1.5 in `.github/workflows/p1-governance.yml` once landed).
-  - Enforce Segregation of Duties (`makerIdentity !== checkerIdentity`) in
-    `RevenueService` / `LedgerService` once session/auth identity exists
-    (re-enable P1.4 in `.github/workflows/p1-governance.yml` once landed).
-  - Replace hardcoded `organizationId="org_123"` / `propertyId="prop_abc"`
-    in `src/app/page.tsx`.
-  - Install Tailwind (or strip Tailwind classnames from components) and define
-    `.glass-card` and other DESIGN.md primitives.
-  - Fix `ReceiptUploader.tsx` SSR-unsafe `document.createElement` and move
-    `AutomationService` behind a server action.
+  - All UI / components / pages
+  - `src/lib/automation.service.ts`, `src/lib/revenue.service.ts`,
+    `src/lib/hostaway.service.ts` (PR #2 / PR #3 territory)
+  - Any money columns (`Booking.totalAmount`, `Expense.amount`, etc. —
+    PR #4-equivalent Float→Decimal scope, claimed by lead coordinator)
+- **Out of scope for this PR (followups):**
+  - SoD enforcement (`makerIdentity !== checkerIdentity`) — needs auth/session
+    first; will re-enable P1.4 in a separate PR.
+  - Per-tenant serialisation of evidence writes (currently relies on Postgres
+    transaction; concurrent writers could fork the chain — flagged as a
+    known limitation, not blocking).
+
+### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
+- See PR #2 description. Currently `dirty` post-PR-#1-merge; awaiting rebase.
+
+### Other Claude session (claude/improve-process-handling-aaZJP, PR #3) — fetch timeouts + sync failure reporting
+- See PR #3 description. Currently `dirty` post-PR-#1-merge; awaiting rebase.
 
 ## Recently completed
 
-(none)
+- **PR #1 (merged 2026-05-10, `main` @ a39b3e1)** — schema/services drift fix,
+  Node 20 CI bump, ODA roadmap entry, AGENTS_LOG.md lockboard. Aligned
+  Prisma schema with service code (renamed `Account.accountType→type`,
+  `JournalLine.debitCredit→isDebit`, added `FiscalPeriod.isClosed`),
+  added Suspense (9999) + chart-of-accounts codes to seed, moved Prisma
+  7's `datasource.url` to `prisma.config.ts`, repointed CI greps from the
+  non-existent `src/services/` to `src/lib/`.
 
 ## Roadmap (low priority)
 
