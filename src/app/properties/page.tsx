@@ -1,5 +1,8 @@
 import { fetchPortfolioMetrics, PropertyMetric } from '../actions/property.actions';
 
+// Reads from the database; cannot be rendered at build time.
+export const dynamic = 'force-dynamic';
+
 const IconBuilding = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: '16px', height: '16px' }}>
     <rect x="4" y="2" width="16" height="20" rx="2" ry="2" />

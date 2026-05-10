@@ -1,5 +1,8 @@
 import { fetchLedgerEntries } from '@/app/actions/ledger.actions';
 
+// Reads from the database; cannot be rendered at build time.
+export const dynamic = 'force-dynamic';
+
 export default async function LedgerPage() {
   const entries = await fetchLedgerEntries();
 
