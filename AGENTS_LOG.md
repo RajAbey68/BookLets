@@ -16,19 +16,23 @@ stands.
 
 What "lead" means here:
 
-1. **PR sequencing.** The agreed merge order is:
-   1. PR #1 — schema/services drift (in flight).
-   2. PR #2 — UI primitives + ReceiptUploader server action + page wiring
-      (rebases on PR #1 once it lands; CI goes green after the rebase
-      because PR #1 fixes the Node-18 / `src/services` path drift that
-      breaks both workflows on `main`).
-   3. **Float → Decimal money columns** — Opus 4.7 will pick this up
-      immediately after PR #1 lands (it was blocked on PR #1's schema
-      edits).
-   4. **EvidenceLog hash-chain writes + SoD enforcement** — depends on
-      real auth/session (#5).
-   5. **Real auth/session + multi-tenant `organizationId` resolution.**
-   6. **WhatToDo integration** (Baileys / Railway). **Do not re-develop.**
+1. **PR sequencing.** Updated 2026-05-10: PR #1's two substantive commits
+   (`0732ea7` schema/services/seed/CI alignment, `dcae4d9` Node 20 +
+   actions @v4) were cherry-picked into PR #2 by lead pivot to unblock
+   CI. PR #1 now has no remaining unique work and should be closed. The
+   merge order is:
+   1. **PR #2** — combined UI primitives + ReceiptUploader server action
+      + page wiring + schema/services drift + CI bump. CI should now
+      pass: P0 fully, P1 to the extent the substantive code exists on
+      main (P1.4 SoD and P1.5 EvidenceLog remain skipped pending the
+      followups below).
+   2. **Float → Decimal money columns** — Opus 4.7 picks this up next
+      (the `prisma/schema.prisma` and services edits no longer collide
+      with anyone else).
+   3. **EvidenceLog hash-chain writes + SoD enforcement** — depends on
+      real auth/session (#4). Re-enables P1.4 / P1.5 once landed.
+   4. **Real auth/session + multi-tenant `organizationId` resolution.**
+   5. **WhatToDo integration** (Baileys / Railway). **Do not re-develop.**
 
 2. **Scope claims.** Before starting a new branch, add an "Active work"
    block in the existing format and check that no other agent's
@@ -64,51 +68,31 @@ be observable and version-controlled, not implicit.
 
 ## Active work
 
-### Claude (claude/review-booklets-code-YSiGa) — schema/services drift
-- **Started:** 2026-05-09
-- **Goal:** Align Prisma schema with service code so the app actually compiles
-  and seeds. Fix CI grep paths. No UI/CSS/Tailwind changes in this pass.
+### Claude Opus 4.7 (claude/ui-and-page-wiring) — combined PR #2
+- **Started:** 2026-05-10 (UI work) / **expanded:** 2026-05-10 (lead pivot
+  pulled in schema/services drift + CI bump)
+- **Goal:** Land a single coherent PR covering UI primitives,
+  ReceiptUploader SSR fix + server action, page wiring, schema/services
+  drift alignment, and CI Node-20 bump — the full "must-fix" pre-#3
+  baseline.
 - **Touching:**
-  - `prisma/schema.prisma`
-  - `prisma/seed.ts`
-  - `src/lib/prisma.ts`
-  - `src/lib/ledger.service.ts`
-  - `src/lib/revenue.service.ts`
-  - `src/lib/metrics.service.ts`
-  - `src/lib/automation.service.ts`
-  - `src/app/actions/*.ts` (read-mostly; only if a field rename leaks through)
-  - `.github/workflows/p0-blockers.yml`
-  - `.github/workflows/p1-governance.yml`
-- **NOT touching (free for other agents):**
-  - `src/components/**` (Tailwind / glass-card / ReceiptUploader SSR fix)
-  - `src/app/globals.css`, `src/app/layout.tsx`, `src/app/page.tsx`
-  - `src/app/bookings/page.tsx`, `src/app/properties/page.tsx`,
-    `src/app/ledger/page.tsx`
-  - `Dockerfile`, `docker-compose.yml`, `cloudbuild.yaml`, `next.config.ts`
-
-### Claude (claude/ui-and-page-wiring) — UI primitives, SSR fix, page wiring
-- **Started:** 2026-05-10
-- **Goal:** Pick up three followups left behind by the schema PR: strip
-  Tailwind classnames and define design-system primitives in `globals.css`;
-  fix `ReceiptUploader` SSR-unsafe `document.createElement` and move
-  `AutomationService` behind a new server action; resolve hardcoded
-  `org_123` / `prop_abc` in `page.tsx` via a DB lookup against the seeded
-  `primary_org`. One PR, three commits.
-- **Touching:**
-  - `src/app/globals.css`
-  - `src/app/page.tsx`
-  - `src/components/ReceiptUploader.tsx`
-  - `src/components/AppShell.tsx`
-  - `src/components/AppHeader.tsx`
-  - `src/app/actions/receipt.actions.ts` (new file — no overlap with the
-    existing `*.actions.ts` files the schema PR may touch)
+  - `src/app/globals.css`, `src/app/page.tsx`
+  - `src/components/ReceiptUploader.tsx`, `src/components/AppShell.tsx`,
+    `src/components/AppHeader.tsx`
+  - `src/app/actions/receipt.actions.ts`,
+    `src/app/actions/context.actions.ts` (new files)
+  - `prisma/schema.prisma`, `prisma/seed.ts`
+  - `src/lib/automation.service.ts`, `src/lib/ledger.service.ts`,
+    `src/lib/revenue.service.ts`
+  - `scripts/seed-ledger.ts`, `scripts/test-hostaway-sync.ts`
+  - `.github/workflows/p0-blockers.yml`, `.github/workflows/p1-governance.yml`
   - `AGENTS_LOG.md` (this file)
 - **NOT touching:**
-  - Anything in the schema PR's "Touching" list above. If a field rename
-    in PR #1 leaks into `page.tsx` after PR #1 merges, that's a rebase
-    fix, out of scope here.
-  - `src/lib/automation.service.ts` interface stays as-is; the new server
-    action just wraps it.
+  - `src/lib/metrics.service.ts`, `src/lib/hostaway.service.ts`,
+    `src/lib/prisma.ts` (untouched; will revisit only if Float→Decimal
+    requires it).
+  - `Dockerfile`, `docker-compose.yml`, `cloudbuild.yaml`,
+    `next.config.ts`.
 
 ## Out of scope (followups, anyone can pick up)
 
@@ -134,7 +118,11 @@ be observable and version-controlled, not implicit.
 
 ## Recently completed
 
-(none)
+### Claude (claude/review-booklets-code-YSiGa) — schema/services drift
+- **Status:** Absorbed into PR #2 by lead pivot 2026-05-10. Both
+  substantive commits (`0732ea7`, `dcae4d9`) cherry-picked with
+  authorship preserved (`-x` reference). PR #1 should be closed; the
+  branch can be deleted after PR #2 merges.
 
 ## Conventions for log entries
 
