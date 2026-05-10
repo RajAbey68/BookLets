@@ -1,9 +1,10 @@
 import { Decimal } from 'decimal.js';
 import { prisma } from './prisma';
-import { 
-  JournalEntryInput, 
-  JournalStatus, 
-  LedgerValidationResult 
+import { EvidenceLogService } from './evidence-log.service';
+import {
+  JournalEntryInput,
+  JournalStatus,
+  LedgerValidationResult,
 } from './types';
 
 export class LedgerService {
@@ -91,7 +92,7 @@ export class LedgerService {
     // 2. Fiscal Period Check (Strict for all)
     await this.checkFiscalPeriod(organizationId, date);
 
-    // 3. Atomic Transaction
+    // 3. Atomic Transaction — entry + evidence row succeed or fail together.
     return await prisma.$transaction(async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
@@ -113,6 +114,26 @@ export class LedgerService {
         include: {
           lines: true,
         }
+      });
+
+      await EvidenceLogService.record(tx, {
+        eventType: 'JOURNAL_POSTED',
+        tenantId: tenantId ?? organizationId,
+        makerIdentity: makerIdentity ?? 'system',
+        description: `Journal entry posted${memo ? `: ${memo}` : ''}`,
+        payload: {
+          entryId: entry.id,
+          organizationId,
+          date: date.toISOString(),
+          status,
+          memo,
+          agentConfidence,
+          lines: entry.lines.map((l) => ({
+            accountId: l.accountId,
+            amount: l.amount.toString(),
+            isDebit: l.isDebit,
+          })),
+        },
       });
 
       return entry;
@@ -168,6 +189,18 @@ export class LedgerService {
       await tx.journalEntry.update({
         where: { id: entryId },
         data: { status: 'VOIDED', memo: (originalEntry.memo || '') + ` | Reversed by ${reversal.id}` }
+      });
+
+      await EvidenceLogService.record(tx, {
+        eventType: 'JOURNAL_REVERSED',
+        tenantId: originalEntry.organizationId,
+        makerIdentity: originalEntry.makerIdentity ?? 'system',
+        description: `Reversed entry ${entryId}: ${reason}`,
+        payload: {
+          reversalId: reversal.id,
+          originalEntryId: entryId,
+          reason,
+        },
       });
 
       return reversal;

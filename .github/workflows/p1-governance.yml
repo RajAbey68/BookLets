@@ -36,10 +36,17 @@ jobs:
           grep -q 'balance.isZero()' src/lib/ledger.service.ts || (echo "FAIL: Balance check missing" && exit 1)
           echo "PASS: Trial balance validation enforced"
 
-      # P1.4 (Segregation of Duties: makerIdentity !== checkerIdentity) and
-      # P1.5 (EvidenceLog hash chain) are tracked as out-of-scope followups
-      # in AGENTS_LOG.md. They will be re-enabled once a separate PR wires
-      # session-based identity and evidence hashing.
+      # P1.4 (Segregation of Duties: makerIdentity !== checkerIdentity) is
+      # tracked as an out-of-scope followup in AGENTS_LOG.md and stays
+      # disabled until a separate PR wires session-based identity.
+
+      - name: "✅ P1.5: Immutable audit trail (EvidenceLog hash chain)"
+        run: |
+          test -f src/lib/evidence-log.service.ts || (echo "FAIL: EvidenceLogService file missing" && exit 1)
+          grep -q 'evidenceLog.create' src/lib/evidence-log.service.ts || (echo "FAIL: EvidenceLog write missing" && exit 1)
+          grep -q "createHash('sha256')" src/lib/evidence-log.service.ts || (echo "FAIL: sha256 hash generation missing" && exit 1)
+          grep -q 'EvidenceLogService.record' src/lib/ledger.service.ts || (echo "FAIL: LedgerService does not record evidence" && exit 1)
+          echo "PASS: Immutable audit trail wired"
 
   summary:
     runs-on: ubuntu-latest
