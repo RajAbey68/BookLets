@@ -17,13 +17,23 @@ export class AutomationService {
    * Processes a receipt by sending it to SymbiOS for vision extraction and then recording it in the ledger.
    */
   static async processReceipt(
-    organizationId: string, 
-    propertyId: string, 
+    organizationId: string,
+    propertyId: string,
     imageBase64: string,
     metadata: { source: 'WEB' | 'MOBILE' } = { source: 'WEB' }
   ): Promise<AutomationResult> {
     console.log(`[Middleware Agent] Processing receipt from ${metadata.source} for Org: ${organizationId}`);
-    
+
+    // Pre-flight: surface bad context up-front instead of failing partway
+    // through with a foreign-key error inside the ledger transaction.
+    const property = await prisma.property.findFirst({
+      where: { id: propertyId, organizationId },
+      select: { id: true },
+    });
+    if (!property) {
+      throw new Error(`Receipt context invalid: property ${propertyId} not found for organization ${organizationId}.`);
+    }
+
     // 1. Vision Extraction via SymbiOS
     // NOTE: confidence is unknown at extraction time; send a sentinel of 1.0
     // and the real confidence returned by SymbiOS is used for all downstream calls.
@@ -39,7 +49,9 @@ export class AutomationService {
     });
 
     if (!response.ok) {
-      throw new Error(`SymbiOS Extraction Failed: ${response.statusText}`);
+      const body = await response.text().catch(() => '');
+      const detail = body ? ` - ${body.slice(0, 500)}` : '';
+      throw new Error(`SymbiOS Extraction Failed: ${response.status} ${response.statusText}${detail}`);
     }
 
     const { extraction } = await response.json();
