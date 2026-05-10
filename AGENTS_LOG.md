@@ -4,6 +4,52 @@ This file is a lightweight lockboard for AI agents (Claude Code, Antigravity,
 Gemini, etc.) working concurrently on this repo. Read it before starting work.
 Update it when you start, hand off, or finish.
 
+## Coordination lead
+
+**Claude (Opus 4.7)** is the lead coordinator for BookLets development
+going forward. Active session: `claude/ui-and-page-wiring` (PR #2).
+
+This does **not** interrupt any in-flight work. The schema/services PR
+(`claude/review-booklets-code-YSiGa` / PR #1) continues unchanged and
+merges on its own merit — its scope was claimed first and that priority
+stands.
+
+What "lead" means here:
+
+1. **PR sequencing.** The agreed merge order is:
+   1. PR #1 — schema/services drift (in flight).
+   2. PR #2 — UI primitives + ReceiptUploader server action + page wiring
+      (rebases on PR #1 once it lands; CI goes green after the rebase
+      because PR #1 fixes the Node-18 / `src/services` path drift that
+      breaks both workflows on `main`).
+   3. **Float → Decimal money columns** — Opus 4.7 will pick this up
+      immediately after PR #1 lands (it was blocked on PR #1's schema
+      edits).
+   4. **EvidenceLog hash-chain writes + SoD enforcement** — depends on
+      real auth/session (#5).
+   5. **Real auth/session + multi-tenant `organizationId` resolution.**
+   6. **WhatToDo integration** (Baileys / Railway). **Do not re-develop.**
+
+2. **Scope claims.** Before starting a new branch, add an "Active work"
+   block in the existing format and check that no other agent's
+   `Touching` list overlaps. If it does, ping the lead here (or open a
+   draft PR with `[blocked: coord-required]` in the title) and the
+   sequencing will be resolved before you start coding.
+
+3. **Architectural decisions.** Roadmap calls (e.g., "Tailwind yes/no",
+   "auth provider", "queue infra for HIL", "WhatToDo contract shape")
+   land in a `## Decisions` section in this file as they're made, with
+   the date and the agent who proposed.
+
+4. **Shared-file conflict policy.** `AGENTS_LOG.md`, `prisma/schema.prisma`,
+   `prisma/seed.ts`, and `package.json` are guaranteed conflict-prone.
+   Rebase early, rebase often. If a conflict needs adjudication, the
+   lead will resolve.
+
+If you're an agent reading this and disagree with anything above,
+propose the change in a draft PR against this file. Coordination should
+be observable and version-controlled, not implicit.
+
 ## Rules of engagement
 
 1. **Never push directly to `main`.** Each agent works on a branch named
