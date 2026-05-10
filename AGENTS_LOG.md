@@ -16,23 +16,24 @@ stands.
 
 What "lead" means here:
 
-1. **PR sequencing.** Updated 2026-05-10: PR #1's two substantive commits
-   (`0732ea7` schema/services/seed/CI alignment, `dcae4d9` Node 20 +
-   actions @v4) were cherry-picked into PR #2 by lead pivot to unblock
-   CI. PR #1 now has no remaining unique work and should be closed. The
-   merge order is:
-   1. **PR #2** — combined UI primitives + ReceiptUploader server action
-      + page wiring + schema/services drift + CI bump. CI should now
-      pass: P0 fully, P1 to the extent the substantive code exists on
-      main (P1.4 SoD and P1.5 EvidenceLog remain skipped pending the
-      followups below).
-   2. **Float → Decimal money columns** — Opus 4.7 picks this up next
-      (the `prisma/schema.prisma` and services edits no longer collide
-      with anyone else).
-   3. **EvidenceLog hash-chain writes + SoD enforcement** — depends on
-      real auth/session (#4). Re-enables P1.4 / P1.5 once landed.
-   4. **Real auth/session + multi-tenant `organizationId` resolution.**
-   5. **WhatToDo integration** (Baileys / Railway). **Do not re-develop.**
+1. **PR sequencing.** Updated 2026-05-10 (post-PR-#3 discovery). The
+   merge order is now:
+   1. **PR #2** (`claude/ui-and-page-wiring`) — combined UI primitives
+      + ReceiptUploader server action + page wiring + schema/services
+      drift + CI bump. Awaiting CI verdict.
+   2. **PR #3** (`claude/improve-process-handling-aaZJP`) — fetch
+      timeouts + per-record failure reporting in the Hostaway/SymbiOS
+      sync path. Started from `main` (pre-PR-#2 base); needs to rebase
+      onto PR #2's tip because it touches three service files
+      (`automation`, `hostaway`, `revenue`) that PR #2 already renamed
+      fields in. Net-additive otherwise — no schema changes.
+   3. **Float → Decimal money columns** — Opus 4.7 picks this up after
+      PR #3 lands. Now blocked on PR #3 (same three service files) in
+      addition to the original PR #2 dependency.
+   4. **EvidenceLog hash-chain writes + SoD enforcement** — depends on
+      real auth/session (#5). Re-enables P1.4 / P1.5 once landed.
+   5. **Real auth/session + multi-tenant `organizationId` resolution.**
+   6. **WhatToDo integration** (Baileys / Railway). **Do not re-develop.**
 
 2. **Scope claims.** Before starting a new branch, add an "Active work"
    block in the existing format and check that no other agent's
@@ -67,6 +68,25 @@ be observable and version-controlled, not implicit.
    Remove your block when the PR merges.
 
 ## Active work
+
+### Claude (claude/improve-process-handling-aaZJP) — process-handling improvements (PR #3)
+- **Started:** 2026-05-10 (other station, before lead lockboard updates
+  were visible — block recorded retroactively by lead)
+- **Goal:** Add fetch timeouts (`AbortSignal`) for Hostaway + SymbiOS
+  external calls and convert silent per-record sync failures into a
+  typed `ManualSyncResult` / `SyncReport` with `partial` semantics.
+  Net-additive; no schema, UI, or governance changes.
+- **Touching:**
+  - `src/lib/http.ts` (new — `fetchWithTimeout`, `FetchTimeoutError`)
+  - `src/lib/hostaway.service.ts`
+  - `src/lib/automation.service.ts`
+  - `src/lib/revenue.service.ts`
+  - `src/app/actions/sync.actions.ts`
+- **Sequencing note (lead):** branch is based on `main` pre-PR-#2.
+  Three of the four touched `src/lib/*.ts` files were renamed/edited in
+  PR #2's cherry-picked schema alignment. PR #3 should rebase onto PR
+  #2's tip (`origin/claude/ui-and-page-wiring`) before final review;
+  conflicts are mechanical (field renames, no semantic overlap).
 
 ### Claude Opus 4.7 (claude/ui-and-page-wiring) — combined PR #2
 - **Started:** 2026-05-10 (UI work) / **expanded:** 2026-05-10 (lead pivot
