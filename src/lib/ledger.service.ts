@@ -106,7 +106,7 @@ export class LedgerService {
           lines: {
             create: lines.map(line => ({
               accountId: line.accountId,
-              amount: new Decimal(line.amount.toString()).toNumber(),
+              amount: new Decimal(line.amount.toString()), // keep as Decimal — do NOT call .toNumber() (loses precision)
               isDebit: line.isDebit,
             }))
           }
@@ -176,7 +176,7 @@ export class LedgerService {
           lines: {
             create: reversedLines.map(line => ({
               accountId: line.accountId,
-              amount: line.amount.toNumber(),
+              amount: line.amount, // Decimal — do NOT call .toNumber() (loses precision)
               isDebit: line.isDebit,
             }))
           }
