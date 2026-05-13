@@ -1,32 +1,23 @@
 # Deploying BookLets
 
-This runbook covers a first-time deployment to **Google Cloud Run + Cloud SQL** (the
-target the existing `cloudbuild.yaml` is wired for) and the day-1 setup steps to get
-the app actually usable.
+BookLets supports multiple deployment shapes. For a small accounting team
+(operator + bookkeeper + a few accountants) the recommended target is
+**Vercel + Neon + Google OAuth via Auth.js**. The original `cloudbuild.yaml`
+that targets GCP Cloud Run is retained as an alternative.
 
-> **Status of the codebase as of `bbcf03b`:** `tsc --noEmit` clean, `npm run build`
-> passes, no auth/session yet (uses the seeded `primary_org`). PR #2 (UI primitives)
-> and PR #5 (Float → Decimal money columns) are still open and worth merging
-> before public use, but neither blocks deployment.
->
-> **End-to-end verified locally** against a native Postgres 16 cluster:
-> `prisma db push` → `npm run db:seed` → `npm run build` → `npm start` →
-> `/`, `/properties`, `/ledger` render with empty states → `RevenueService.syncAndProcess`
-> against mock reservations produces balanced journal entries (2 bookings, 3 journal
-> entries, 6 lines, 0 failures).
+> **Status of the codebase:** `tsc --noEmit` clean, `npm run build` passes,
+> end-to-end sync verified against a real Postgres. Real auth/session is
+> **not yet implemented** — every request currently resolves to the seeded
+> `primary_org` via `prisma.organization.findFirst()`. Don't expose the app
+> to multiple humans until the auth PR lands.
 
-## Two paths
+## Local development
 
-There are two supported ways to run BookLets:
-
-### Path A: Local quickstart (single user, no cloud)
-
-For "I just want to use it on my machine" — no Cloud SQL, no Supabase, no
-Secret Manager. Everything runs on your laptop. Backups are your responsibility
-(`pg_dump` on a cron, or copy the Docker volume).
+Useful for any developer working on BookLets, regardless of which production
+target you pick.
 
 ```bash
-# 1. Start Postgres in the background (uses docker-compose.yml in this repo).
+# 1. Start Postgres in the background.
 docker compose up -d postgres
 
 # 2. Install deps.
@@ -34,124 +25,161 @@ npm ci
 
 # 3. Push the schema and seed the chart of accounts.
 export DATABASE_URL='postgresql://booklets:booklets_dev_2024@localhost:5432/booklets'
-npx prisma db push      # use `npm run db:migrate` once PR #5 lands the first migration
+npx prisma db push        # use `npm run db:migrate` once PR #5 lands the first migration
 npm run db:seed
 
-# 4. Build and run.
-npm run build
-npm start               # http://localhost:3000
-# or for hot reload: npm run dev
+# 4. Run.
+npm run dev               # http://localhost:3000 with hot reload
+# or
+npm run build && npm start
 ```
 
-That's it. The "Verify the sync produced ledger entries" section below works
-the same way against this Postgres.
-
-### Path B: Cloud Run + Cloud SQL (production-grade)
-
-For when you want a real https URL, multi-device access, managed backups, and
-proper secret handling. Continue from "What you need before you start" below.
+The "Verify the sync produced ledger entries" SQL at the bottom of this file
+works the same way against your local Postgres.
 
 ---
 
-## What you need before you start (Path B only)
+## Production target: Vercel + Neon + Google OAuth
+
+This is the recommended path for a small remote team.
+
+### What you need
+
+| | |
+|---|---|
+| Vercel account | Hobby tier is enough for a 3–5 user team |
+| Neon account | Free tier: 0.5 GB Postgres + 7-day branches for cheap point-in-time recovery |
+| Google Cloud project | Only to host the OAuth Client ID (no GCP compute) |
+| Hostaway credentials | `client_id`, `client_secret`, `account_id` |
+| `GEMINI_API_KEY` | for the AI receipt extraction (whatever provider SymbiOS routes through) |
+
+### Step 1. Neon — provision Postgres
+
+1. Create a Neon project. Pick the region closest to your team.
+2. Copy the **pooled** connection string. It looks like
+   `postgresql://USER:PASSWORD@ep-xxxxx-pooler.region.aws.neon.tech/booklets?sslmode=require`.
+3. From a local shell (or the Neon SQL editor), apply the schema:
+   ```bash
+   DATABASE_URL='<pooled-conn-string>' npx prisma db push
+   DATABASE_URL='<pooled-conn-string>' npm run db:seed
+   ```
+   (Switch to `npm run db:migrate` once the first migration lands in `prisma/migrations/`.)
+
+### Step 2. Google — create the OAuth client
+
+1. In Google Cloud Console → APIs & Services → Credentials, create an
+   **OAuth 2.0 Client ID** of type *Web application*.
+2. Authorised redirect URIs:
+   - `https://<your-vercel-domain>/api/auth/callback/google`
+   - `http://localhost:3000/api/auth/callback/google` (for local testing)
+3. Note the Client ID and Client Secret.
+4. Configure the OAuth consent screen — *Internal* if you have Workspace
+   (restricts to your domain), otherwise *External* with the team's Gmail
+   addresses added as test users until you publish.
+
+### Step 3. Vercel — connect the repo
+
+1. Vercel → New Project → import the `RajAbey68/BookLets` repo. Auto-detects
+   Next.js. Use the default build command (`next build`).
+2. Set Environment Variables (Project Settings → Environment Variables):
+
+   | Name | Value |
+   |---|---|
+   | `DATABASE_URL` | Neon pooled connection string |
+   | `AUTH_SECRET` | a random 32-byte string: `openssl rand -base64 32` |
+   | `AUTH_GOOGLE_ID` | the Google OAuth Client ID |
+   | `AUTH_GOOGLE_SECRET` | the Google OAuth Client Secret |
+   | `HOSTAWAY_CLIENT_ID` | Hostaway |
+   | `HOSTAWAY_CLIENT_SECRET` | Hostaway |
+   | `HOSTAWAY_ACCOUNT_ID` | Hostaway |
+   | `GEMINI_API_KEY` | SymbiOS / Gemini |
+   | `STRICT_HOSTAWAY` | `true` for production |
+
+3. Deploy. Vercel will run `npm ci` and `next build`.
+
+### Step 4. Invite team members
+
+Once the auth PR lands:
+
+1. Each user signs in once via Google. Their first sign-in creates a `User`
+   row.
+2. The operator (you) attaches users to the `primary_org` via the membership
+   admin UI (also pending the auth PR).
+3. Until the membership UI exists, attach users directly in the DB:
+   ```sql
+   INSERT INTO "Membership" ("userId", "organizationId", "role")
+   VALUES ('<user-id>', 'primary_org', 'BOOKKEEPER');
+   ```
+
+### Step 5. Smoke-test the deployment
+
+1. Open the Vercel URL.
+2. You'll be redirected to Google sign-in.
+3. After consent, the dashboard loads. `/properties` and `/ledger` show
+   empty states. `/bookings` is a static placeholder.
+4. Hit **Sync Hostaway** in the sidebar. With valid Hostaway credentials,
+   this fetches reservations and posts the deferred-revenue + recognition
+   entries. With no credentials and `STRICT_HOSTAWAY` unset, it falls back
+   to two mock reservations.
+
+### Backups on Neon
+
+- Neon free tier: create a branch from any point in the last 7 days; promote
+  it as the new primary if you ever need to roll back. Branch operation is
+  near-instant and free.
+- Neon Launch ($19/mo): adds automatic point-in-time recovery up to 30 days.
+
+Releases via `git push` trigger a Vercel deploy. **Vercel deploys never touch
+Neon** — your database is preserved across releases by definition.
+
+---
+
+## Alternative: Cloud Run + Cloud SQL
+
+The repo also ships `cloudbuild.yaml` for a GCP deployment. Pick this if you
+already have a GCP estate or want Identity-Aware Proxy for authentication
+instead of Auth.js.
+
+### What you need
 
 | | |
 |---|---|
 | GCP project | with Cloud Run, Cloud Build, Cloud SQL (Postgres 16+), Artifact Registry, Secret Manager, and Serverless VPC Access enabled |
 | Region | `europe-west1` (set in `cloudbuild.yaml`; change there if different) |
-| Cloud SQL instance | Postgres 16, with a database called `booklets` and a user with full DDL rights on it |
-| VPC connector | named `booklets-connector` in `europe-west1` (referenced in `cloudbuild.yaml`); the connector must reach the Cloud SQL instance |
-| Hostaway sandbox or live | `client_id`, `client_secret`, `account_id` |
-| `GEMINI_API_KEY` | for the AI receipt extraction (or whatever provider you're routing through SymbiOS) |
+| Cloud SQL instance | Postgres 16, with a database called `booklets` and a user with DDL rights |
+| VPC connector | named `booklets-connector` in `europe-west1` |
 
-## 1. Put secrets in Secret Manager
-
-`cloudbuild.yaml` references these names:
+### Steps
 
 ```bash
+# 1. Put secrets in Secret Manager.
 gcloud secrets create DATABASE_URL          --replication-policy=automatic
 gcloud secrets create GEMINI_API_KEY        --replication-policy=automatic
 gcloud secrets create HOSTAWAY_CLIENT_ID    --replication-policy=automatic
 gcloud secrets create HOSTAWAY_CLIENT_SECRET --replication-policy=automatic
 gcloud secrets create HOSTAWAY_ACCOUNT_ID   --replication-policy=automatic
-```
 
-Then add a version to each:
-
-```bash
 echo -n 'postgresql://booklets:PASSWORD@/booklets?host=/cloudsql/PROJECT:europe-west1:INSTANCE' \
   | gcloud secrets versions add DATABASE_URL --data-file=-
-echo -n 'sk_live_...' | gcloud secrets versions add GEMINI_API_KEY --data-file=-
-# ...same for the three HOSTAWAY_* secrets
-```
+# ...same for the other secrets
 
-The Cloud Run service account needs `roles/secretmanager.secretAccessor` on each.
-
-## 2. Initialise the database (one-time)
-
-The repo currently has **no migration history** (`prisma/migrations/` does not
-exist; the first migration lands with PR #5). For the very first install, push
-the schema directly:
-
-```bash
-# Locally, with DATABASE_URL pointing at the Cloud SQL instance via the proxy:
+# 2. Apply the schema (via cloud-sql-proxy).
 cloud-sql-proxy PROJECT:europe-west1:INSTANCE &
-DATABASE_URL='postgresql://booklets:PASSWORD@127.0.0.1:5432/booklets' \
-  npx prisma db push
-```
+DATABASE_URL='postgresql://booklets:PASSWORD@127.0.0.1:5432/booklets' npx prisma db push
+DATABASE_URL='postgresql://booklets:PASSWORD@127.0.0.1:5432/booklets' npm run db:seed
 
-After PR #5 merges, switch to `npm run db:migrate` (which runs
-`prisma migrate deploy`) and never go back to `db push` against production.
-
-## 3. Seed the database (one-time)
-
-```bash
-DATABASE_URL='postgresql://booklets:PASSWORD@127.0.0.1:5432/booklets' \
-  npm run db:seed
-```
-
-This creates:
-- Organisation `primary_org` (`Asimov Lettings Portfolio`)
-- The full chart of accounts, including suspense (`9999`) and primary bank (`1000`)
-- A fiscal period for the current year
-- The three booking channels (Airbnb, Booking.com, Direct)
-
-The app will refuse to sync without a chart of accounts, so this step is required.
-
-You can re-run the seed safely; everything is `upsert`.
-
-## 4. Deploy
-
-```bash
+# 3. Deploy.
 gcloud builds submit --config cloudbuild.yaml
 ```
 
-`cloudbuild.yaml` builds the Docker image, pushes it to GCR, and deploys to
-Cloud Run with secrets attached and the VPC connector wired up.
+For multi-user auth on this path, either:
+- gate the Cloud Run URL behind Identity-Aware Proxy with Google accounts, or
+- use Auth.js the same way as the Vercel path (deploy steps are independent
+  of the auth choice).
 
-The Dockerfile uses Node 20 and `npm ci` so builds are deterministic and
-match the engines required by Next 16 + Prisma 7.
+---
 
-## 5. Smoke-test the deployment
-
-After Cloud Run reports the revision live:
-
-1. Open the service URL.
-2. The home page should load (currently no auth — directly resolves the
-   `primary_org`).
-3. `/properties` should render the empty state ("Sync your Hostaway account
-   or add properties manually to see analytics").
-4. `/ledger` should render "No ledger entries found".
-5. `/bookings` is a static placeholder.
-6. Hit the **Sync Hostaway** button in the sidebar. With valid Hostaway
-   credentials, this will fetch reservations and populate the ledger. With
-   no credentials and `STRICT_HOSTAWAY` unset, it falls back to two mock
-   reservations so you can see the flow.
-
-If sync returns `{ success: false, message: 'Organization "..." has no chart of accounts. Run the seed before syncing.' }`,
-you skipped step 3. Run it.
-
-## 6. Verify the sync produced ledger entries
+## Verify the sync produced ledger entries
 
 ```sql
 SELECT je.id, je.memo, je.status, je.date,
@@ -164,29 +192,25 @@ LIMIT 20;
 ```
 
 You should see balanced debit/credit pairs against `Operating Cash` /
-`Guest Pre-payments` (initial booking funds) and, for any reservation
-where `checkOut` is in the past, against `Guest Pre-payments` /
-`Rental Income` (recognition).
+`Guest Pre-payments` (initial booking funds) and, for reservations whose
+`checkOut` is in the past, against `Guest Pre-payments` / `Rental Income`
+(recognition).
 
-## What's not in scope of this runbook
+## Out of scope of this runbook
 
 - **Auth/session.** Currently every request resolves to `primary_org` via
-  `prisma.organization.findFirst()`. Don't expose this to multiple tenants
-  yet. Tracked in `AGENTS_LOG.md` "Out of scope".
-- **EvidenceLog hash-chain writes.** Service exists (PR #4) but is not yet
-  wired into `LedgerService`. Tracked.
+  `prisma.organization.findFirst()`. The Vercel section above describes
+  the configuration that the auth PR will require; **the deployment
+  is not multi-user-safe until that PR lands.**
 - **SoD (maker ≠ checker).** Blocked on auth/session.
-- **Visual polish.** Pending PR #2.
 - **Decimal precision on every money column.** Pending PR #5.
 
 ## Operational notes
 
-- **Token timeouts:** `EXTERNAL_FETCH_TIMEOUT_MS` (default 30000) controls
-  the timeout on Hostaway and SymbiOS calls.
-- **Strict mode:** set `STRICT_HOSTAWAY=true` to fail loudly when credentials
-  are missing instead of falling back to mock data. Recommended for
-  production.
-- **Build cache:** the Dockerfile copies the Prisma schema into the runtime
-  image so `prisma migrate deploy` can be run from the container if you ever
-  need to. The Cloud Run service won't run migrations on its own; that's a
-  manual step.
+- **`EXTERNAL_FETCH_TIMEOUT_MS`** (default `30000`) controls the timeout on
+  Hostaway and SymbiOS calls.
+- **`STRICT_HOSTAWAY=true`** fails loudly when Hostaway credentials are
+  missing instead of falling back to mock data. Recommended for production.
+- **`prisma migrate deploy`** is a manual step — no platform runs it
+  automatically. Wire it into a Vercel post-deploy hook or a Cloud Build
+  step once you have migration history.
