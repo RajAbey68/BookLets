@@ -5,12 +5,21 @@ import { Decimal } from 'decimal.js';
 // Prisma 7 requires either a driver adapter or accelerateUrl on the
 // PrismaClient constructor — there is no engineType: "library" escape.
 // Construct the pg adapter once at module load using DATABASE_URL.
+//
+// All BookLets tables live in the `booklets` Postgres schema (shared
+// Supabase project, schema-level isolation from sibling apps). We set
+// the connection's search_path via the `-c` startup option so Prisma's
+// generated SQL — which references tables unqualified ("Organization"
+// rather than booklets."Organization") — resolves into the right schema.
 function buildPrismaClient(): PrismaClient {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error('DATABASE_URL is not set; cannot construct PrismaClient.');
   }
-  const adapter = new PrismaPg({ connectionString });
+  const adapter = new PrismaPg({
+    connectionString,
+    options: '-c search_path=booklets,public',
+  });
   return new PrismaClient({
     adapter,
     log: ['query'],
