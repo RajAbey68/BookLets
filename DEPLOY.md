@@ -15,7 +15,45 @@ the app actually usable.
 > against mock reservations produces balanced journal entries (2 bookings, 3 journal
 > entries, 6 lines, 0 failures).
 
-## What you need before you start
+## Two paths
+
+There are two supported ways to run BookLets:
+
+### Path A: Local quickstart (single user, no cloud)
+
+For "I just want to use it on my machine" — no Cloud SQL, no Supabase, no
+Secret Manager. Everything runs on your laptop. Backups are your responsibility
+(`pg_dump` on a cron, or copy the Docker volume).
+
+```bash
+# 1. Start Postgres in the background (uses docker-compose.yml in this repo).
+docker compose up -d postgres
+
+# 2. Install deps.
+npm ci
+
+# 3. Push the schema and seed the chart of accounts.
+export DATABASE_URL='postgresql://booklets:booklets_dev_2024@localhost:5432/booklets'
+npx prisma db push      # use `npm run db:migrate` once PR #5 lands the first migration
+npm run db:seed
+
+# 4. Build and run.
+npm run build
+npm start               # http://localhost:3000
+# or for hot reload: npm run dev
+```
+
+That's it. The "Verify the sync produced ledger entries" section below works
+the same way against this Postgres.
+
+### Path B: Cloud Run + Cloud SQL (production-grade)
+
+For when you want a real https URL, multi-device access, managed backups, and
+proper secret handling. Continue from "What you need before you start" below.
+
+---
+
+## What you need before you start (Path B only)
 
 | | |
 |---|---|
