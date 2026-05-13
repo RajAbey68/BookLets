@@ -25,6 +25,50 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
+- **Started:** 2026-05-13
+- **Goal:** Scaffold Auth.js v5 with Google OAuth so the operator can let
+  accountants and a bookkeeper sign in from remote locations. JWT
+  sessions (no DB persistence of Account/Session tables to avoid
+  collision with BookLets's chart-of-accounts `Account`). Foundation
+  only — service-side refactor to use the session for `makerIdentity`
+  and org resolution follows in a separate PR.
+- **Touching:**
+  - `prisma/schema.prisma` (add `User`, `Membership`; back-ref on `Organization`)
+  - `src/auth.ts` (new — Auth.js v5 config with Google provider)
+  - `src/app/api/auth/[...nextauth]/route.ts` (new — handlers)
+  - `src/app/login/page.tsx` (new — sign-in page)
+  - `middleware.ts` (new — route gate)
+  - `src/app/page.tsx` (add `dynamic = "force-dynamic"`; was failing build because `getDefaultUploadContext` hits the DB at static prerender time)
+  - `package.json`, `package-lock.json` (add `next-auth@beta`, `@auth/prisma-adapter`)
+- **NOT touching:**
+  - `src/lib/*` services — service refactor is the next PR
+  - `src/app/actions/*` — same
+  - schema beyond the two new models + back-ref
+- **Out of scope (followups):**
+  - Replace `prisma.organization.findFirst()` in `sync.actions.ts`,
+    `automation.service.ts`, etc. with session-derived org via
+    `Membership`.
+  - Pass `session.user.id` as `makerIdentity` into
+    `LedgerService.postEntry` and `AutomationService.processReceipt`
+    (currently hardcoded as `'booklets-automation-service'`).
+  - SoD enforcement (`makerIdentity !== checkerIdentity`) once
+    real checker identities exist.
+  - Membership admin UI (currently you attach users via direct SQL).
+
+### Claude — prime process-handling agent (claude/release-readiness, PR #10) — Vercel/Neon deploy infra + seed wiring
+- **Started:** 2026-05-10
+- **Goal:** Seed config in the right Prisma 7 location, pg adapter on
+  the seed client, package.json db scripts, Dockerfile hardening
+  (`npm ci`, schema present at runtime), and a DEPLOY.md runbook that
+  documents the Vercel + Neon + Google OAuth path as the recommended
+  target. End-to-end verified locally against a native Postgres 16
+  cluster (push → seed → build → start → sync produces balanced
+  journal entries).
+- **Touching:** `Dockerfile`, `docker-compose.yml`, `package.json`,
+  `prisma.config.ts`, `prisma/seed.ts`, `DEPLOY.md`.
+- **Status:** Ready for review.
+
 ### Claude — prime process-handling agent (claude/agent-briefing) — operational briefing for BookLets
 - **Started:** 2026-05-10
 - **Goal:** Produce `docs/BRIEFING_FOR_OTHER_SERVICES.md` as the operational

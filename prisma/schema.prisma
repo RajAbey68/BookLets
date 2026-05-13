@@ -20,6 +20,35 @@ model Organization {
   fiscalPeriods  FiscalPeriod[]
   journalEntries JournalEntry[]
   guestPayouts   GuestPayout[]
+  memberships    Membership[]
+}
+
+// Auth.js v5 — minimal user identity. We use the JWT session strategy so
+// the auth.js Account/Session tables are not needed; the BookLets Account
+// model below is the chart-of-accounts entity (intentionally separate).
+model User {
+  id            String       @id @default(cuid())
+  email         String       @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  memberships   Membership[]
+}
+
+// User ↔ Organization with a role. The role is a plain string for now;
+// a Prisma enum can come once the auth surface is stable.
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String       @default("VIEWER") // OWNER | BOOKKEEPER | ACCOUNTANT | VIEWER
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  @@unique([userId, organizationId])
+  @@index([organizationId])
 }
 
 model Property {
