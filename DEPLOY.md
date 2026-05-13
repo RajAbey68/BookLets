@@ -8,6 +8,12 @@ the app actually usable.
 > passes, no auth/session yet (uses the seeded `primary_org`). PR #2 (UI primitives)
 > and PR #5 (Float → Decimal money columns) are still open and worth merging
 > before public use, but neither blocks deployment.
+>
+> **End-to-end verified locally** against a native Postgres 16 cluster:
+> `prisma db push` → `npm run db:seed` → `npm run build` → `npm start` →
+> `/`, `/properties`, `/ledger` render with empty states → `RevenueService.syncAndProcess`
+> against mock reservations produces balanced journal entries (2 bookings, 3 journal
+> entries, 6 lines, 0 failures).
 
 ## What you need before you start
 
