@@ -1,5 +1,13 @@
+import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import authConfig from "@/auth.config";
+
+// Middleware runs in the Edge runtime. Build a NextAuth instance from the
+// Edge-safe config ONLY — importing `@/auth` here would pull in Prisma and
+// crash with "The edge runtime does not support Node.js 'crypto' module".
+// JWT sessions are self-contained, so this instance can still verify the
+// session token without any database access.
+const { auth } = NextAuth(authConfig);
 
 /**
  * Gate every route except /login, /api/auth/*, and Next's own static assets
