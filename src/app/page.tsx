@@ -8,14 +8,16 @@ const IconTrendingUp = () => (
 import { ReceiptUploader } from '../components/ReceiptUploader';
 import { getDashboardMetrics } from './actions/portfolio.actions';
 import { getDefaultUploadContext } from './actions/context.actions';
+import { fetchPortfolioMetrics } from './actions/property.actions';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const [metricsResult, uploadContext] = await Promise.all([
+  const [metricsResult, uploadContext, properties] = await Promise.all([
     getDashboardMetrics(),
     getDefaultUploadContext(),
+    fetchPortfolioMetrics(),
   ]);
   const metrics = (metricsResult.success && metricsResult.data) ? metricsResult.data : {
     totalRevenue: 0,
@@ -120,45 +122,37 @@ export default async function Home() {
             </div>
           </div>
           
-          <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', padding: '1rem 0', height: '200px', gap: '1.5rem' }}>
-            {[
-              { month: 'Jul', gross: 65, net: 25 },
-              { month: 'Aug', gross: 85, net: 40 },
-              { month: 'Sep', gross: 70, net: 30 },
-              { month: 'Oct', gross: 95, net: 45 },
-              { month: 'Nov', gross: 80, net: 35 },
-              { month: 'Dec', gross: 100, net: 50 },
-            ].map((data, i) => (
-              <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.75rem' }}>
-                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', position: 'relative', gap: '4px' }}>
-                  <div style={{ width: '12px', height: `${data.gross}%`, background: 'linear-gradient(to top, var(--accent-color), var(--accent-hover))', borderRadius: '4px 4px 0 0', transition: 'height 1s ease-out' }} />
-                  <div style={{ width: '12px', height: `${data.net}%`, background: 'rgba(59, 130, 246, 0.2)', borderRadius: '4px 4px 0 0', transition: 'height 1s ease-out' }} />
-                </div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: '600' }}>{data.month}</div>
-              </div>
-            ))}
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem 0', minHeight: '200px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+            {/* Monthly revenue time-series aggregation is not yet implemented;
+                show an honest empty state rather than placeholder bars. */}
+            <div>
+              <div style={{ fontSize: '0.9375rem', marginBottom: '0.25rem' }}>No revenue trend yet</div>
+              <div style={{ fontSize: '0.8125rem' }}>Trends appear once bookings are recorded and recognised.</div>
+            </div>
           </div>
         </div>
 
         <div className="glass-card">
           <h2 style={{ marginBottom: '1.5rem' }}>Property Yield</h2>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-            {[
-              { name: 'Villa Oceanview', yield: '€8,400', margin: '42%' },
-              { name: 'City Loft 4', yield: '€4,200', margin: '38%' },
-              { name: 'Mountain Cabin', yield: '€3,150', margin: '31%' },
-              { name: 'The Penthouse', yield: '€12,900', margin: '45%' },
-            ].map((prop, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem', borderRadius: '10px', background: 'rgba(255,255,255,0.02)' }}>
-                <div>
-                  <div style={{ fontSize: '0.9375rem', fontWeight: '600' }}>{prop.name}</div>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Margin: {prop.margin}</div>
+          {properties.length === 0 ? (
+            <div style={{ padding: '2rem 0.75rem', textAlign: 'center', color: 'var(--text-secondary)' }}>
+              <div style={{ fontSize: '0.9375rem', marginBottom: '0.25rem' }}>No properties yet</div>
+              <div style={{ fontSize: '0.8125rem' }}>Sync Hostaway or add a property to see per-asset yield.</div>
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              {properties.map((prop) => (
+                <div key={prop.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.75rem', borderRadius: '10px', background: 'rgba(255,255,255,0.02)' }}>
+                  <div>
+                    <div style={{ fontSize: '0.9375rem', fontWeight: '600' }}>{prop.name}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Yield: {prop.yield}</div>
+                  </div>
+                  <div style={{ textAlign: 'right', fontWeight: '700', color: 'var(--accent-color)' }}>{prop.revenue}</div>
                 </div>
-                <div style={{ textAlign: 'right', fontWeight: '700', color: 'var(--accent-color)' }}>{prop.yield}</div>
-              </div>
-            ))}
-          </div>
-          
+              ))}
+            </div>
+          )}
+
           <button style={{ width: '100%', marginTop: '2rem', padding: '0.875rem', borderRadius: '10px', border: '1px dashed var(--surface-border)', background: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: '600', cursor: 'pointer' }}>
             View Full Analysis
           </button>
