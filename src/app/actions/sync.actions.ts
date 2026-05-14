@@ -2,6 +2,7 @@
 
 import { prisma } from '@/lib/prisma';
 import { RevenueService, SyncReport } from '@/lib/revenue.service';
+import { resolveActiveContext } from '@/lib/auth-context';
 import { revalidatePath } from 'next/cache';
 
 export interface ManualSyncResult {
@@ -28,38 +29,35 @@ function describeError(err: unknown): string {
  * a run with any per-record failure is reported as partial so callers can
  * surface the failure count instead of silently treating it as success.
  *
- * Pre-flight failures (no organization, no chart of accounts) return a
- * non-partial failure result instead of letting the run proceed and
- * surface cryptic ledger errors per booking.
+ * Pre-flight failures (not authenticated, no organisation membership, no
+ * chart of accounts) return a non-partial failure result instead of
+ * letting the run proceed and surface cryptic ledger errors per booking.
  */
 export async function triggerManualSync(): Promise<ManualSyncResult> {
-  // For production launch, we fetch the primary organization.
-  // In a multi-tenant setup, this would come from the session context.
-  const organization = await prisma.organization.findFirst();
-
-  if (!organization) {
-    return {
-      success: false,
-      partial: false,
-      message: 'No organization found. Initialize the system via seed or setup before syncing.',
-    };
+  // Resolve the organisation and actor from the signed-in user's
+  // Membership — not an arbitrary findFirst(). The user id becomes the
+  // maker on every ledger entry this sync posts.
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) {
+    return { success: false, partial: false, message: resolved.error };
   }
+  const { organizationId, organizationName, userId } = resolved.context;
 
   // A sync with no chart of accounts cannot post any ledger entries;
   // every booking would fail with a confusing per-record error.
-  const accountCount = await prisma.account.count({ where: { organizationId: organization.id } });
+  const accountCount = await prisma.account.count({ where: { organizationId } });
   if (accountCount === 0) {
     return {
       success: false,
       partial: false,
-      message: `Organization "${organization.name}" has no chart of accounts. Run the seed before syncing.`,
+      message: `Organization "${organizationName}" has no chart of accounts. Run the seed before syncing.`,
     };
   }
 
-  console.log(`[SyncAction] Triggering live sync for organization: ${organization.name} (${organization.id})`);
+  console.log(`[SyncAction] Triggering live sync for organization: ${organizationName} (${organizationId})`);
 
   try {
-    const report = await RevenueService.syncAndProcess(organization.id);
+    const report = await RevenueService.syncAndProcess(organizationId, userId);
 
     // Refresh the UI
     revalidatePath('/properties');

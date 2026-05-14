@@ -2,13 +2,17 @@
 
 import { MetricsService } from '../../lib/metrics.service';
 import { RevenueService } from '../../lib/revenue.service';
+import { resolveActiveContext } from '@/lib/auth-context';
 import { revalidatePath } from 'next/cache';
 
-const DEFAULT_ORG_ID = 'primary_org';
-
 export async function getDashboardMetrics() {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) {
+    return { success: false, error: resolved.error };
+  }
+
   try {
-    const metrics = await MetricsService.getPortfolioMetrics(DEFAULT_ORG_ID);
+    const metrics = await MetricsService.getPortfolioMetrics(resolved.context.organizationId);
     return { success: true, data: metrics };
   } catch (error) {
     console.error('[PortfolioActions] Failed to fetch metrics:', error);
@@ -17,10 +21,16 @@ export async function getDashboardMetrics() {
 }
 
 export async function syncHostawayData() {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) {
+    return { success: false, error: resolved.error };
+  }
+  const { organizationId, userId } = resolved.context;
+
   try {
     console.log('[PortfolioActions] Triggering Hostaway Sync...');
-    await RevenueService.syncAndProcess(DEFAULT_ORG_ID);
-    
+    await RevenueService.syncAndProcess(organizationId, userId);
+
     revalidatePath('/');
     return { success: true, message: 'Sync completed. Ledger updated.' };
   } catch (error) {

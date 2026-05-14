@@ -45,8 +45,8 @@ export class RevenueService {
    * Returns a report describing how many records were processed and which failed.
    * Per-record errors are collected so a single bad booking does not abort the run.
    */
-  static async syncAndProcess(organizationId: string): Promise<SyncReport> {
-    console.log(`[RevenueService] Starting sync for Organization: ${organizationId}`);
+  static async syncAndProcess(organizationId: string, makerIdentity: string): Promise<SyncReport> {
+    console.log(`[RevenueService] Starting sync for Organization: ${organizationId} (maker: ${makerIdentity})`);
 
     const report: SyncReport = {
       reservationsFetched: 0,
@@ -61,7 +61,7 @@ export class RevenueService {
 
     for (const res of reservations) {
       try {
-        await this.processReservationSync(organizationId, res);
+        await this.processReservationSync(organizationId, res, makerIdentity);
         report.bookingsProcessed += 1;
       } catch (err) {
         report.failures.push({
@@ -74,7 +74,7 @@ export class RevenueService {
     }
 
     // 2. Process recognition for all bookings that have checked out
-    await this.recognizeRevenue(organizationId, report);
+    await this.recognizeRevenue(organizationId, makerIdentity, report);
 
     return report;
   }
@@ -82,7 +82,7 @@ export class RevenueService {
   /**
    * Upserts a reservation into the local database.
    */
-  private static async processReservationSync(organizationId: string, res: HostawayReservation) {
+  private static async processReservationSync(organizationId: string, res: HostawayReservation, makerIdentity: string) {
     const property = await HostawayService.findPropertyByHostawayId(res.listingId);
     if (!property) {
       console.warn(`[RevenueService] No property found for Hostaway Listing ID: ${res.listingId}. Skipping.`);
@@ -116,19 +116,19 @@ export class RevenueService {
 
     // 2. If CONFIRMED and deferred not yet posted, record the Initial Liability
     if (booking.status === 'CONFIRMED' && !booking.deferredPosted) {
-      await this.postInitialDeferredEntry(organizationId, booking);
+      await this.postInitialDeferredEntry(organizationId, booking, makerIdentity);
     }
 
     // 3. If CANCELLED and deferred WAS posted, we need to reverse the liability
     if (booking.status === 'CANCELLED' && booking.deferredPosted) {
-      await this.handleBookingCancellation(organizationId, booking);
+      await this.handleBookingCancellation(organizationId, booking, makerIdentity);
     }
   }
 
   /**
    * Reverses the initial pre-payment for cancelled bookings.
    */
-  private static async handleBookingCancellation(organizationId: string, booking: Booking) {
+  private static async handleBookingCancellation(organizationId: string, booking: Booking, makerIdentity: string) {
     console.log(`[RevenueService] Reversing deferred entry for Cancelled Booking ${booking.id}`);
 
     if (!booking.hostawayId) return;
@@ -143,7 +143,7 @@ export class RevenueService {
     });
 
     if (entry) {
-       await LedgerService.reverseEntry(entry.id, "Booking Cancellation");
+       await LedgerService.reverseEntry(entry.id, "Booking Cancellation", makerIdentity);
        await prisma.booking.update({
          where: { id: booking.id },
          data: { deferredPosted: false }
@@ -155,7 +155,7 @@ export class RevenueService {
    * Posts the initial entry when guest payment is received/confirmed.
    * DR Cash (Asset) / CR Guest Pre-payments (Liability)
    */
-  private static async postInitialDeferredEntry(organizationId: string, booking: Booking) {
+  private static async postInitialDeferredEntry(organizationId: string, booking: Booking, makerIdentity: string) {
     const cashAccount = await this.getOrCreateAccount(organizationId, "Operating Cash", "ASSET");
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
 
@@ -167,6 +167,7 @@ export class RevenueService {
       date: new Date(),
       memo,
       status: JournalStatus.POSTED,
+      makerIdentity,
       lines: [
         {
           accountId: cashAccount.id,
@@ -192,7 +193,7 @@ export class RevenueService {
   /**
    * Moves funds from Deferred Revenue to Rental Income for all checked-out guests.
    */
-  static async recognizeRevenue(organizationId: string, report?: SyncReport): Promise<SyncReport> {
+  static async recognizeRevenue(organizationId: string, makerIdentity: string, report?: SyncReport): Promise<SyncReport> {
     const localReport: SyncReport = report ?? {
       reservationsFetched: 0,
       bookingsProcessed: 0,
@@ -219,9 +220,9 @@ export class RevenueService {
     for (const booking of pendingRecognition) {
       try {
         if (booking.status === "CANCELLED") {
-          await this.postCancellationReversal(organizationId, booking);
+          await this.postCancellationReversal(organizationId, booking, makerIdentity);
         } else {
-          await this.postRecognitionEntry(organizationId, booking);
+          await this.postRecognitionEntry(organizationId, booking, makerIdentity);
         }
         localReport.bookingsRecognized += 1;
       } catch (err) {
@@ -240,12 +241,12 @@ export class RevenueService {
   /**
    * Reverses the initial deferred entry if a booking is cancelled.
    */
-  private static async postCancellationReversal(organizationId: string, booking: BookingWithProperty) {
+  private static async postCancellationReversal(organizationId: string, booking: BookingWithProperty, makerIdentity: string) {
     if (!booking.deferredPosted) return;
 
     const cashAccount = await this.getOrCreateAccount(organizationId, "Operating Cash", "ASSET");
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
-    
+
     const memo = `Cancellation Reversal: Refund for Booking #${booking.hostawayId} at ${booking.property.name}`;
 
     await LedgerService.postEntry({
@@ -253,6 +254,7 @@ export class RevenueService {
       date: new Date(),
       memo,
       status: JournalStatus.POSTED,
+      makerIdentity,
       lines: [
         {
           accountId: deferredAccount.id,
@@ -278,7 +280,7 @@ export class RevenueService {
   /**
    * Creates the Double-Entry Journal for Revenue Recognition.
    */
-  private static async postRecognitionEntry(organizationId: string, booking: BookingWithProperty) {
+  private static async postRecognitionEntry(organizationId: string, booking: BookingWithProperty, makerIdentity: string) {
     // 1. Get/Create the mandatory Accounts for this organization
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
     const revenueAccount = await this.getOrCreateAccount(organizationId, "Rental Income", "REVENUE");
@@ -295,6 +297,7 @@ export class RevenueService {
       date: booking.checkOut,
       memo,
       status,
+      makerIdentity,
       lines: [
         {
           accountId: deferredAccount.id,

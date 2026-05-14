@@ -56,7 +56,7 @@ async function testSync() {
   // This will pull 2 mock reservations: 
   // - Res 1: Checked out today (Should be recognized)
   // - Res 2: Active (Should remain in Deferred Revenue)
-  await RevenueService.syncAndProcess(org.id);
+  await RevenueService.syncAndProcess(org.id, 'test-hostaway-sync-script');
 
   // 3. Verify Outcomes
   const confirmed = await prisma.booking.findMany({ where: { propertyId: property.id } });
