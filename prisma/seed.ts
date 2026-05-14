@@ -115,8 +115,12 @@ async function main() {
     { id: 'bk_004', propertyId: 'prop_marina_suite',    channelId: 'channel_direct',      checkIn: new Date(yr, 1, 14),checkOut: new Date(yr, 1, 18), totalAmount: '900.00',  status: 'COMPLETED' },
     { id: 'bk_005', propertyId: 'prop_temple_bar',      channelId: 'channel_bookingcom',  checkIn: new Date(yr, 2, 3), checkOut: new Date(yr, 2, 8),  totalAmount: '1100.00', status: 'COMPLETED' },
     { id: 'bk_006', propertyId: 'prop_coastal_cottage', channelId: 'channel_airbnb',      checkIn: new Date(yr, 2, 20),checkOut: new Date(yr, 2, 25), totalAmount: '1350.00', status: 'COMPLETED' },
-    { id: 'bk_007', propertyId: 'prop_marina_suite',    channelId: 'channel_airbnb',      checkIn: new Date(yr, 3, 5), checkOut: new Date(yr, 3, 9),  totalAmount: '860.00',  status: 'CONFIRMED' },
-    { id: 'bk_008', propertyId: 'prop_temple_bar',      channelId: 'channel_direct',      checkIn: new Date(yr, 3, 12),checkOut: new Date(yr, 3, 16), totalAmount: '740.00',  status: 'CONFIRMED' },
+    { id: 'bk_007', propertyId: 'prop_marina_suite',    channelId: 'channel_airbnb',      checkIn: new Date(yr, 3, 5), checkOut: new Date(yr, 3, 9),  totalAmount: '860.00',  status: 'COMPLETED' },
+    { id: 'bk_008', propertyId: 'prop_temple_bar',      channelId: 'channel_direct',      checkIn: new Date(yr, 3, 12),checkOut: new Date(yr, 3, 16), totalAmount: '740.00',  status: 'COMPLETED' },
+    // Current-month bookings so MTD dashboard metrics are non-zero
+    { id: 'bk_009', propertyId: 'prop_coastal_cottage', channelId: 'channel_airbnb',      checkIn: new Date(yr, 4, 2), checkOut: new Date(yr, 4, 7),  totalAmount: '1420.00', status: 'COMPLETED' },
+    { id: 'bk_010', propertyId: 'prop_marina_suite',    channelId: 'channel_bookingcom',  checkIn: new Date(yr, 4, 9), checkOut: new Date(yr, 4, 13), totalAmount: '1080.00', status: 'COMPLETED' },
+    { id: 'bk_011', propertyId: 'prop_temple_bar',      channelId: 'channel_airbnb',      checkIn: new Date(yr, 4, 16),checkOut: new Date(yr, 4, 20), totalAmount: '920.00',  status: 'CONFIRMED' },
   ];
 
   for (const bk of bookings) {
@@ -198,6 +202,37 @@ async function main() {
       lines: [
         { accountId: accountMap['6000'], amount: '465.00',  isDebit: true },
         { accountId: accountMap['1000'], amount: '465.00',  isDebit: false },
+      ],
+    },
+    // May (current month) — MTD numbers visible on dashboard
+    {
+      id: 'je_008',
+      date: new Date(yr, 4, 7),
+      memo: 'Coastal Cottage — Airbnb May 2–7',
+      status: 'POSTED',
+      lines: [
+        { accountId: accountMap['1000'], amount: '1420.00', isDebit: true },
+        { accountId: accountMap['4000'], amount: '1420.00', isDebit: false },
+      ],
+    },
+    {
+      id: 'je_009',
+      date: new Date(yr, 4, 13),
+      memo: 'Marina Suite — Booking.com May 9–13',
+      status: 'POSTED',
+      lines: [
+        { accountId: accountMap['1000'], amount: '1080.00', isDebit: true },
+        { accountId: accountMap['4000'], amount: '1080.00', isDebit: false },
+      ],
+    },
+    {
+      id: 'je_010',
+      date: new Date(yr, 4, 13),
+      memo: 'May Booking.com commission',
+      status: 'POSTED',
+      lines: [
+        { accountId: accountMap['6000'], amount: '108.00',  isDebit: true },
+        { accountId: accountMap['1000'], amount: '108.00',  isDebit: false },
       ],
     },
   ];
