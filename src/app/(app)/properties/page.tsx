@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 import SyncPropertiesButton from '@/components/SyncPropertiesButton';
 
@@ -105,9 +106,9 @@ export default async function PropertiesPage() {
                   <IconUser />
                   <span>Primary Manager</span>
                 </div>
-                <button style={{ background: 'none', border: 'none', color: 'var(--accent-color)', fontWeight: '600', fontSize: '0.875rem', cursor: 'pointer' }}>
+                <Link href={`/properties/${prop.id}`} style={{ background: 'none', border: 'none', color: 'var(--accent-color)', fontWeight: '600', fontSize: '0.875rem', cursor: 'pointer', textDecoration: 'none' }}>
                   Details →
-                </button>
+                </Link>
               </div>
             </div>
           ))}
