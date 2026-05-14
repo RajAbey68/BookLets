@@ -5,7 +5,6 @@ import { processReceiptAction } from '../app/actions/receipt.actions';
 import type { AutomationResult } from '../lib/automation.service';
 
 interface ReceiptUploaderProps {
-  organizationId: string;
   propertyId: string;
   onSuccess?: (result: AutomationResult) => void;
 }
@@ -31,7 +30,6 @@ const IconAlert = () => (
 );
 
 export const ReceiptUploader: React.FC<ReceiptUploaderProps> = ({
-  organizationId,
   propertyId,
   onSuccess,
 }) => {
@@ -65,7 +63,6 @@ export const ReceiptUploader: React.FC<ReceiptUploaderProps> = ({
 
       setStatus('ANALYZING');
       const response = await processReceiptAction({
-        organizationId,
         propertyId,
         imageBase64,
         source: 'WEB',

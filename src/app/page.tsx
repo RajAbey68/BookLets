@@ -91,10 +91,7 @@ export default async function Home() {
       
       <div style={{ marginBottom: '2.5rem' }}>
         {uploadContext ? (
-          <ReceiptUploader
-            organizationId={uploadContext.organizationId}
-            propertyId={uploadContext.propertyId}
-          />
+          <ReceiptUploader propertyId={uploadContext.propertyId} />
         ) : (
           <div className="glass-card" style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
             <h3 style={{ marginBottom: '0.5rem' }}>Receipt upload unavailable</h3>
