@@ -39,9 +39,13 @@ export default async function LedgerPage() {
               <option>September 2026</option>
             </select>
           </div>
-          <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer' }}>
+          <a
+            href="/api/export/ledger"
+            download
+            style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
             Export CSV
-          </button>
+          </a>
         </div>
       </div>
 

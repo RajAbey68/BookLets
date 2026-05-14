@@ -26,7 +26,37 @@ const IconMenu = () => (
   </svg>
 );
 
-export default function AppHeader({ onMenuClick }: { onMenuClick?: () => void }) {
+interface AppHeaderProps {
+  onMenuClick?: () => void;
+  orgName?: string;
+  userName?: string;
+  userImage?: string;
+  userRole?: string;
+}
+
+function orgInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? '')
+    .join('');
+}
+
+function userInitials(name: string): string {
+  return name
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? '')
+    .join('');
+}
+
+export default function AppHeader({ onMenuClick, orgName, userName, userImage, userRole }: AppHeaderProps) {
+  const displayOrg = orgName ?? 'Portfolio';
+  const displayName = userName ?? 'Account';
+  const displayRole = userRole
+    ? userRole.charAt(0) + userRole.slice(1).toLowerCase()
+    : 'Member';
+
   return (
     <header className="app-header">
       <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -39,9 +69,11 @@ export default function AppHeader({ onMenuClick }: { onMenuClick?: () => void })
         </button>
 
         <div className="lg-only-flex" style={{ alignItems: 'center', gap: '0.75rem', cursor: 'pointer', padding: '0.5rem 0.75rem', borderRadius: '10px' }}>
-          <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #3b82f6, #60a5fa)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: '800' }}>AC</div>
+          <div style={{ width: '32px', height: '32px', borderRadius: '8px', background: 'linear-gradient(135deg, #3b82f6, #60a5fa)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: '800' }}>
+            {orgInitials(displayOrg)}
+          </div>
           <div>
-            <div style={{ fontSize: '0.875rem', fontWeight: '700' }}>Acme Portfolio</div>
+            <div style={{ fontSize: '0.875rem', fontWeight: '700' }}>{displayOrg}</div>
             <div style={{ fontSize: '0.625rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Organization</div>
           </div>
           <IconChevronDown />
@@ -63,10 +95,22 @@ export default function AppHeader({ onMenuClick }: { onMenuClick?: () => void })
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer' }}>
           <div className="md-only-block" style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: '0.875rem', fontWeight: '600' }}>John Doe</div>
-            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Admin</div>
+            <div style={{ fontSize: '0.875rem', fontWeight: '600' }}>{displayName}</div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{displayRole}</div>
           </div>
-          <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: '1px solid rgba(255,255,255,0.1)' }} />
+          {userImage ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={userImage}
+              alt={displayName}
+              referrerPolicy="no-referrer"
+              style={{ width: '36px', height: '36px', borderRadius: '10px', objectFit: 'cover', border: '1px solid rgba(255,255,255,0.1)' }}
+            />
+          ) : (
+            <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)', border: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: '700', color: '#fff' }}>
+              {userInitials(displayName)}
+            </div>
+          )}
         </div>
       </div>
     </header>

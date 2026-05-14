@@ -9,11 +9,11 @@ datasource db {
 }
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String         @id @default(cuid())
+  name           String
+  slug           String         @unique
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
   properties     Property[]
   owners         Owner[]
   accounts       Account[]
@@ -47,38 +47,41 @@ model Membership {
   createdAt      DateTime     @default(now())
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
   @@unique([userId, organizationId])
   @@index([organizationId])
 }
 
 model Property {
-  id             String   @id @default(cuid())
+  id             String              @id @default(cuid())
   organizationId String
   name           String
   address        String
   type           String
   status         String
-  hostawayId     String?  @unique
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  organization   Organization      @relation(fields: [organizationId], references: [id])
+  hostawayId     String?             @unique
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  organization   Organization        @relation(fields: [organizationId], references: [id])
   ownerships     PropertyOwnership[]
   bookings       Booking[]
   expenses       Expense[]
+
   @@index([organizationId])
   @@index([hostawayId])
 }
 
 model Owner {
-  id             String   @id @default(cuid())
-  organizationId String
-  name           String
-  email          String
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-  organization    Organization      @relation(fields: [organizationId], references: [id])
+  id              String              @id @default(cuid())
+  organizationId  String
+  name            String
+  email           String
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  organization    Organization        @relation(fields: [organizationId], references: [id])
   ownerships      PropertyOwnership[]
   ownerStatements OwnerStatement[]
+
   @@index([organizationId])
 }
 
@@ -86,106 +89,112 @@ model PropertyOwnership {
   id           String   @id @default(cuid())
   propertyId   String
   ownerId      String
-  revenueShare Decimal  @db.Decimal(5, 4)  // 0.0000–1.0000; exact split arithmetic for owner statements
+  revenueShare Decimal  @db.Decimal(5, 4) // 0.0000–1.0000; exact split arithmetic for owner statements
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
-  property Property @relation(fields: [propertyId], references: [id])
-  owner    Owner    @relation(fields: [ownerId], references: [id])
+  property     Property @relation(fields: [propertyId], references: [id])
+  owner        Owner    @relation(fields: [ownerId], references: [id])
+
   @@index([propertyId])
   @@index([ownerId])
 }
 
 model Account {
-  id             String @id @default(cuid())
+  id             String        @id @default(cuid())
   organizationId String
   name           String
-  code           String? @unique
+  code           String?       @unique
   type           String
-  currency       String  @default("EUR")
+  currency       String        @default("EUR")
   closedAt       DateTime?
-  locked         Boolean @default(false)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  locked         Boolean       @default(false)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
   createdBy      String?
-  organization   Organization @relation(fields: [organizationId], references: [id])
+  organization   Organization  @relation(fields: [organizationId], references: [id])
   journalLines   JournalLine[]
+
   @@index([organizationId])
   @@index([code])
 }
 
 model JournalEntry {
-  id              String   @id @default(cuid())
+  id              String        @id @default(cuid())
   organizationId  String
   date            DateTime
   memo            String?
-  status          String   @default("DRAFT")
+  status          String        @default("DRAFT")
   makerIdentity   String?
   tenantId        String?
   agentConfidence Float?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
   createdBy       String?
   updatedBy       String?
   organization    Organization  @relation(fields: [organizationId], references: [id])
   lines           JournalLine[]
+
   @@index([organizationId])
   @@index([status])
 }
 
 model JournalLine {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   journalEntryId String
   accountId      String
-  amount         Decimal  @db.Decimal(19, 4)
+  amount         Decimal      @db.Decimal(19, 4)
   isDebit        Boolean
-  currency       String   @default("EUR")
-  createdAt      DateTime @default(now())
+  currency       String       @default("EUR")
+  createdAt      DateTime     @default(now())
   createdBy      String?
   journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id])
   account        Account      @relation(fields: [accountId], references: [id])
+
   @@index([journalEntryId])
   @@index([accountId])
 }
 
 model FiscalPeriod {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
   name           String
   startDate      DateTime
   endDate        DateTime
-  isClosed       Boolean  @default(false)
+  isClosed       Boolean      @default(false)
   closedAt       DateTime?
-  locked         Boolean  @default(false)
-  createdAt      DateTime @default(now())
+  locked         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
   createdBy      String?
-  organization   Organization   @relation(fields: [organizationId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
   @@index([organizationId])
 }
 
 model Channel {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  bookings Booking[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  bookings  Booking[]
 }
 
 model Booking {
-  id             String   @id @default(cuid())
+  id             String          @id @default(cuid())
   propertyId     String
   channelId      String
   checkIn        DateTime
   checkOut       DateTime
-  totalAmount    Decimal  @db.Decimal(19, 4)
-  status         String @default("CONFIRMED")
-  hostawayId     String?  @unique
+  totalAmount    Decimal         @db.Decimal(19, 4)
+  status         String          @default("CONFIRMED")
+  hostawayId     String?         @unique
   hostawayStatus String?
-  deferredPosted Boolean @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  property       Property         @relation(fields: [propertyId], references: [id])
-  channel        Channel          @relation(fields: [channelId], references: [id])
+  deferredPosted Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  property       Property        @relation(fields: [propertyId], references: [id])
+  channel        Channel         @relation(fields: [channelId], references: [id])
   charges        BookingCharge[]
+
   @@index([propertyId])
   @@index([hostawayId])
 }
@@ -197,19 +206,20 @@ model BookingCharge {
   amount      Decimal  @db.Decimal(19, 4)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
-  booking Booking @relation(fields: [bookingId], references: [id])
+  booking     Booking  @relation(fields: [bookingId], references: [id])
 }
 
 model GuestPayout {
-  id             String @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
   date           DateTime
-  amount         Decimal  @db.Decimal(19, 4)
+  amount         Decimal      @db.Decimal(19, 4)
   reference      String?
-  status         String @default("PENDING")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  organization Organization @relation(fields: [organizationId], references: [id])
+  status         String       @default("PENDING")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
   @@index([organizationId])
 }
 
@@ -220,45 +230,45 @@ model OwnerStatement {
   totalDue  Decimal  @db.Decimal(19, 4)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  owner Owner @relation(fields: [ownerId], references: [id])
+  owner     Owner    @relation(fields: [ownerId], references: [id])
 }
 
 model ExpenseCategory {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   name      String
   accountId String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  expenses Expense[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  expenses  Expense[]
 }
 
 model Vendor {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   name      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  expenses Expense[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  expenses  Expense[]
 }
 
 model Expense {
-  id                String   @id @default(cuid())
+  id                String          @id @default(cuid())
   propertyId        String
   expenseCategoryId String
   vendorId          String
-  amount            Decimal  @db.Decimal(19, 4)
+  amount            Decimal         @db.Decimal(19, 4)
   date              DateTime
   description       String?
   receiptCloudId    String?
-  confidenceScore   Float?  // 0–1 confidence score, not money — Float is correct here
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  property        Property        @relation(fields: [propertyId], references: [id])
-  expenseCategory ExpenseCategory @relation(fields: [expenseCategoryId], references: [id])
-  vendor          Vendor          @relation(fields: [vendorId], references: [id])
+  confidenceScore   Float? // 0–1 confidence score, not money — Float is correct here
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  property          Property        @relation(fields: [propertyId], references: [id])
+  expenseCategory   ExpenseCategory @relation(fields: [expenseCategoryId], references: [id])
+  vendor            Vendor          @relation(fields: [vendorId], references: [id])
 }
 
 model EvidenceLog {
-  id              String @id @default(cuid())
+  id              String   @id @default(cuid())
   eventType       String
   tenantId        String
   makerIdentity   String
@@ -267,23 +277,25 @@ model EvidenceLog {
   payload         Json
   hash            String
   previousHash    String?
-  createdAt DateTime @default(now())
+  createdAt       DateTime @default(now())
+
   @@index([tenantId])
   @@index([createdAt])
   @@index([eventType])
 }
 
 model ActionIntentQueue {
-  id              String @id @default(cuid())
-  status          String @default("PENDING")
+  id              String    @id @default(cuid())
+  status          String    @default("PENDING")
   action          String
   payload         Json
   makerIdentity   String
   checkerIdentity String?
   confidence      Float
-  createdAt       DateTime @default(now())
+  createdAt       DateTime  @default(now())
   approvedAt      DateTime?
   executedAt      DateTime?
+
   @@index([status])
   @@index([createdAt])
 }
