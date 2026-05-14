@@ -3,6 +3,9 @@ import { HostawayService, HostawayReservation } from './hostaway.service';
 import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { Decimal } from 'decimal.js';
+import type { Booking, Property } from '@prisma/client';
+
+type BookingWithProperty = Booking & { property: Property };
 
 export type SyncStage = 'sync' | 'recognition';
 
@@ -125,9 +128,11 @@ export class RevenueService {
   /**
    * Reverses the initial pre-payment for cancelled bookings.
    */
-  private static async handleBookingCancellation(organizationId: string, booking: any) {
+  private static async handleBookingCancellation(organizationId: string, booking: Booking) {
     console.log(`[RevenueService] Reversing deferred entry for Cancelled Booking ${booking.id}`);
-    
+
+    if (!booking.hostawayId) return;
+
     // Find the latest journal entry for this booking (memo contains hostawayId)
     const entry = await prisma.journalEntry.findFirst({
       where: {
@@ -150,7 +155,7 @@ export class RevenueService {
    * Posts the initial entry when guest payment is received/confirmed.
    * DR Cash (Asset) / CR Guest Pre-payments (Liability)
    */
-  private static async postInitialDeferredEntry(organizationId: string, booking: any) {
+  private static async postInitialDeferredEntry(organizationId: string, booking: Booking) {
     const cashAccount = await this.getOrCreateAccount(organizationId, "Operating Cash", "ASSET");
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
 
@@ -235,7 +240,7 @@ export class RevenueService {
   /**
    * Reverses the initial deferred entry if a booking is cancelled.
    */
-  private static async postCancellationReversal(organizationId: string, booking: any) {
+  private static async postCancellationReversal(organizationId: string, booking: BookingWithProperty) {
     if (!booking.deferredPosted) return;
 
     const cashAccount = await this.getOrCreateAccount(organizationId, "Operating Cash", "ASSET");
@@ -273,7 +278,7 @@ export class RevenueService {
   /**
    * Creates the Double-Entry Journal for Revenue Recognition.
    */
-  private static async postRecognitionEntry(organizationId: string, booking: any) {
+  private static async postRecognitionEntry(organizationId: string, booking: BookingWithProperty) {
     // 1. Get/Create the mandatory Accounts for this organization
     const deferredAccount = await this.getOrCreateAccount(organizationId, "Guest Pre-payments", "LIABILITY");
     const revenueAccount = await this.getOrCreateAccount(organizationId, "Rental Income", "REVENUE");

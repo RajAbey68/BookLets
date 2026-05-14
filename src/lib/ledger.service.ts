@@ -143,7 +143,7 @@ export class LedgerService {
   /**
    * Reverses an existing Journal Entry by creating a new one with inverse debits/credits.
    */
-  static async reverseEntry(entryId: string, reason: string): Promise<any> {
+  static async reverseEntry(entryId: string, reason: string): Promise<{ id: string }> {
     const originalEntry = await prisma.journalEntry.findUnique({
       where: { id: entryId },
       include: { lines: true }

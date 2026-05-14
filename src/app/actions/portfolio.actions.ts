@@ -10,9 +10,9 @@ export async function getDashboardMetrics() {
   try {
     const metrics = await MetricsService.getPortfolioMetrics(DEFAULT_ORG_ID);
     return { success: true, data: metrics };
-  } catch (error: any) {
+  } catch (error) {
     console.error('[PortfolioActions] Failed to fetch metrics:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -23,8 +23,8 @@ export async function syncHostawayData() {
     
     revalidatePath('/');
     return { success: true, message: 'Sync completed. Ledger updated.' };
-  } catch (error: any) {
+  } catch (error) {
     console.error('[PortfolioActions] Sync Failed:', error);
-    return { success: false, error: error.message };
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
   }
 }

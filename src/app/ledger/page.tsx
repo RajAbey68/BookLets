@@ -3,18 +3,21 @@ import { fetchLedgerEntries } from '@/app/actions/ledger.actions';
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
+type LedgerEntry = Awaited<ReturnType<typeof fetchLedgerEntries>>[number];
+type LedgerLine = LedgerEntry['lines'][number];
+
 export default async function LedgerPage() {
   const entries = await fetchLedgerEntries();
 
-  const formatCurrency = (amount: number) => {
+  const formatCurrency = (amount: number | { toString(): string }) => {
     return new Intl.NumberFormat('de-DE', {
       style: 'currency',
       currency: 'EUR',
-    }).format(amount);
+    }).format(Number(amount));
   };
 
-  const formatDate = (dateString: string) => {
-      return new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium' }).format(new Date(dateString));
+  const formatDate = (date: Date | string) => {
+      return new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium' }).format(new Date(date));
   };
 
   return (
@@ -63,8 +66,8 @@ export default async function LedgerPage() {
                 </td>
               </tr>
             ) : (
-              entries.flatMap((entry: any) => 
-                entry.lines.map((line: any, lineIndex: number) => (
+              entries.flatMap((entry: LedgerEntry) =>
+                entry.lines.map((line: LedgerLine, lineIndex: number) => (
                   <tr key={`${entry.id}-${lineIndex}`} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
                     {lineIndex === 0 ? (
                       <td 

@@ -22,9 +22,9 @@ async function verify() {
         currency: reservations[0].currency
       });
     }
-  } catch (err: any) {
+  } catch (err) {
     console.error('Verification Failed!');
-    console.error(err.message);
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 }

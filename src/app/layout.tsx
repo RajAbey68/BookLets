@@ -1,8 +1,6 @@
 import type { Metadata } from "next";
 import { inter } from "./fonts";
 import "./globals.css";
-import Sidebar from "@/components/Sidebar";
-import AppHeader from "@/components/AppHeader";
 
 export const metadata: Metadata = {
   title: "BookLets - Open Source Bookkeeping",

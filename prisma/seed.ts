@@ -19,12 +19,12 @@ async function main() {
 
   // 2. Seed Chart of Accounts (COA)
   const accounts = [
-    { name: 'Operating Cash', code: '1000', accountType: 'ASSET' },
-    { name: 'Guest Pre-payments', code: '2000', accountType: 'LIABILITY' },
-    { name: 'Rental Income', code: '4000', accountType: 'REVENUE' },
-    { name: 'Cleaning Fee Income', code: '4100', accountType: 'REVENUE' },
-    { name: 'Commission Expense', code: '6000', accountType: 'EXPENSE' },
-    { name: 'Suspense', code: '9999', accountType: 'SUSPENSE' },
+    { name: 'Operating Cash', code: '1000', type: 'ASSET' },
+    { name: 'Guest Pre-payments', code: '2000', type: 'LIABILITY' },
+    { name: 'Rental Income', code: '4000', type: 'REVENUE' },
+    { name: 'Cleaning Fee Income', code: '4100', type: 'REVENUE' },
+    { name: 'Commission Expense', code: '6000', type: 'EXPENSE' },
+    { name: 'Suspense', code: '9999', type: 'SUSPENSE' },
   ];
 
   for (const acc of accounts) {
@@ -35,7 +35,7 @@ async function main() {
         organizationId: org.id,
         name: acc.name,
         code: acc.code,
-        accountType: acc.accountType,
+        type: acc.type,
         createdBy: 'seed',
       },
     });

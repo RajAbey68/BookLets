@@ -1,6 +1,5 @@
 import { prisma } from '../src/lib/prisma';
 import { RevenueService } from '../src/lib/revenue.service';
-import { Decimal } from 'decimal.js';
 
 /**
  * Verification Script: Hostaway Sync & Revenue Recognition

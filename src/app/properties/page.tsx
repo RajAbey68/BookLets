@@ -1,4 +1,4 @@
-import { fetchPortfolioMetrics, PropertyMetric } from '../actions/property.actions';
+import { fetchPortfolioMetrics } from '../actions/property.actions';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
