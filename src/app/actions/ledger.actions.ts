@@ -1,7 +1,6 @@
 'use server';
 
 import { prisma } from '@/lib/prisma';
-import { JournalStatus } from '@/lib/types';
 
 export async function fetchLedgerEntries(organizationId?: string) {
   try {

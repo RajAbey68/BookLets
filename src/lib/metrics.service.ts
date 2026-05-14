@@ -73,7 +73,6 @@ export class MetricsService {
     });
 
     const totalOccupiedNights = bookings.length; // Simplified: 1 booking = 1 stay segment for this aggregation
-    const bookedRevenue = bookings.reduce((acc, b) => acc + b.totalAmount, 0);
 
     // Get Total Units/Properties for capacity
     const propertyCount = await prisma.property.count({ where: { organizationId } });

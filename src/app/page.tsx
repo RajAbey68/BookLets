@@ -5,16 +5,12 @@ const IconTrendingUp = () => (
   </svg>
 );
 
-const IconTrendingDown = () => (
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ width: '14px', height: '14px' }}>
-    <polyline points="22 17 13.5 8.5 8.5 13.5 2 7" />
-    <polyline points="16 17 22 17 22 11" />
-  </svg>
-);
-
 import { ReceiptUploader } from '../components/ReceiptUploader';
 import { getDashboardMetrics } from './actions/portfolio.actions';
 import { getDefaultUploadContext } from './actions/context.actions';
+
+// Reads from the database; cannot be rendered at build time.
+export const dynamic = 'force-dynamic';
 
 export default async function Home() {
   const [metricsResult, uploadContext] = await Promise.all([

@@ -25,7 +25,7 @@ export default function SyncButton() {
       } else {
         setStatus(`Error: ${result.message}`);
       }
-    } catch (err) {
+    } catch {
       setStatus('Sync Failed');
     } finally {
       setTimeout(() => {
