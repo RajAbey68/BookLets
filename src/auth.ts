@@ -1,9 +1,15 @@
 import NextAuth from "next-auth";
-import Google from "next-auth/providers/google";
 import { prisma } from "@/lib/prisma";
+import authConfig from "./auth.config";
 
 /**
- * Auth.js v5 configuration.
+ * Auth.js v5 — Node runtime configuration.
+ *
+ * Spreads the Edge-safe base config (`auth.config.ts`) and adds the
+ * callbacks that touch the database. This module imports Prisma, so it
+ * must only be used from the Node runtime (server components, server
+ * actions, the /api/auth route handler) — never from middleware. The
+ * middleware builds its own NextAuth instance from `auth.config.ts` alone.
  *
  * Strategy: JWT sessions. We don't persist Account/Session tables in
  * Postgres — only User and Membership — because BookLets already has an
@@ -16,13 +22,7 @@ import { prisma } from "@/lib/prisma";
  * SQL in the meantime — see DEPLOY.md "Invite team members").
  */
 export const { handlers, signIn, signOut, auth } = NextAuth({
-  providers: [
-    Google({
-      clientId: process.env.AUTH_GOOGLE_ID,
-      clientSecret: process.env.AUTH_GOOGLE_SECRET,
-    }),
-  ],
-  session: { strategy: "jwt" },
+  ...authConfig,
   callbacks: {
     async signIn({ user, profile }) {
       if (!user.email) return false;
@@ -71,8 +71,5 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
       }
       return session;
     },
-  },
-  pages: {
-    signIn: "/login",
   },
 });
