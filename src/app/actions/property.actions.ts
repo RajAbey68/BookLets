@@ -1,6 +1,7 @@
 'use server';
 
 import { prisma } from '@/lib/prisma';
+import { resolveActiveContext } from '@/lib/auth-context';
 import { Decimal } from 'decimal.js';
 import type { Prisma } from '@prisma/client';
 
@@ -20,29 +21,28 @@ export interface PropertyMetric {
   color: string;
 }
 
-/**
- * Fetches and calculates live metrics for the property portfolio.
- */
-export async function fetchPortfolioMetrics() {
+export async function fetchPortfolioMetrics(): Promise<PropertyMetric[]> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return [];
+
+  const { organizationId } = resolved.context;
+
   let properties: PropertyWithBookings[] = [];
   try {
     properties = await prisma.property.findMany({
-      include: {
-        bookings: true,
-      }
+      where: { organizationId },
+      include: { bookings: true },
     });
   } catch (error) {
-    console.error('[property.actions] fetchPortfolioMetrics: DB unreachable, returning empty list:', error);
+    console.error('[property.actions] fetchPortfolioMetrics: DB unreachable:', error);
     return [];
   }
 
-  const metrics: PropertyMetric[] = await Promise.all(properties.map(async (prop) => {
-    // 1. Calculate Revenue from completed/confirmed bookings. totalAmount is Decimal(19,4).
+  return Promise.all(properties.map(async (prop) => {
     const totalRevenue = prop.bookings
       .filter(b => b.status === 'COMPLETED' || b.status === 'CONFIRMED')
       .reduce((acc, b) => acc.plus(new Decimal(b.totalAmount.toString())), new Decimal(0));
 
-    // 2. Occupancy (Last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
@@ -57,18 +57,13 @@ export async function fetchPortfolioMetrics() {
 
     const occupancyRate = Math.min(100, Math.round((bookedDays / 30) * 100));
 
-    // 3. ADR (Average Daily Rate) — Decimal math, converted to number for display.
     const totalNights = prop.bookings.reduce((acc, b) => {
       const nights = Math.ceil((b.checkOut.getTime() - b.checkIn.getTime()) / (1000 * 60 * 60 * 24));
       return acc + nights;
     }, 0);
 
     const adr = totalNights > 0 ? totalRevenue.div(totalNights) : new Decimal(0);
-
-    // 4. RevPAR
     const revpar = adr.mul(occupancyRate).div(100);
-
-    // 5. Yield band (display-only heuristic)
     const yieldBand = totalRevenue.gt(10000) ? '8.2%' : totalRevenue.gt(5000) ? '5.4%' : '3.1%';
 
     return {
@@ -82,9 +77,7 @@ export async function fetchPortfolioMetrics() {
       adr: `€${Math.round(adr.toNumber())}`,
       revpar: `€${Math.round(revpar.toNumber())}`,
       status: occupancyRate > 80 ? 'High Yield' : (occupancyRate > 50 ? 'Stable' : 'Seasonal'),
-      color: occupancyRate > 80 ? '#10b981' : (occupancyRate > 50 ? '#3b82f6' : '#f59e0b')
+      color: occupancyRate > 80 ? '#10b981' : (occupancyRate > 50 ? '#3b82f6' : '#f59e0b'),
     };
   }));
-
-  return metrics;
 }
