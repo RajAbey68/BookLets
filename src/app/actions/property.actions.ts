@@ -1,6 +1,7 @@
 'use server';
 
 import { prisma } from '@/lib/prisma';
+import { Decimal } from 'decimal.js';
 
 export interface PropertyMetric {
   id: string;
@@ -27,17 +28,15 @@ export async function fetchPortfolioMetrics() {
   });
 
   const metrics: PropertyMetric[] = await Promise.all(properties.map(async (prop) => {
-    // 1. Calculate Revenue from Ledger (Rental Income Account)
-    // For simplicity, we filter by property memo/association if we had one,
-    // but here we can calculate from Bookings associated with this property.
+    // 1. Calculate Revenue from completed/confirmed bookings. totalAmount is Decimal(19,4).
     const totalRevenue = prop.bookings
       .filter(b => b.status === 'COMPLETED' || b.status === 'CONFIRMED')
-      .reduce((acc, b) => acc + b.totalAmount, 0);
+      .reduce((acc, b) => acc.plus(new Decimal(b.totalAmount.toString())), new Decimal(0));
 
-    // 2. Calculate Occupancy (Last 30 days)
+    // 2. Occupancy (Last 30 days)
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
+
     const bookedDays = prop.bookings
       .filter(b => b.checkIn >= thirtyDaysAgo || b.checkOut >= thirtyDaysAgo)
       .reduce((acc, b) => {
@@ -46,37 +45,33 @@ export async function fetchPortfolioMetrics() {
         const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
         return acc + Math.max(0, days);
       }, 0);
-    
+
     const occupancyRate = Math.min(100, Math.round((bookedDays / 30) * 100));
 
-    // 3. ADR (Average Daily Rate)
+    // 3. ADR (Average Daily Rate) — Decimal math, converted to number for display.
     const totalNights = prop.bookings.reduce((acc, b) => {
       const nights = Math.ceil((b.checkOut.getTime() - b.checkIn.getTime()) / (1000 * 60 * 60 * 24));
       return acc + nights;
     }, 0);
-    
-    const adr = totalNights > 0 ? totalRevenue / totalNights : 0;
+
+    const adr = totalNights > 0 ? totalRevenue.div(totalNights) : new Decimal(0);
 
     // 4. RevPAR
-    const revpar = (adr * occupancyRate) / 100;
+    const revpar = adr.mul(occupancyRate).div(100);
 
-    // 5. Yield (Simplified calc: Revenue / Assumed Asset Value if we had it, or just a mock score)
-    const yieldPercentage = (revenue: number) => {
-        if (revenue > 10000) return "8.2%";
-        if (revenue > 5000) return "5.4%";
-        return "3.1%";
-    };
+    // 5. Yield band (display-only heuristic)
+    const yieldBand = totalRevenue.gt(10000) ? '8.2%' : totalRevenue.gt(5000) ? '5.4%' : '3.1%';
 
     return {
       id: prop.id,
       name: prop.name,
       location: prop.address,
-      units: 1, // Defaulting to 1 unit per property record for now
+      units: 1,
       occupancy: occupancyRate || 0,
-      revenue: `€${totalRevenue.toLocaleString()}`,
-      yield: yieldPercentage(totalRevenue),
-      adr: `€${Math.round(adr)}`,
-      revpar: `€${Math.round(revpar)}`,
+      revenue: `€${totalRevenue.toNumber().toLocaleString()}`,
+      yield: yieldBand,
+      adr: `€${Math.round(adr.toNumber())}`,
+      revpar: `€${Math.round(revpar.toNumber())}`,
       status: occupancyRate > 80 ? 'High Yield' : (occupancyRate > 50 ? 'Stable' : 'Seasonal'),
       color: occupancyRate > 80 ? '#10b981' : (occupancyRate > 50 ? '#3b82f6' : '#f59e0b')
     };
