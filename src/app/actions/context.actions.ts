@@ -20,16 +20,21 @@ export interface UploadContext {
  * and a user-scoped property picker exists.
  */
 export async function getDefaultUploadContext(): Promise<UploadContext | null> {
-  const property = await prisma.property.findFirst({
-    where: { organizationId: DEFAULT_ORG_ID },
-    orderBy: { createdAt: 'asc' },
-    select: { id: true, organizationId: true },
-  });
+  try {
+    const property = await prisma.property.findFirst({
+      where: { organizationId: DEFAULT_ORG_ID },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, organizationId: true },
+    });
 
-  if (!property) return null;
+    if (!property) return null;
 
-  return {
-    organizationId: property.organizationId,
-    propertyId: property.id,
-  };
+    return {
+      organizationId: property.organizationId,
+      propertyId: property.id,
+    };
+  } catch (error) {
+    console.error('[context.actions] getDefaultUploadContext failed:', error);
+    return null;
+  }
 }

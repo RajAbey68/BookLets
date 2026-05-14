@@ -29,7 +29,7 @@ export async function fetchLedgerEntries(organizationId?: string) {
     return entries;
   } catch (error) {
     console.error('Error fetching ledger entries:', error);
-    throw new Error('Failed to fetch ledger entries');
+    return [];
   }
 }
 
