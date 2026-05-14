@@ -2,6 +2,9 @@
 
 import { prisma } from '@/lib/prisma';
 import { Decimal } from 'decimal.js';
+import type { Prisma } from '@prisma/client';
+
+type PropertyWithBookings = Prisma.PropertyGetPayload<{ include: { bookings: true } }>;
 
 export interface PropertyMetric {
   id: string;
@@ -21,11 +24,17 @@ export interface PropertyMetric {
  * Fetches and calculates live metrics for the property portfolio.
  */
 export async function fetchPortfolioMetrics() {
-  const properties = await prisma.property.findMany({
-    include: {
-      bookings: true,
-    }
-  });
+  let properties: PropertyWithBookings[] = [];
+  try {
+    properties = await prisma.property.findMany({
+      include: {
+        bookings: true,
+      }
+    });
+  } catch (error) {
+    console.error('[property.actions] fetchPortfolioMetrics: DB unreachable, returning empty list:', error);
+    return [];
+  }
 
   const metrics: PropertyMetric[] = await Promise.all(properties.map(async (prop) => {
     // 1. Calculate Revenue from completed/confirmed bookings. totalAmount is Decimal(19,4).
