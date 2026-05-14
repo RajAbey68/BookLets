@@ -7,8 +7,6 @@ export const metadata: Metadata = {
   description: "Bookkeeping for Short-Term Rental Businesses",
 };
 
-import AppShell from "@/components/AppShell";
-
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -17,9 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        <AppShell>
-          {children}
-        </AppShell>
+        {children}
       </body>
     </html>
   );

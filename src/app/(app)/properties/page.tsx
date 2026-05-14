@@ -1,4 +1,5 @@
-import { fetchPortfolioMetrics } from '../actions/property.actions';
+import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
+import SyncPropertiesButton from '@/components/SyncPropertiesButton';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -36,9 +37,7 @@ export default async function PropertiesPage() {
           <h1 style={{ marginBottom: 0 }}>Real Estate Assets</h1>
         </div>
         
-        <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)' }}>
-          + Add Property
-        </button>
+        <SyncPropertiesButton />
       </div>
 
       {properties.length === 0 ? (

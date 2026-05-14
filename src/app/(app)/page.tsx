@@ -5,10 +5,11 @@ const IconTrendingUp = () => (
   </svg>
 );
 
-import { ReceiptUploader } from '../components/ReceiptUploader';
-import { getDashboardMetrics } from './actions/portfolio.actions';
-import { getDefaultUploadContext } from './actions/context.actions';
-import { fetchPortfolioMetrics } from './actions/property.actions';
+import Link from 'next/link';
+import { ReceiptUploader } from '@/components/ReceiptUploader';
+import { getDashboardMetrics } from '@/app/actions/portfolio.actions';
+import { getDefaultUploadContext } from '@/app/actions/context.actions';
+import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -42,12 +43,19 @@ export default async function Home() {
         </div>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', cursor: 'pointer' }}>
+          <a
+            href="/api/export/ledger"
+            download
+            style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
             Download Report
-          </button>
-          <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)' }}>
+          </a>
+          <Link
+            href="/ledger"
+            style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', boxShadow: '0 4px 12px rgba(59, 130, 246, 0.3)', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
             + Create Entry
-          </button>
+          </Link>
         </div>
       </div>
       
@@ -150,9 +158,9 @@ export default async function Home() {
             </div>
           )}
 
-          <button style={{ width: '100%', marginTop: '2rem', padding: '0.875rem', borderRadius: '10px', border: '1px dashed var(--surface-border)', background: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: '600', cursor: 'pointer' }}>
+          <Link href="/properties" style={{ display: 'block', width: '100%', marginTop: '2rem', padding: '0.875rem', borderRadius: '10px', border: '1px dashed var(--surface-border)', background: 'none', color: 'var(--text-secondary)', fontSize: '0.875rem', fontWeight: '600', cursor: 'pointer', textAlign: 'center', textDecoration: 'none', boxSizing: 'border-box' }}>
             View Full Analysis
-          </button>
+          </Link>
         </div>
       </div>
     </>

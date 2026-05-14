@@ -1,4 +1,5 @@
-import { fetchBookings } from '../actions/bookings.actions';
+import Link from 'next/link';
+import { fetchBookings } from '@/app/actions/bookings.actions';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -27,12 +28,12 @@ export default async function BookingsPage() {
         </div>
 
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', cursor: 'pointer' }}>
-            Filter
-          </button>
-          <button style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer' }}>
+          <Link
+            href="/properties"
+            style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
             + Create Booking
-          </button>
+          </Link>
         </div>
       </div>
 

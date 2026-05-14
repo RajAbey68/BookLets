@@ -6,9 +6,13 @@ import AppHeader from './AppHeader';
 
 interface AppShellProps {
   children: React.ReactNode;
+  orgName?: string;
+  userName?: string;
+  userImage?: string;
+  userRole?: string;
 }
 
-export default function AppShell({ children }: AppShellProps) {
+export default function AppShell({ children, orgName, userName, userImage, userRole }: AppShellProps) {
   const [isSidebarOpen, setSidebarOpen] = useState(false);
 
   const toggleSidebar = () => setSidebarOpen(!isSidebarOpen);
@@ -16,18 +20,23 @@ export default function AppShell({ children }: AppShellProps) {
 
   return (
     <div className="app-shell">
-      {/* Overlay for mobile when sidebar is open */}
       {isSidebarOpen && (
         <div
           onClick={closeSidebar}
           className="mobile-overlay lg-hidden"
         />
       )}
-      
+
       <Sidebar isOpen={isSidebarOpen} />
-      
+
       <div className="main-wrapper">
-        <AppHeader onMenuClick={toggleSidebar} />
+        <AppHeader
+          onMenuClick={toggleSidebar}
+          orgName={orgName}
+          userName={userName}
+          userImage={userImage}
+          userRole={userRole}
+        />
         <main className="main-content" onClick={closeSidebar}>
           {children}
         </main>
