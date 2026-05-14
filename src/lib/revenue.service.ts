@@ -288,7 +288,7 @@ export class RevenueService {
 
     // 4-EYES CHECK: Ensure the amount is not unreasonably high before auto-posting
     const HIGH_VALUE_THRESHOLD = 10000; // €10k threshold for manual review
-    const status = booking.totalAmount > HIGH_VALUE_THRESHOLD ? JournalStatus.DRAFT : JournalStatus.POSTED;
+    const status = new Decimal(booking.totalAmount.toString()).gt(HIGH_VALUE_THRESHOLD) ? JournalStatus.DRAFT : JournalStatus.POSTED;
 
     await LedgerService.postEntry({
       organizationId,
