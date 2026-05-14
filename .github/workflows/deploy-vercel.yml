@@ -1,0 +1,108 @@
+name: Deploy to Vercel
+
+# Deploys BookLets to Vercel. The sandbox Claude runs in cannot reach
+# vercel.com, so deployment is driven from a GitHub Actions runner instead.
+#
+# Required repository secret:
+#   VERCEL_TOKEN      - https://vercel.com/account/tokens
+#
+# Optional repository secrets (set on the Vercel project when present):
+#   DATABASE_URL        - Supabase Postgres connection string
+#   AUTH_GOOGLE_ID      - Google OAuth client id
+#   AUTH_GOOGLE_SECRET  - Google OAuth client secret
+#   AUTH_SECRET         - Auth.js JWT secret (auto-generated if absent)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - claude/review-booklets-code-YSiGa
+    paths:
+      - '.github/workflows/deploy-vercel.yml'
+
+concurrency:
+  group: deploy-vercel
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_SCOPE: rajabey68s-projects
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Verify token
+        run: |
+          if [ -z "$VERCEL_TOKEN" ]; then
+            echo "::error::VERCEL_TOKEN secret is not set. Add it under Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+          vercel whoami --token="$VERCEL_TOKEN"
+
+      - name: Create / link Vercel project
+        run: |
+          # First run creates the project; subsequent runs just relink it.
+          vercel link --yes --project booklets --scope="$VERCEL_SCOPE" --token="$VERCEL_TOKEN"
+
+      - name: Sync environment variables
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          AUTH_GOOGLE_ID: ${{ secrets.AUTH_GOOGLE_ID }}
+          AUTH_GOOGLE_SECRET: ${{ secrets.AUTH_GOOGLE_SECRET }}
+          AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+        run: |
+          set_var() {
+            local name="$1" value="$2"
+            if [ -z "$value" ]; then
+              echo "  - $name: not provided, skipping"
+              return
+            fi
+            # Replace any existing value so redeploys stay idempotent.
+            vercel env rm "$name" production --yes --token="$VERCEL_TOKEN" >/dev/null 2>&1 || true
+            printf '%s' "$value" | vercel env add "$name" production --token="$VERCEL_TOKEN" >/dev/null
+            echo "  - $name: set"
+          }
+
+          # AUTH_SECRET: keep the existing one if already on the project,
+          # otherwise use the provided secret, otherwise generate one.
+          if vercel env ls production --token="$VERCEL_TOKEN" 2>/dev/null | grep -q '^ *AUTH_SECRET '; then
+            echo "  - AUTH_SECRET: already set, keeping"
+          else
+            if [ -z "$AUTH_SECRET" ]; then
+              AUTH_SECRET="$(openssl rand -base64 32)"
+              echo "  - AUTH_SECRET: generated"
+            fi
+            printf '%s' "$AUTH_SECRET" | vercel env add AUTH_SECRET production --token="$VERCEL_TOKEN" >/dev/null
+            echo "  - AUTH_SECRET: set"
+          fi
+
+          set_var DATABASE_URL "$DATABASE_URL"
+          set_var AUTH_GOOGLE_ID "$AUTH_GOOGLE_ID"
+          set_var AUTH_GOOGLE_SECRET "$AUTH_GOOGLE_SECRET"
+
+      - name: Deploy (production)
+        id: deploy
+        run: |
+          url="$(vercel deploy --prod --yes --scope="$VERCEL_SCOPE" --token="$VERCEL_TOKEN")"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          {
+            echo "## BookLets deployed"
+            echo ""
+            echo "Live URL: $url"
+            echo ""
+            echo "If Google sign-in is configured, add this redirect URI to the OAuth client:"
+            echo ""
+            echo "    $url/api/auth/callback/google"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Deployed to: $url"
