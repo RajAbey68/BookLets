@@ -142,8 +142,14 @@ export class LedgerService {
 
   /**
    * Reverses an existing Journal Entry by creating a new one with inverse debits/credits.
+   *
+   * `makerIdentity` is the actor performing the reversal. The EvidenceLog
+   * records this — not the original entry's maker — because a reversal is a
+   * distinct accounting act and the audit trail must attribute it correctly.
+   * Falls back to the original entry's maker only when no actor is supplied
+   * (e.g. legacy/system-initiated calls).
    */
-  static async reverseEntry(entryId: string, reason: string): Promise<{ id: string }> {
+  static async reverseEntry(entryId: string, reason: string, makerIdentity?: string): Promise<{ id: string }> {
     const originalEntry = await prisma.journalEntry.findUnique({
       where: { id: entryId },
       include: { lines: true }
@@ -194,7 +200,7 @@ export class LedgerService {
       await EvidenceLogService.record(tx, {
         eventType: 'JOURNAL_REVERSED',
         tenantId: originalEntry.organizationId,
-        makerIdentity: originalEntry.makerIdentity ?? 'system',
+        makerIdentity: makerIdentity ?? originalEntry.makerIdentity ?? 'system',
         description: `Reversed entry ${entryId}: ${reason}`,
         payload: {
           reversalId: reversal.id,

@@ -1,8 +1,7 @@
 'use server';
 
 import { prisma } from '../../lib/prisma';
-
-const DEFAULT_ORG_ID = 'primary_org';
+import { resolveActiveContext } from '@/lib/auth-context';
 
 export interface UploadContext {
   organizationId: string;
@@ -11,18 +10,24 @@ export interface UploadContext {
 
 /**
  * Resolves the default {organization, property} context for client widgets
- * (currently the dashboard ReceiptUploader). Returns null when the seeded
- * primary_org has no properties yet, so the caller can hide the widget
- * instead of POSTing a receipt that would fail FK validation.
+ * (currently the dashboard ReceiptUploader). Returns null when the caller's
+ * organisation has no properties yet — or when there is no resolvable
+ * organisation — so the caller can hide the widget instead of POSTing a
+ * receipt that would fail FK validation.
  *
- * Replaces the page.tsx hardcoded "org_123" / "prop_abc" placeholders.
- * To be revisited once real auth/session resolves the active organization
- * and a user-scoped property picker exists.
+ * The organisation comes from the signed-in user's Membership, not a
+ * hardcoded id. A user-scoped property picker is still a follow-up; for now
+ * the oldest property in the org is used.
  */
 export async function getDefaultUploadContext(): Promise<UploadContext | null> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) {
+    return null;
+  }
+
   try {
     const property = await prisma.property.findFirst({
-      where: { organizationId: DEFAULT_ORG_ID },
+      where: { organizationId: resolved.context.organizationId },
       orderBy: { createdAt: 'asc' },
       select: { id: true, organizationId: true },
     });
