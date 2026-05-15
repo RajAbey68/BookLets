@@ -50,6 +50,7 @@ Set these environment variables in the Vercel dashboard before the first deploy:
 | `AUTH_SECRET` | `openssl rand -base64 32` |
 | `AUTH_GOOGLE_ID` | From step 2 |
 | `AUTH_GOOGLE_SECRET` | From step 2 |
+| `AUTH_ALLOWED_EMAILS` | **Comma-separated email allow-list** (e.g. `alice@example.com,bob@example.com`). Only listed emails can sign in. Production deploys without this var refuse every sign-in by design — set it. |
 
 Click **Deploy**. The `postinstall` hook runs `prisma generate` automatically.
 
