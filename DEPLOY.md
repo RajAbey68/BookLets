@@ -89,6 +89,7 @@ This is the recommended path for a small remote team.
    | `AUTH_SECRET` | a random 32-byte string: `openssl rand -base64 32` |
    | `AUTH_GOOGLE_ID` | the Google OAuth Client ID |
    | `AUTH_GOOGLE_SECRET` | the Google OAuth Client Secret |
+   | `AUTH_ALLOWED_EMAILS` | **comma-separated email allow-list** (e.g. `alice@example.com,bob@example.com`). Only listed emails can sign in. Production deploys without this var refuse every sign-in by design — set it. |
    | `HOSTAWAY_CLIENT_ID` | Hostaway |
    | `HOSTAWAY_CLIENT_SECRET` | Hostaway |
    | `HOSTAWAY_ACCOUNT_ID` | Hostaway |
