@@ -26,6 +26,33 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   callbacks: {
     async signIn({ user, profile }) {
       if (!user.email) return false;
+
+      // Allow-list gate: only emails listed in AUTH_ALLOWED_EMAILS may
+      // sign in. The value is a comma-separated list, matched
+      // case-insensitively. If the var is unset OR empty, sign-in is
+      // open — suitable only for local development. Production
+      // deployments MUST set this; without it any Google account in the
+      // world can access the app once they hit the URL.
+      const allowlistRaw = process.env.AUTH_ALLOWED_EMAILS ?? "";
+      const allowlist = allowlistRaw
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      if (allowlist.length > 0) {
+        if (!allowlist.includes(user.email.toLowerCase())) {
+          console.warn(
+            `[auth] Rejected sign-in for ${user.email} — not in AUTH_ALLOWED_EMAILS.`,
+          );
+          return false;
+        }
+      } else if (process.env.NODE_ENV === "production") {
+        // Fail closed in production if the operator forgot the allow-list.
+        console.error(
+          "[auth] AUTH_ALLOWED_EMAILS is empty in production; refusing sign-in to avoid an open-door deployment.",
+        );
+        return false;
+      }
+
       // Upsert the User row so we always have a canonical identity to
       // attach memberships to. We don't fail the sign-in if this throws
       // — the JWT still has the email — but we do log it so deploys can
