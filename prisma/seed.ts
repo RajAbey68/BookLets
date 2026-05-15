@@ -5,8 +5,17 @@ const connectionString = process.env.DATABASE_URL;
 if (!connectionString) {
   throw new Error('DATABASE_URL is not set; cannot run the seed.');
 }
+
+// Match the runtime adapter in src/lib/prisma.ts: the `schema=booklets`
+// query parameter in DATABASE_URL is a Prisma-specific extension that the
+// pg driver itself ignores. Set the search_path explicitly via the
+// connection options so seeded rows land in the same schema the app
+// reads from (booklets), not the default public schema.
 const prisma = new PrismaClient({
-  adapter: new PrismaPg({ connectionString }),
+  adapter: new PrismaPg({
+    connectionString,
+    options: '-c search_path=booklets,public',
+  }),
 });
 
 async function main() {
