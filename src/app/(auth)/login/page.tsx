@@ -67,8 +67,12 @@ export default async function LoginPage({
             }}
           >
             {error === "AccessDenied"
-              ? "Your account is not authorised to access BookLets. Contact your administrator."
-              : "Sign-in failed. Try again."}
+              ? "Google did not authorise this account. If the BookLets OAuth app is in Testing mode, add this email to the Test Users list in Google Cloud Console, or publish the app."
+              : error === "Configuration"
+              ? "Auth is misconfigured on the server (missing AUTH_SECRET or Google credentials). Check Vercel env vars."
+              : error === "Verification"
+              ? "The sign-in link has expired or already been used."
+              : `Sign-in failed (${error}). Try again.`}
           </div>
         ) : null}
 
