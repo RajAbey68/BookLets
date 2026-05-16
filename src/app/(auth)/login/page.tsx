@@ -3,13 +3,13 @@ import { signIn } from "@/auth";
 // Reads the database (via the auth() callback) and cannot be prerendered.
 export const dynamic = "force-dynamic";
 
-export default function LoginPage({
+export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: { callbackUrl?: string; error?: string };
+  searchParams: Promise<{ callbackUrl?: string; error?: string }>;
 }) {
-  const callbackUrl = searchParams.callbackUrl ?? "/";
-  const error = searchParams.error;
+  const { callbackUrl: cb, error } = await searchParams;
+  const callbackUrl = cb ?? "/";
 
   return (
     <main
