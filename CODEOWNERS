@@ -1,0 +1,36 @@
+# CODEOWNERS — review routing for sensitive paths
+#
+# Auto-requests review when these paths change. Combined with branch
+# protection requiring CODEOWNER approval, this is the safety net
+# that prevents inadvertent regressions like deleting the auth
+# allow-list during a stale rebase.
+#
+# Format: <path>  <owner1> <owner2> ...
+
+# Auth and identity surface — every change must be reviewed
+src/auth.ts                 @rajabey68
+src/auth.config.ts          @rajabey68
+src/lib/auth-context.ts     @rajabey68
+middleware.ts               @rajabey68
+src/app/(auth)/             @rajabey68
+src/app/api/auth/           @rajabey68
+
+# Schema and migrations — irreversible without a restore
+prisma/schema.prisma        @rajabey68
+prisma/migrations/          @rajabey68
+prisma/seed.ts              @rajabey68
+
+# Ledger core — financial correctness
+src/lib/ledger.service.ts   @rajabey68
+src/lib/evidence-log.service.ts  @rajabey68
+
+# Deploy / infra
+vercel.json                 @rajabey68
+next.config.ts              @rajabey68
+.github/                    @rajabey68
+
+# Agent coordination
+AGENTS_LOG.md               @rajabey68
+Message.md                  @rajabey68
+BUS.md                      @rajabey68
+.agent-bus.json             @rajabey68
