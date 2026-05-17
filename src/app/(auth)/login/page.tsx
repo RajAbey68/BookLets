@@ -67,7 +67,7 @@ export default async function LoginPage({
             }}
           >
             {error === "AccessDenied"
-              ? "Google did not authorise this account. If the BookLets OAuth app is in Testing mode, add this email to the Test Users list in Google Cloud Console, or publish the app."
+              ? "This account is not on the access allow-list. Add the email to AUTH_ALLOWED_EMAILS in Vercel env vars and redeploy. (If AUTH_ALLOWED_EMAILS is unset in production, sign-in is fail-closed for safety.)"
               : error === "Configuration"
               ? "Auth is misconfigured on the server (missing AUTH_SECRET or Google credentials). Check Vercel env vars."
               : error === "Verification"
