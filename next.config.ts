@@ -16,7 +16,7 @@ const securityHeaders = [
       "connect-src 'self'",
       "frame-ancestors 'none'",
       "base-uri 'self'",
-      "form-action 'self'",
+      "form-action 'self' https://accounts.google.com",
     ].join("; "),
   },
   {

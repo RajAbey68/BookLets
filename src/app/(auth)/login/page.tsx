@@ -3,13 +3,13 @@ import { signIn } from "@/auth";
 // Reads the database (via the auth() callback) and cannot be prerendered.
 export const dynamic = "force-dynamic";
 
-export default function LoginPage({
+export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: { callbackUrl?: string; error?: string };
+  searchParams: Promise<{ callbackUrl?: string; error?: string }>;
 }) {
-  const callbackUrl = searchParams.callbackUrl ?? "/";
-  const error = searchParams.error;
+  const { callbackUrl: cb, error } = await searchParams;
+  const callbackUrl = cb ?? "/";
 
   return (
     <main
@@ -67,8 +67,12 @@ export default function LoginPage({
             }}
           >
             {error === "AccessDenied"
-              ? "Your account is not authorised to access BookLets. Contact your administrator."
-              : "Sign-in failed. Try again."}
+              ? "This account is not on the access allow-list. Add the email to AUTH_ALLOWED_EMAILS in Vercel env vars and redeploy. (If AUTH_ALLOWED_EMAILS is unset in production, sign-in is fail-closed for safety.)"
+              : error === "Configuration"
+              ? "Auth is misconfigured on the server (missing AUTH_SECRET or Google credentials). Check Vercel env vars."
+              : error === "Verification"
+              ? "The sign-in link has expired or already been used."
+              : `Sign-in failed (${error}). Try again.`}
           </div>
         ) : null}
 

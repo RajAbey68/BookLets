@@ -1,4 +1,5 @@
 import { fetchLedgerEntries } from '@/app/actions/ledger.actions';
+import LedgerPeriodFilter, { type LedgerPeriodOption } from '@/components/LedgerPeriodFilter';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -6,8 +7,37 @@ export const dynamic = 'force-dynamic';
 type LedgerEntry = Awaited<ReturnType<typeof fetchLedgerEntries>>[number];
 type LedgerLine = LedgerEntry['lines'][number];
 
-export default async function LedgerPage() {
-  const entries = await fetchLedgerEntries();
+const monthKey = (date: Date | string) => {
+  const d = new Date(date);
+  return `${d.getFullYear()}-${d.getMonth()}`;
+};
+
+export default async function LedgerPage({ searchParams }: { searchParams: Promise<{ period?: string }> }) {
+  const { period } = await searchParams;
+  const allEntries = await fetchLedgerEntries();
+
+  // Period options are derived from the actual entry dates, newest first.
+  const monthLabels = new Map<string, string>();
+  for (const entry of allEntries) {
+    const key = monthKey(entry.date);
+    if (!monthLabels.has(key)) {
+      monthLabels.set(key, new Date(entry.date).toLocaleString('en-IE', { month: 'long', year: 'numeric' }));
+    }
+  }
+  const sortedMonths = [...monthLabels.entries()].sort((a, b) => {
+    const [ay, am] = a[0].split('-').map(Number);
+    const [by, bm] = b[0].split('-').map(Number);
+    return by !== ay ? by - ay : bm - am;
+  });
+  const periodOptions: LedgerPeriodOption[] = [
+    { value: 'all', label: 'All Time' },
+    ...sortedMonths.map(([value, label]) => ({ value, label })),
+  ];
+
+  const selectedPeriod = period && monthLabels.has(period) ? period : 'all';
+  const entries = selectedPeriod === 'all'
+    ? allEntries
+    : allEntries.filter((entry) => monthKey(entry.date) === selectedPeriod);
 
   const formatCurrency = (amount: number | { toString(): string }) => {
     return new Intl.NumberFormat('de-DE', {
@@ -31,14 +61,7 @@ export default async function LedgerPage() {
         </div>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <div style={{ display: 'flex', alignItems: 'center', background: 'var(--surface-color)', padding: '0.5rem 1rem', borderRadius: '10px', border: '1px solid var(--surface-border)', gap: '0.5rem', fontSize: '0.875rem' }}>
-            <span style={{ color: 'var(--text-secondary)' }}>Period:</span>
-            <select style={{ background: 'none', border: 'none', color: 'var(--text-primary)', outline: 'none', fontWeight: '600' }}>
-              <option>All Time</option>
-              <option>October 2026</option>
-              <option>September 2026</option>
-            </select>
-          </div>
+          <LedgerPeriodFilter options={periodOptions} />
           <a
             href="/api/export/ledger"
             download

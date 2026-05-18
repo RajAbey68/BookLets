@@ -20,6 +20,21 @@ export async function getDashboardMetrics() {
   }
 }
 
+export async function getRevenueTrend() {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) {
+    return { success: false, error: resolved.error };
+  }
+
+  try {
+    const trend = await MetricsService.getRevenueTrend(resolved.context.organizationId);
+    return { success: true, data: trend };
+  } catch (error) {
+    console.error('[PortfolioActions] Failed to fetch revenue trend:', error);
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export async function syncHostawayData() {
   const resolved = await resolveActiveContext();
   if (!resolved.ok) {

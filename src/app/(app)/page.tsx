@@ -7,7 +7,7 @@ const IconTrendingUp = () => (
 
 import Link from 'next/link';
 import { ReceiptUploader } from '@/components/ReceiptUploader';
-import { getDashboardMetrics } from '@/app/actions/portfolio.actions';
+import { getDashboardMetrics, getRevenueTrend } from '@/app/actions/portfolio.actions';
 import { getDefaultUploadContext } from '@/app/actions/context.actions';
 import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 
@@ -15,11 +15,15 @@ import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const [metricsResult, uploadContext, properties] = await Promise.all([
+  const [metricsResult, uploadContext, properties, trendResult] = await Promise.all([
     getDashboardMetrics(),
     getDefaultUploadContext(),
     fetchPortfolioMetrics(),
+    getRevenueTrend(),
   ]);
+  const trend = (trendResult.success && trendResult.data) ? trendResult.data : [];
+  const trendMax = Math.max(1, ...trend.map((p) => Math.max(p.revenue, p.netIncome)));
+  const hasTrend = trend.some((p) => p.revenue !== 0 || p.netIncome !== 0);
   const metrics = (metricsResult.success && metricsResult.data) ? metricsResult.data : {
     totalRevenue: 0,
     netIncome: 0,
@@ -127,14 +131,32 @@ export default async function Home() {
             </div>
           </div>
           
-          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem 0', minHeight: '200px', color: 'var(--text-secondary)', textAlign: 'center' }}>
-            {/* Monthly revenue time-series aggregation is not yet implemented;
-                show an honest empty state rather than placeholder bars. */}
-            <div>
-              <div style={{ fontSize: '0.9375rem', marginBottom: '0.25rem' }}>No revenue trend yet</div>
-              <div style={{ fontSize: '0.8125rem' }}>Trends appear once bookings are recorded and recognised.</div>
+          {hasTrend ? (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'flex-end', gap: '0.75rem', padding: '1rem 0', height: '240px' }}>
+              {trend.map((point) => (
+                <div key={point.month} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem', height: '100%' }}>
+                  <div style={{ flex: 1, width: '100%', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', gap: '4px' }}>
+                    <div
+                      title={`Gross Revenue: ${formatCurrency(point.revenue)}`}
+                      style={{ width: '40%', height: `${(point.revenue / trendMax) * 100}%`, minHeight: point.revenue > 0 ? '3px' : '0', background: 'var(--accent-color)', borderRadius: '4px 4px 0 0' }}
+                    />
+                    <div
+                      title={`Net Income: ${formatCurrency(point.netIncome)}`}
+                      style={{ width: '40%', height: `${(Math.max(0, point.netIncome) / trendMax) * 100}%`, minHeight: point.netIncome > 0 ? '3px' : '0', background: 'rgba(59, 130, 246, 0.3)', borderRadius: '4px 4px 0 0' }}
+                    />
+                  </div>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{point.month}</div>
+                </div>
+              ))}
             </div>
-          </div>
+          ) : (
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem 0', minHeight: '200px', color: 'var(--text-secondary)', textAlign: 'center' }}>
+              <div>
+                <div style={{ fontSize: '0.9375rem', marginBottom: '0.25rem' }}>No revenue trend yet</div>
+                <div style={{ fontSize: '0.8125rem' }}>Trends appear once bookings are recorded and recognised.</div>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="glass-card">

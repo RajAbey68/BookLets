@@ -10,6 +10,12 @@ export interface PortfolioMetrics {
   revpar: number;
 }
 
+export interface RevenueTrendPoint {
+  month: string;
+  revenue: number;
+  netIncome: number;
+}
+
 /**
  * Metrics Service
  * 
@@ -91,5 +97,65 @@ export class MetricsService {
       adr: Math.round(adr * 100) / 100,
       revpar: Math.round(revpar * 100) / 100
     };
+  }
+
+  /**
+   * Monthly gross-revenue and net-income series for the trailing `months`
+   * window (inclusive of the current month). Aggregates POSTED journal
+   * lines in REVENUE and EXPENSE accounts, bucketed by entry month.
+   */
+  static async getRevenueTrend(organizationId: string, months = 6): Promise<RevenueTrendPoint[]> {
+    const today = new Date();
+    const start = new Date(today.getFullYear(), today.getMonth() - (months - 1), 1);
+
+    const lines = await prisma.journalLine.findMany({
+      where: {
+        journalEntry: {
+          organizationId,
+          status: 'POSTED',
+          date: { gte: start },
+        },
+        account: {
+          organizationId,
+          type: { in: ['REVENUE', 'EXPENSE'] },
+        },
+      },
+      include: {
+        journalEntry: { select: { date: true } },
+        account: { select: { type: true } },
+      },
+    });
+
+    const buckets = new Map<string, { revenue: Decimal; expense: Decimal }>();
+    for (let i = 0; i < months; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth() - (months - 1) + i, 1);
+      buckets.set(`${d.getFullYear()}-${d.getMonth()}`, { revenue: new Decimal(0), expense: new Decimal(0) });
+    }
+
+    for (const line of lines) {
+      const d = new Date(line.journalEntry.date);
+      const bucket = buckets.get(`${d.getFullYear()}-${d.getMonth()}`);
+      if (!bucket) continue;
+      const amount = new Decimal(line.amount);
+      if (line.account.type === 'REVENUE') {
+        bucket.revenue = line.isDebit ? bucket.revenue.minus(amount) : bucket.revenue.plus(amount);
+      } else {
+        bucket.expense = line.isDebit ? bucket.expense.plus(amount) : bucket.expense.minus(amount);
+      }
+    }
+
+    const result: RevenueTrendPoint[] = [];
+    for (let i = 0; i < months; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth() - (months - 1) + i, 1);
+      const bucket = buckets.get(`${d.getFullYear()}-${d.getMonth()}`)!;
+      const revenue = bucket.revenue.toNumber();
+      const expense = bucket.expense.toNumber();
+      result.push({
+        month: d.toLocaleString('en-IE', { month: 'short' }),
+        revenue,
+        netIncome: revenue - expense,
+      });
+    }
+    return result;
   }
 }
