@@ -29,26 +29,34 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
 
       // Allow-list gate: only emails listed in AUTH_ALLOWED_EMAILS may
       // sign in. The value is a comma-separated list, matched
-      // case-insensitively. If the var is unset OR empty, sign-in is
-      // open — suitable only for local development. Production
-      // deployments MUST set this; without it any Google account in the
-      // world can access the app once they hit the URL.
-      const allowlistRaw = process.env.AUTH_ALLOWED_EMAILS ?? "";
-      const allowlist = allowlistRaw
+      // case-insensitively. Once the env var is set, it wins over the
+      // hardcoded fallback below.
+      //
+      // TEMPORARY FALLBACK (added 2026-05-17 by process-handling@cloud-vm
+      // at LT2's request, per agent-bus PR #32 thread): operator is
+      // currently locked out of the Vercel dashboard (Safari adaptive-
+      // auth + new-IP heuristic), so AUTH_ALLOWED_EMAILS cannot be set.
+      // The DEFAULT_ALLOWLIST below unblocks sign-in for the operator
+      // without exposing the deployment to the whole internet. Once
+      // dashboard access is restored:
+      //   1. set AUTH_ALLOWED_EMAILS in Vercel (Production scope) to
+      //      the comma-separated team list,
+      //   2. redeploy,
+      //   3. delete DEFAULT_ALLOWLIST and revert this block to the
+      //      strict env-only + fail-closed-in-prod behaviour.
+      const DEFAULT_ALLOWLIST = ["rajabey68@gmail.com"];
+
+      const envAllowlist = (process.env.AUTH_ALLOWED_EMAILS ?? "")
         .split(",")
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean);
-      if (allowlist.length > 0) {
-        if (!allowlist.includes(user.email.toLowerCase())) {
-          console.warn(
-            `[auth] Rejected sign-in for ${user.email} — not in AUTH_ALLOWED_EMAILS.`,
-          );
-          return false;
-        }
-      } else if (process.env.NODE_ENV === "production") {
-        // Fail closed in production if the operator forgot the allow-list.
-        console.error(
-          "[auth] AUTH_ALLOWED_EMAILS is empty in production; refusing sign-in to avoid an open-door deployment.",
+      const allowlist =
+        envAllowlist.length > 0 ? envAllowlist : DEFAULT_ALLOWLIST;
+
+      if (!allowlist.includes(user.email.toLowerCase())) {
+        const source = envAllowlist.length > 0 ? "env" : "default-fallback";
+        console.warn(
+          `[auth] Rejected sign-in for ${user.email} — not in allow-list (${source}).`,
         );
         return false;
       }
