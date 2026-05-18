@@ -29,34 +29,27 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
 
       // Allow-list gate: only emails listed in AUTH_ALLOWED_EMAILS may
       // sign in. The value is a comma-separated list, matched
-      // case-insensitively. Once the env var is set, it wins over the
-      // hardcoded fallback below.
-      //
-      // TEMPORARY FALLBACK (added 2026-05-17 by process-handling@cloud-vm
-      // at LT2's request, per agent-bus PR #32 thread): operator is
-      // currently locked out of the Vercel dashboard (Safari adaptive-
-      // auth + new-IP heuristic), so AUTH_ALLOWED_EMAILS cannot be set.
-      // The DEFAULT_ALLOWLIST below unblocks sign-in for the operator
-      // without exposing the deployment to the whole internet. Once
-      // dashboard access is restored:
-      //   1. set AUTH_ALLOWED_EMAILS in Vercel (Production scope) to
-      //      the comma-separated team list,
-      //   2. redeploy,
-      //   3. delete DEFAULT_ALLOWLIST and revert this block to the
-      //      strict env-only + fail-closed-in-prod behaviour.
-      const DEFAULT_ALLOWLIST = ["rajabey68@gmail.com"];
-
+      // case-insensitively. Fail-closed in production when the env var
+      // is absent — never fall back to a hardcoded list.
       const envAllowlist = (process.env.AUTH_ALLOWED_EMAILS ?? "")
         .split(",")
         .map((s) => s.trim().toLowerCase())
         .filter(Boolean);
-      const allowlist =
-        envAllowlist.length > 0 ? envAllowlist : DEFAULT_ALLOWLIST;
 
-      if (!allowlist.includes(user.email.toLowerCase())) {
-        const source = envAllowlist.length > 0 ? "env" : "default-fallback";
+      if (envAllowlist.length === 0) {
+        if (process.env.NODE_ENV === "production") {
+          console.error(
+            "[auth] AUTH_ALLOWED_EMAILS is not set — refusing all sign-ins in production.",
+          );
+          return false;
+        }
+        // Development: allow all sign-ins when env var is absent.
+        return true;
+      }
+
+      if (!envAllowlist.includes(user.email.toLowerCase())) {
         console.warn(
-          `[auth] Rejected sign-in for ${user.email} — not in allow-list (${source}).`,
+          `[auth] Rejected sign-in for ${user.email} — not in allow-list (env).`,
         );
         return false;
       }
