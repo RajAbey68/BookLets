@@ -1,12 +1,20 @@
 'use server';
 
-import { parseSpreadsheet, type ParseResult } from '@/lib/spreadsheet-parser';
+import {
+  parseSpreadsheet,
+  serializeParseResult,
+  type SerializedParseResult,
+} from '@/lib/spreadsheet-parser';
 import { resolveActiveContext } from '@/lib/auth-context';
 
 export interface ParseUploadedSpreadsheetResult {
   ok: boolean;
-  /** Present when ok === true. */
-  result?: ParseResult;
+  /**
+   * Present when ok === true. Monetary fields are pre-formatted strings
+   * (LKR, 2 dp) because Decimal class instances cannot cross the
+   * Server-Action serialization boundary.
+   */
+  result?: SerializedParseResult;
   /** Present when ok === false. Surfaces in the UI inline. */
   error?: string;
 }
@@ -61,7 +69,7 @@ export async function parseUploadedSpreadsheet(
       `[ImportAction] ${ctx.context.userId} parsed ${file.name}: ` +
       `${result.rows.length} rows, ${result.unmappedColumns.length} unmapped cols, ${result.warnings.length} warnings`,
     );
-    return { ok: true, result };
+    return { ok: true, result: serializeParseResult(result) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[ImportAction] Parse failed for ${file.name}: ${message}`);

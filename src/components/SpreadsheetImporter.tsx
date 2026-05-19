@@ -2,7 +2,11 @@
 
 import { useState, useTransition } from 'react';
 import { parseUploadedSpreadsheet } from '@/app/actions/spreadsheet-import.actions';
-import type { ParseResult, ParsedRow, Section } from '@/lib/spreadsheet-parser';
+import type {
+  SerializedParseResult,
+  SerializedParsedRow,
+  Section,
+} from '@/lib/spreadsheet-parser';
 
 const SECTION_LABELS: Record<Section, string> = {
   'prior-month':         'Prior-Month Catch-up',
@@ -20,20 +24,19 @@ const SECTION_ORDER: Section[] = [
   'accrual-reversals', 'prepayments', 'prepayment-reversals', 'unknown',
 ];
 
-function fmtAmount(value: { toFixed: (n: number) => string }): string {
-  return value.toFixed(2);
+function fmtAmount(value: string): string {
+  // Server already formats to 2 dp; render as-is.
+  return value;
 }
 
-function fmtDate(d: Date | string | null): string {
+function fmtDate(d: string | null): string {
   if (!d) return '—';
-  const date = typeof d === 'string' ? new Date(d) : d;
-  return Number.isNaN(date.getTime())
-    ? '—'
-    : date.toISOString().slice(0, 10);
+  const date = new Date(d);
+  return Number.isNaN(date.getTime()) ? '—' : date.toISOString().slice(0, 10);
 }
 
 export default function SpreadsheetImporter() {
-  const [parsed, setParsed] = useState<ParseResult | null>(null);
+  const [parsed, setParsed] = useState<SerializedParseResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -138,8 +141,8 @@ export default function SpreadsheetImporter() {
   );
 }
 
-function ParsePreview({ result }: { result: ParseResult }) {
-  const grouped = new Map<Section, ParsedRow[]>();
+function ParsePreview({ result }: { result: SerializedParseResult }) {
+  const grouped = new Map<Section, SerializedParsedRow[]>();
   for (const row of result.rows) {
     const list = grouped.get(row.section) ?? [];
     list.push(row);
@@ -187,7 +190,7 @@ function ParsePreview({ result }: { result: ParseResult }) {
   );
 }
 
-function PerSectionTotals({ result }: { result: ParseResult }) {
+function PerSectionTotals({ result }: { result: SerializedParseResult }) {
   const sectionsWithData = SECTION_ORDER.filter(
     (s) => Object.keys(result.totalsBySection[s]).length > 0,
   );
@@ -231,7 +234,7 @@ function PerSectionTotals({ result }: { result: ParseResult }) {
   );
 }
 
-function SectionTable({ section, rows }: { section: Section; rows: ParsedRow[] }) {
+function SectionTable({ section, rows }: { section: Section; rows: SerializedParsedRow[] }) {
   return (
     <div className="glass-card" style={{ padding: '1.5rem' }}>
       <h4 style={{ margin: '0 0 0.75rem 0' }}>

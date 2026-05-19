@@ -91,6 +91,78 @@ export interface ParseResult {
 }
 
 /**
+ * Wire shape returned from Server Actions. Next.js can't serialize Decimal
+ * instances across the action boundary, so monetary fields become strings
+ * (LKR with 2 decimal places). The browser only needs to render these,
+ * not arithmetic on them — so plain strings are sufficient.
+ */
+export interface SerializedParsedAmount {
+  columnHeader: string;
+  accountCode: string | null;
+  amount: string;
+}
+
+export interface SerializedParsedRow {
+  rowId: string;
+  rowNumber: number;
+  section: Section;
+  date: string | null;
+  dateForwardFilled: boolean;
+  description: string;
+  pettyCashTopUp: string | null;
+  amounts: SerializedParsedAmount[];
+  warnings: string[];
+}
+
+export interface SerializedParseResult {
+  sheetName: string;
+  periodLabel: string;
+  rows: SerializedParsedRow[];
+  totalsBySection: Record<Section, Record<string, string>>;
+  netAmount: string;
+  unmappedColumns: string[];
+  warnings: string[];
+  fileHash: string;
+}
+
+export function serializeParseResult(result: ParseResult): SerializedParseResult {
+  const totalsBySection = {} as Record<Section, Record<string, string>>;
+  for (const section of Object.keys(result.totalsBySection) as Section[]) {
+    const src = result.totalsBySection[section];
+    const dst: Record<string, string> = {};
+    for (const [code, total] of Object.entries(src)) {
+      dst[code] = total.toFixed(2);
+    }
+    totalsBySection[section] = dst;
+  }
+
+  return {
+    sheetName: result.sheetName,
+    periodLabel: result.periodLabel,
+    rows: result.rows.map((row) => ({
+      rowId: row.rowId,
+      rowNumber: row.rowNumber,
+      section: row.section,
+      date: row.date ? row.date.toISOString() : null,
+      dateForwardFilled: row.dateForwardFilled,
+      description: row.description,
+      pettyCashTopUp: row.pettyCashTopUp ? row.pettyCashTopUp.toFixed(2) : null,
+      amounts: row.amounts.map((a) => ({
+        columnHeader: a.columnHeader,
+        accountCode: a.accountCode,
+        amount: a.amount.toFixed(2),
+      })),
+      warnings: row.warnings,
+    })),
+    totalsBySection,
+    netAmount: result.netAmount.toFixed(2),
+    unmappedColumns: result.unmappedColumns,
+    warnings: result.warnings,
+    fileHash: result.fileHash,
+  };
+}
+
+/**
  * Operator's column headers → chart-of-accounts code. Keys are lower-cased
  * and whitespace-normalised on lookup; common typos are listed explicitly.
  * Codes must exist in the seeded chart (prisma/seed.ts).
@@ -357,11 +429,14 @@ export async function parseSpreadsheet(buffer: Buffer | ArrayBuffer): Promise<Pa
     }
 
     // Skip marker (subtotals, monthly totals, plain "Adjustments" header)?
-    if (SKIP_MARKERS.some((p) => p.test(descStr))) continue;
-
-    // Auto-revert to 'daily' once we leave the prior-month block.
-    if (currentSection === 'prior-month' && /^prior/i.test(descStr) === false) {
-      // implicit — handled by lack of explicit marker for end-of-prior-month
+    if (SKIP_MARKERS.some((p) => p.test(descStr))) {
+      // The prior-month block has no explicit start-of-daily marker; its end
+      // is the "Total Prior Months..." subtotal. Reset to daily so the next
+      // ordinary rows aren't mis-bucketed.
+      if (currentSection === 'prior-month' && /^total\s+prior\s+months?/i.test(descStr)) {
+        currentSection = 'daily';
+      }
+      continue;
     }
 
     // Collect amounts from every mapped column on this row.
