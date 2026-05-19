@@ -51,11 +51,13 @@ async function main() {
   // • Books currency = LKR. EUR/USD/GBP bookings get converted at
   //   recognition (the source-currency amount lives on Booking; the JE
   //   is in LKR). For USD management reporting, take a single spot rate
-  //   on the month-close day and re-value every LKR JournalLine — i.e.
+  //   on the close date — or the last day of the month if close is
+  //   delayed — and re-value every LKR JournalLine. If a daily-rate feed
+  //   is available, prefer the calendar-month average over the spot.
   //   USD reporting is a derived view at close, not a per-entry capture.
-  //   A future `FxRate` table will store the chosen month-end rate per
-  //   period; the export-to-accountant step (P5) writes both LKR and
-  //   USD-equivalent columns using that rate. Out of scope for this PR.
+  //   A future `FxRate` table will store the chosen rate per period;
+  //   the export-to-accountant step (P5) writes both LKR and USD-
+  //   equivalent columns using that rate. Out of scope for this PR.
   //
   // • Payroll split (Sri Lanka):
   //     6100 Salaries (Gross Accrual)   — agreed monthly compensation

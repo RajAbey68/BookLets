@@ -38,15 +38,15 @@ export default async function Home() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '2.5rem' }}>
+      <div className="page-header">
         <div>
           <div style={{ fontSize: '0.875rem', color: 'var(--accent-color)', fontWeight: '600', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Overview
           </div>
           <h1 style={{ marginBottom: 0 }}>Financial Dashboard</h1>
         </div>
-        
-        <div style={{ display: 'flex', gap: '1rem' }}>
+
+        <div className="page-header-actions">
           <a
             href="/api/export/ledger"
             download
