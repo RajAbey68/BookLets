@@ -15,6 +15,7 @@ BookLets is a specialized financial management system designed for property mana
 - **Bookkeeper / accountant deck:** [`docs/booklets-walkthrough.html`](docs/booklets-walkthrough.html) (and `.pptx`) — visual walkthrough.
 - **LLM assistant setup:** [`docs/LLM-ASSISTANT.md`](docs/LLM-ASSISTANT.md) — how to stand up a NotebookLM-based help assistant grounded only in BookLets sources.
 - **NotebookLM source bundle:** [`docs/llm-sources/`](docs/llm-sources/README.md) — what to load into the notebook and in what order.
+- **Architecture pack:** [`docs/architecture/`](docs/architecture/README.md) — current state, target state, review & risks.
 
 > NotebookLM notebook URL: *to be added by the operator once the notebook is created.*
 
