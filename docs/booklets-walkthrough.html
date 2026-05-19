@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>BookLets — Walkthrough for Bookkeeper & Accountant</title>
+<style>
+  :root {
+    --ink: #0f172a;
+    --ink-soft: #475569;
+    --accent: #2563eb;
+    --accent-soft: #dbeafe;
+    --rule: #e2e8f0;
+    --card: #f8fafc;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --good: #166534;
+    --good-soft: #dcfce7;
+    --bad: #b91c1c;
+    --bad-soft: #fee2e2;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink);
+    background: #f1f5f9;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .deck { max-width: 880px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+  .slide {
+    background: #fff;
+    border: 1px solid var(--rule);
+    border-radius: 12px;
+    padding: 2.5rem 2.75rem;
+    margin-bottom: 2rem;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+    page-break-after: always;
+  }
+  .slide:last-child { page-break-after: auto; }
+  .eyebrow {
+    color: var(--accent);
+    font-weight: 700;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.6rem;
+  }
+  h1.cover-title {
+    font-size: 2.4rem;
+    margin: 0 0 1rem;
+    line-height: 1.15;
+  }
+  h1 { font-size: 1.75rem; margin: 0 0 1.25rem; line-height: 1.2; }
+  h2 { font-size: 1.15rem; margin: 1.5rem 0 0.5rem; }
+  h3 { font-size: 0.95rem; margin: 1.25rem 0 0.4rem; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.04em; }
+  p { margin: 0 0 0.8rem; }
+  ul, ol { margin: 0 0 1rem 1.25rem; padding: 0; }
+  li { margin-bottom: 0.35rem; }
+  .lede { color: var(--ink-soft); font-size: 1.05rem; }
+  .meta {
+    color: var(--ink-soft);
+    font-size: 0.8rem;
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--rule);
+  }
+  .pill {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 0.2rem 0.6rem;
+    border-radius: 99px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-left: 0.4rem;
+    vertical-align: middle;
+  }
+  .pill.live { background: var(--good-soft); color: var(--good); }
+  .pill.partial { background: var(--warn-soft); color: var(--warn); }
+  .pill.planned { background: var(--bad-soft); color: var(--bad); }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    margin-top: 1rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+  }
+  .card h4 { margin: 0 0 0.3rem; font-size: 0.95rem; }
+  .card p { font-size: 0.875rem; color: var(--ink-soft); margin: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    margin: 0.5rem 0 1rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.55rem 0.7rem;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  th {
+    background: var(--card);
+    color: var(--ink-soft);
+    font-weight: 600;
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  td code, .mono {
+    font-family: "SF Mono", Consolas, "Roboto Mono", monospace;
+    font-size: 0.82rem;
+    background: var(--accent-soft);
+    color: var(--accent);
+    padding: 0.05rem 0.35rem;
+    border-radius: 4px;
+  }
+  .callout {
+    background: var(--accent-soft);
+    border-left: 4px solid var(--accent);
+    padding: 0.9rem 1.1rem;
+    border-radius: 6px;
+    margin: 1rem 0;
+    font-size: 0.92rem;
+  }
+  .callout.warn {
+    background: var(--warn-soft);
+    border-left-color: var(--warn);
+  }
+  .toc-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .toc-list li {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--rule);
+    font-size: 0.95rem;
+  }
+  .toc-list li span:last-child { color: var(--ink-soft); font-size: 0.8rem; }
+  .footer-note {
+    font-size: 0.75rem;
+    color: var(--ink-soft);
+    text-align: center;
+    margin-top: 3rem;
+  }
+  @media print {
+    body { background: #fff; }
+    .deck { padding: 0; max-width: none; }
+    .slide {
+      box-shadow: none;
+      border: none;
+      border-radius: 0;
+      margin: 0;
+      padding: 1.6cm 2cm;
+      min-height: 25cm;
+    }
+    @page { size: A4; margin: 0; }
+  }
+</style>
+</head>
+<body>
+<div class="deck">
+
+<!-- ── Cover ─────────────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">BookLets</div>
+  <h1 class="cover-title">A guided tour for the<br/>bookkeeper &amp; accountant</h1>
+  <p class="lede">
+    BookLets is the in-house accounting and operations system for the Ko Lake
+    short-term-rental portfolio. This document walks through each screen, what
+    you'll use it for, and the underlying accounting policies the system
+    enforces.
+  </p>
+  <div class="meta">
+    <strong>Audience:</strong> Bookkeeper, accountant, external reviewer<br/>
+    <strong>Currency:</strong> Books in LKR, reporting in USD (month-close FX)<br/>
+    <strong>Framework:</strong> SLFRS (Sri Lanka Financial Reporting Standards)
+  </div>
+</section>
+
+<!-- ── Status legend & contents ───────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Contents</div>
+  <h1>What's in this pack</h1>
+  <ul class="toc-list">
+    <li><span>1. What BookLets is for</span><span>Page 3</span></li>
+    <li><span>2. The monthly workflow at a glance</span><span>Page 4</span></li>
+    <li><span>3. Sign-in</span><span>Page 5</span></li>
+    <li><span>4. Dashboard</span><span>Page 6</span></li>
+    <li><span>5. Properties</span><span>Page 7</span></li>
+    <li><span>6. Bookings</span><span>Page 8</span></li>
+    <li><span>7. General Ledger</span><span>Page 9</span></li>
+    <li><span>8. Imports — spreadsheet uploader</span><span>Page 10</span></li>
+    <li><span>9. Chart of accounts &amp; policies</span><span>Page 11</span></li>
+    <li><span>10. Roadmap — what's coming next</span><span>Page 12</span></li>
+  </ul>
+  <h3>Status legend used in this document</h3>
+  <p>
+    <span class="pill live">Live</span> Available in production now.
+    <span class="pill partial">Preview</span> Read-only; posting comes in a later phase.
+    <span class="pill planned">Planned</span> Designed and scheduled, not yet built.
+  </p>
+</section>
+
+<!-- ── 1. What it does ──────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Section 1</div>
+  <h1>What BookLets is for</h1>
+  <p class="lede">
+    A single place to record income and expenses for the villa, attribute
+    revenue to the correct month, produce a clean general ledger, and hand
+    monthly numbers to the accountant for QuickBooks Online or statutory
+    filing.
+  </p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4>Replaces</h4>
+      <p>Loose spreadsheets for petty-cash analysis; manual re-keying of monthly totals; ad-hoc reconciliation between operator and accountant.</p>
+    </div>
+    <div class="card">
+      <h4>Feeds</h4>
+      <p>QuickBooks Online via CSV export. The system is the source of truth for the books; QBO is the canonical filing surface.</p>
+    </div>
+    <div class="card">
+      <h4>Books in</h4>
+      <p>LKR (Sri Lankan rupees). Every transaction is recorded in LKR exactly as it happened.</p>
+    </div>
+    <div class="card">
+      <h4>Reports in</h4>
+      <p>USD using the spot FX rate on the day the month is closed (preferred: monthly average if a daily feed is available).</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <strong>One golden rule</strong> — When a guest's stay crosses a month
+    boundary, the <em>entire</em> stay revenue is booked to the
+    <strong>check-out month</strong>. No day-by-day apportionment. This is
+    because refund risk effectively closes on check-out.
+  </div>
+</section>
+
+<!-- ── 2. Workflow ──────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Section 2</div>
+  <h1>The monthly workflow at a glance</h1>
+
+  <table>
+    <thead>
+      <tr><th style="width:8%">#</th><th>Step</th><th style="width:25%">Where in BookLets</th><th style="width:18%">Owner</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1</td>
+        <td>Record petty-cash and operating expenses on the operator's monthly workbook (Income &amp; Petty Cash Analysis).</td>
+        <td>External spreadsheet (today)</td>
+        <td>Villa captain</td>
+      </tr>
+      <tr>
+        <td>2</td>
+        <td>At month end, upload the workbook. BookLets parses every row, classifies it to a chart-of-accounts code, and shows a preview.</td>
+        <td><span class="mono">/imports</span></td>
+        <td>Bookkeeper</td>
+      </tr>
+      <tr>
+        <td>3</td>
+        <td>Review the preview: per-section totals, any unmapped columns, rows flagged with warnings. Fix the source workbook and re-upload if anything is off.</td>
+        <td><span class="mono">/imports</span> preview</td>
+        <td>Bookkeeper</td>
+      </tr>
+      <tr>
+        <td>4</td>
+        <td>Confirm &amp; post. BookLets writes balanced double-entry journal entries to the general ledger. Idempotent: re-uploading the same file does not duplicate.</td>
+        <td><span class="mono">/imports</span> (P2 — next phase)</td>
+        <td>Bookkeeper</td>
+      </tr>
+      <tr>
+        <td>5</td>
+        <td>Reconcile to bank. Match cleared transactions; queue exceptions.</td>
+        <td><span class="mono">/reconcile</span> (P4 — planned)</td>
+        <td>Bookkeeper</td>
+      </tr>
+      <tr>
+        <td>6</td>
+        <td>Run the FX revaluation at month close (LKR → USD).</td>
+        <td>Month-close action (P5)</td>
+        <td>Accountant</td>
+      </tr>
+      <tr>
+        <td>7</td>
+        <td>Export the ledger CSV and import into QuickBooks Online.</td>
+        <td>Export CSV button</td>
+        <td>Accountant</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ── 3. Sign-in ────────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 1</div>
+  <h1>Sign-in <span class="pill live">Live</span></h1>
+  <p class="lede">Access is by Google account only, and only emails on the allow-list can sign in.</p>
+
+  <h2>What you'll see</h2>
+  <ul>
+    <li>A centred card with the BookLets eyebrow, a "Sign in" heading, and a single "Continue with Google" button.</li>
+    <li>Clear error messages if your email is not on the allow-list, or if the system is misconfigured.</li>
+  </ul>
+
+  <h2>What you need to do</h2>
+  <ol>
+    <li>Send your Google address to the operator.</li>
+    <li>They add it to the allow-list.</li>
+    <li>Visit the site, click <strong>Continue with Google</strong>, and you'll land on the Dashboard.</li>
+  </ol>
+
+  <div class="callout warn">
+    <strong>Security note</strong> — In production, if the allow-list is
+    accidentally cleared, sign-in fails for everyone (fail-closed). This is
+    deliberate: the operator would rather lock themselves out than let an
+    unauthorised account into the books.
+  </div>
+</section>
+
+<!-- ── 4. Dashboard ──────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 2</div>
+  <h1>Dashboard <span class="pill live">Live</span></h1>
+  <p class="lede">First screen after sign-in. A one-glance view of how the portfolio is performing this month and year-to-date.</p>
+
+  <h2>What's on it</h2>
+  <div class="grid-2">
+    <div class="card"><h4>Total Revenue</h4><p>Month-to-date gross income recognised in the ledger.</p></div>
+    <div class="card"><h4>Net Income</h4><p>Revenue minus operating expenses. Margin shown in the sub-label.</p></div>
+    <div class="card"><h4>ADR / RevPAR</h4><p>Average daily rate and revenue per available room — STR yield metrics.</p></div>
+    <div class="card"><h4>Portfolio Occupancy</h4><p>% of available room-nights actually sold this month.</p></div>
+  </div>
+
+  <h2>Below the cards</h2>
+  <ul>
+    <li><strong>Receipt uploader</strong> — drop a photo or scan of a receipt; gets attached to an expense (handwritten / printed flagged separately — see Roadmap, P8).</li>
+    <li><strong>Revenue Trend</strong> bar chart — gross revenue and net income side by side for recent months.</li>
+    <li><strong>Property Yield</strong> list — per-villa headline numbers with a link through to the Properties page.</li>
+  </ul>
+
+  <h2>Buttons in the header</h2>
+  <ul>
+    <li><strong>Download Report</strong> — exports the ledger CSV for the period.</li>
+    <li><strong>+ Create Entry</strong> — jumps to the General Ledger to add a manual journal entry.</li>
+  </ul>
+</section>
+
+<!-- ── 5. Properties ─────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 3</div>
+  <h1>Properties <span class="pill live">Live</span></h1>
+  <p class="lede">One card per villa, with the financial picture for that asset.</p>
+
+  <h2>Each property card shows</h2>
+  <table>
+    <tbody>
+      <tr><td><strong>Status pill</strong></td><td>Active, paused, or in setup.</td></tr>
+      <tr><td><strong>Total Revenue</strong></td><td>Period-to-date gross income for that villa.</td></tr>
+      <tr><td><strong>Net Yield</strong></td><td>Revenue minus directly attributable cost.</td></tr>
+      <tr><td><strong>ADR</strong></td><td>Average daily rate over occupied nights.</td></tr>
+      <tr><td><strong>RevPAR</strong></td><td>Revenue per available room-night (includes vacant nights).</td></tr>
+      <tr><td><strong>Occupancy bar</strong></td><td>Visual % of nights sold vs available.</td></tr>
+      <tr><td><strong>Details →</strong></td><td>Drills into the per-property page (bookings, costs, manager).</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Top-right action</h2>
+  <p><strong>Sync Properties</strong> — pulls the latest property list and metadata from Hostaway (the channel manager) so BookLets stays aligned with the live inventory.</p>
+
+  <div class="callout">
+    Currently the portfolio is one villa (Ko Lake). The grid layout supports
+    any number; new villas can be added without code changes.
+  </div>
+</section>
+
+<!-- ── 6. Bookings ───────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 4</div>
+  <h1>Bookings <span class="pill live">Live</span></h1>
+  <p class="lede">A single ordered table of every reservation, regardless of which channel it came through.</p>
+
+  <h2>Columns</h2>
+  <table>
+    <thead><tr><th>Column</th><th>What it tells you</th></tr></thead>
+    <tbody>
+      <tr><td>ID</td><td>Hostaway booking reference, or BookLets' internal short ID if the booking was created manually.</td></tr>
+      <tr><td>Property</td><td>Which villa.</td></tr>
+      <tr><td>Channel</td><td>Booking.com, Airbnb, direct, etc.</td></tr>
+      <tr><td>Check In / Check Out</td><td>Stay dates. The check-out date determines which month the revenue is booked to.</td></tr>
+      <tr><td>Total</td><td>Gross reservation value, in the channel's billing currency.</td></tr>
+      <tr><td>Status</td><td>Coloured badge: <em>Confirmed</em>, <em>Completed</em>, <em>Pending</em>, <em>Cancelled</em>.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Actions</h2>
+  <ul>
+    <li><strong>+ Create Booking</strong> — manual entry for direct bookings that didn't come through a channel.</li>
+    <li>Hostaway sync (from the Sidebar) pulls in new and updated channel bookings.</li>
+  </ul>
+
+  <div class="callout">
+    <strong>Revenue recognition reminder</strong> — Status moves to
+    <em>Completed</em> on check-out. Revenue is recognised at that point and
+    falls into the check-out month, even if the stay started in the previous
+    month.
+  </div>
+</section>
+
+<!-- ── 7. Ledger ─────────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 5</div>
+  <h1>General Ledger <span class="pill live">Live</span></h1>
+  <p class="lede">The double-entry journal. Every income and expense in BookLets shows up here, in chronological order, with full debit/credit detail.</p>
+
+  <h2>Columns</h2>
+  <table>
+    <thead><tr><th>Column</th><th>What it tells you</th></tr></thead>
+    <tbody>
+      <tr><td>Date</td><td>Transaction date (not posting date — when it actually happened).</td></tr>
+      <tr><td>Reference</td><td>An 8-character ID that links every line of a single journal entry together. All lines with the same Reference balance to zero.</td></tr>
+      <tr><td>Account</td><td>The chart-of-accounts line item, e.g. <em>4000 Rent Income</em> or <em>6200 Electricity</em>.</td></tr>
+      <tr><td>Memo</td><td>Description of the transaction as entered by the bookkeeper or imported from the spreadsheet.</td></tr>
+      <tr><td>Debit</td><td>Green column. Increases assets and expenses; decreases income and liabilities.</td></tr>
+      <tr><td>Credit</td><td>Red column. Increases income and liabilities; decreases assets and expenses.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Filters &amp; export</h2>
+  <ul>
+    <li><strong>Period filter</strong> — dropdown auto-populated with every month that has activity, plus "All Time". Defaults to All Time.</li>
+    <li><strong>Export CSV</strong> — single click; produces a file ready to import into QuickBooks Online. Columns map cleanly to QBO's journal-entry import format.</li>
+  </ul>
+</section>
+
+<!-- ── 8. Imports ────────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Screen 6</div>
+  <h1>Imports — Spreadsheet Uploader <span class="pill partial">Preview</span></h1>
+  <p class="lede">Where you upload the monthly Income &amp; Petty Cash Analysis workbook. Currently a read-only preview; posting to the ledger comes in the next phase.</p>
+
+  <h2>How it works</h2>
+  <ol>
+    <li>Drop the <strong>.xlsx</strong> for the month into the uploader. Limit 10 MB.</li>
+    <li>BookLets parses every row, reads the column headers, and matches each amount to a chart-of-accounts code.</li>
+    <li>A preview appears below the form. Nothing is written to the ledger until the confirm-and-post step (P2, next phase).</li>
+  </ol>
+
+  <h2>What the preview shows you</h2>
+  <table>
+    <tbody>
+      <tr><td><strong>Summary card</strong></td><td>Period label, total rows parsed, net amount (income − expense), and a file fingerprint so you can confirm re-uploads.</td></tr>
+      <tr><td><strong>Totals by account, per section</strong></td><td>One mini-table per spreadsheet section: Prior-Month Catch-up, Daily, Recurring, Accruals, Accrual Reversals, Prepayments, Prepayment Reversals.</td></tr>
+      <tr><td><strong>Unmapped columns</strong></td><td>Amber banner listing any column header BookLets couldn't match to a chart account. Those amounts are ignored until the mapping is added.</td></tr>
+      <tr><td><strong>Per-section row tables</strong></td><td>Every row, with date, description, petty-cash top-up, postings list (account code + column + amount), and any quality warnings.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Warning flags you may see</h2>
+  <ul>
+    <li><strong>Date forward-filled</strong> — date was blank, filled from the previous row (shown with an orange asterisk).</li>
+    <li><strong>Petty-cash &gt; LKR 5,000 without memo</strong> — petty-cash convention requires a memo above this threshold.</li>
+    <li><strong>Amount in unmapped column</strong> — header needs to be added to the chart mapping.</li>
+    <li><strong>Evidence-quality flag</strong> — description contains "no receipt", "handwritten", etc. Useful for receipt chase-up.</li>
+  </ul>
+</section>
+
+<!-- ── 9. Chart & policies ───────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Section 9</div>
+  <h1>Chart of accounts &amp; policies</h1>
+
+  <h2>Chart of accounts (36 lines)</h2>
+  <table>
+    <thead><tr><th style="width:18%">Range</th><th>Type</th><th>Examples</th></tr></thead>
+    <tbody>
+      <tr><td><span class="mono">1xxx</span></td><td>Assets</td><td>1010 Petty Cash, 1100 Bank — LKR Current</td></tr>
+      <tr><td><span class="mono">2xxx</span></td><td>Liabilities</td><td>2200 APIT Payable, 2210 EPF Payable, 2220 ETF Payable</td></tr>
+      <tr><td><span class="mono">4xxx</span></td><td>Revenue</td><td>4000 Rent, 4010 Cleaning Fee, 4020 Event, 4030 F&amp;B, 4090 Other</td></tr>
+      <tr><td><span class="mono">5xxx</span></td><td>Cost of sales</td><td>5100 Food &amp; Beverage Expense, 5110 Refunds</td></tr>
+      <tr><td><span class="mono">6xxx</span></td><td>Operating</td><td>6100 Salaries, 6110 Wages, 6150 Statutory Contributions, 6200 Electricity, 6300 Cleaning &amp; Maintenance, 6600 Admin</td></tr>
+      <tr><td><span class="mono">7xxx</span></td><td>Capex</td><td>7100 Minor Capex</td></tr>
+      <tr><td><span class="mono">9999</span></td><td>Suspense</td><td>Used for unmapped amounts until the operator classifies them.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Key accounting policies</h2>
+  <table>
+    <thead><tr><th style="width:24%">Topic</th><th>Policy</th></tr></thead>
+    <tbody>
+      <tr><td>Currency</td><td>Books in LKR. USD reporting via FX rate on month-close date (preferred: monthly average if a daily feed is available).</td></tr>
+      <tr><td>Revenue recognition</td><td>Entire stay revenue booked to the check-out month. No day-by-day apportionment.</td></tr>
+      <tr><td>Petty cash</td><td>Held by the villa captain. Top-ups recorded against 1010. Items above LKR 5,000 require a memo.</td></tr>
+      <tr><td>Payroll</td><td>Gross salary split into 6100 Salaries, plus statutory deductions 2200 APIT (income tax), 2210 EPF (8% employee + 12% employer), 2220 ETF (3% employer). Net wages to 6110.</td></tr>
+      <tr><td>Framework</td><td>SLFRS (Sri Lanka Financial Reporting Standards) is the canonical default. Swappable to other GAAP/IFRS standards if the portfolio expands overseas.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ── 10. Roadmap ───────────────────────────────────── -->
+<section class="slide">
+  <div class="eyebrow">Section 10</div>
+  <h1>Roadmap — what's coming next</h1>
+  <p class="lede">In rough priority order. Everything below the line is designed; nothing is in production yet.</p>
+
+  <table>
+    <thead><tr><th style="width:8%">Phase</th><th>Feature</th><th style="width:22%">Status</th></tr></thead>
+    <tbody>
+      <tr><td>P0</td><td>Chart of accounts — 36 lines drafted from the operator's workbook</td><td><span class="pill live">Live</span></td></tr>
+      <tr><td>P1</td><td>Spreadsheet parser + read-only preview</td><td><span class="pill partial">Preview</span></td></tr>
+      <tr><td>P2</td><td>Confirm-and-post — writes balanced journal entries; idempotent on re-upload</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P3</td><td>Editable grid — fix typos and re-classify amounts before posting</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P4</td><td>Bank reconciliation — match ledger entries to cleared bank lines</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P5</td><td>Month close — FX revaluation (LKR → USD), accountant export pack</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P6</td><td>STR-specific dashboards — ADR, RevPAR, channel mix, seasonality</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P7</td><td>Capex tracker &amp; forecast editor</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P8</td><td>Google Drive receipts pipeline — auto-OCR, P/H (printed/handwritten) flag, Sinhala translation</td><td><span class="pill planned">Planned</span></td></tr>
+      <tr><td>P9–11</td><td>AI chat dialog on every screen — database-grounded only, SLFRS-sourced answers for accounting questions</td><td><span class="pill planned">Planned</span></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout">
+    <strong>Your input is welcomed.</strong> If anything in this pack looks
+    wrong — a missing account, a policy you'd rather state differently, a
+    column heading the parser should recognise — please flag it and the
+    operator will update both the system and this document.
+  </div>
+</section>
+
+<p class="footer-note">
+  BookLets walkthrough · prepared for bookkeeper &amp; accountant review.
+</p>
+
+</div>
+</body>
+</html>
