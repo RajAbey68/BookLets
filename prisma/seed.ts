@@ -35,83 +35,117 @@ async function main() {
   // 2. Chart of Accounts
   //
   // Drafted from the operator's "KO_LAKE Income & Petty Cash Analysis"
-  // spreadsheet (March 2026) column headers. Numbering follows a standard
-  // SME pattern:
+  // spreadsheet (March 2026) column headers, refined per operator
+  // confirmation on 2026-05-19. Numbering follows a standard SME pattern:
   //   1xxx Assets         (cash, bank, petty cash, fixed assets)
-  //   2xxx Liabilities    (guest pre-payments, loans payable)
+  //   2xxx Liabilities    (guest pre-payments, loans, payroll deductions)
   //   4xxx Revenue        (rent, events, F&B, other)
   //   5xxx Cost of Sales  (food & beverage, refunds)
-  //   6xxx Operating Exp  (utilities, payroll, maintenance, sales/admin)
+  //   6xxx Operating Exp  (payroll, utilities, property, ops, sales/admin)
   //   7xxx Capex          (separate from operating expense)
   //   9xxx Suspense
   //
-  // Currency: LKR is the books' primary currency (matches the bank
-  // statement). EUR/USD/GBP bookings post via the existing revenue flow
-  // with an FX line; the Account.currency field documents the GL's
-  // home currency, not the transaction currency.
+  // ---------------------------------------------------------------------
+  // Operator-confirmed conventions (P0 sign-off, 2026-05-19):
+  //
+  // • Books currency = LKR. EUR/USD/GBP bookings get converted at
+  //   recognition (the source-currency amount lives on Booking; the JE
+  //   is in LKR). For USD management reporting, take a single spot rate
+  //   on the month-close day and re-value every LKR JournalLine — i.e.
+  //   USD reporting is a derived view at close, not a per-entry capture.
+  //   A future `FxRate` table will store the chosen month-end rate per
+  //   period; the export-to-accountant step (P5) writes both LKR and
+  //   USD-equivalent columns using that rate. Out of scope for this PR.
+  //
+  // • Payroll split (Sri Lanka):
+  //     6100 Salaries (Gross Accrual)   — agreed monthly compensation
+  //     6110 Wages    (Net Paid)        — what hits employee bank after
+  //                                         APIT + EPF-employee deductions
+  //     6150 Statutory Contributions    — employer-side EPF (12%) + ETF (3%)
+  //   Deduction payables sit in 2200–2220 (liability). Operator's
+  //   spreadsheet uses Salaries vs Wages as two separate columns;
+  //   keeping both lets the operator record either the accrual or the
+  //   cash payment depending on what they have to hand.
+  //
+  // • Petty Cash float held by the Villa Captain. Top-ups debit
+  //   1010 Petty Cash Fund (credit 1000 Bank). Daily purchases credit
+  //   1010 and debit the relevant expense account. Single-line petty-
+  //   cash entries above LKR 5,000 should carry a memo explaining why
+  //   (enforce as a validation rule in P2, not a schema constraint).
+  //
+  // • Booking-month attribution: when a stay crosses month-end, the
+  //   entire revenue posts to the CHECKOUT month — not apportioned by
+  //   days. RevenueService.postRecognitionEntry already does this
+  //   correctly (uses booking.checkOut as the entry date). Documented
+  //   here so future sessions don't try to "fix" it.
+  // ---------------------------------------------------------------------
   const accountDefs = [
     // 1xxx — Assets
-    { name: 'Bank — LKR (Wise)',         code: '1000', type: 'ASSET',     currency: 'LKR' },
-    { name: 'Petty Cash Fund',           code: '1010', type: 'ASSET',     currency: 'LKR' },
-    { name: 'Operating Cash',            code: '1020', type: 'ASSET',     currency: 'LKR' },
-    { name: 'Fixed Assets — Equipment',  code: '1500', type: 'ASSET',     currency: 'LKR' },
-    { name: 'Fixed Assets — Buildings',  code: '1510', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Bank — LKR (Wise)',              code: '1000', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Petty Cash Fund',                code: '1010', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Operating Cash',                 code: '1020', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Fixed Assets — Equipment',       code: '1500', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Fixed Assets — Buildings',       code: '1510', type: 'ASSET',     currency: 'LKR' },
 
     // 2xxx — Liabilities
-    { name: 'Guest Pre-payments',        code: '2000', type: 'LIABILITY', currency: 'LKR' },
-    { name: 'Loans Payable',             code: '2100', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'Guest Pre-payments',             code: '2000', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'Loans Payable',                  code: '2100', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'APIT Payable',                   code: '2200', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'EPF Payable',                    code: '2210', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'ETF Payable',                    code: '2220', type: 'LIABILITY', currency: 'LKR' },
 
     // 4xxx — Revenue
-    { name: 'Rent Income',               code: '4000', type: 'REVENUE',   currency: 'LKR' },
-    { name: 'Cleaning Fee Income',       code: '4010', type: 'REVENUE',   currency: 'LKR' },
-    { name: 'Event Income',              code: '4020', type: 'REVENUE',   currency: 'LKR' },
-    { name: 'F&B Income',                code: '4030', type: 'REVENUE',   currency: 'LKR' },
-    { name: 'Other Income',              code: '4090', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Rent Income',                    code: '4000', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Cleaning Fee Income',            code: '4010', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Event Income',                   code: '4020', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'F&B Income',                     code: '4030', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Other Income',                   code: '4090', type: 'REVENUE',   currency: 'LKR' },
 
     // 5xxx — Cost of Sales
-    { name: 'Food & Beverage Expense',   code: '5100', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Refunds & Adjustments',     code: '5110', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Food & Beverage Expense',        code: '5100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Refunds & Adjustments',          code: '5110', type: 'EXPENSE',   currency: 'LKR' },
 
     // 6xxx — Operating Expense (payroll)
-    { name: 'Salaries',                  code: '6100', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Wages',                     code: '6110', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Bonus',                     code: '6120', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Staff Welfare',             code: '6130', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Complementaries',           code: '6140', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Salaries (Gross Accrual)',       code: '6100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Wages (Net Paid)',               code: '6110', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Bonus',                          code: '6120', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Staff Welfare',                  code: '6130', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Complementaries',                code: '6140', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Statutory Contributions (EPF/ETF Employer)', code: '6150', type: 'EXPENSE', currency: 'LKR' },
 
     // 6xxx — Operating Expense (utilities & subscriptions)
-    { name: 'Electricity',               code: '6200', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Water',                     code: '6210', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Telephone & Internet',      code: '6220', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Software Subscriptions',    code: '6230', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Electricity',                    code: '6200', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Water',                          code: '6210', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Telephone & Internet',           code: '6220', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Software Subscriptions',         code: '6230', type: 'EXPENSE',   currency: 'LKR' },
 
     // 6xxx — Operating Expense (property)
-    { name: 'Cleaning & Maintenance',    code: '6300', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Laundry & Housekeeping',    code: '6310', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Pool & Garden',             code: '6320', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Gym Maintenance',           code: '6330', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Cleaning & Maintenance',         code: '6300', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Laundry & Housekeeping',         code: '6310', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Pool & Garden',                  code: '6320', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Gym Maintenance',                code: '6330', type: 'EXPENSE',   currency: 'LKR' },
 
     // 6xxx — Operating Expense (operations)
-    { name: 'Fuel',                      code: '6400', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Gas',                       code: '6410', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Travel',                    code: '6420', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Other Operating Expense',   code: '6490', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Fuel',                           code: '6400', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Gas',                            code: '6410', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Travel',                         code: '6420', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Other Operating Expense',        code: '6490', type: 'EXPENSE',   currency: 'LKR' },
 
     // 6xxx — Operating Expense (sales & admin)
-    { name: 'Sales Promotion',           code: '6500', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Commission Expense',        code: '6510', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Admin & Professional Fees', code: '6600', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Sales Promotion',                code: '6500', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Commission Expense',             code: '6510', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Admin & Professional Fees',      code: '6600', type: 'EXPENSE',   currency: 'LKR' },
 
     // 6xxx — Operating Expense (financing)
-    { name: 'Loan Interest & Repayment', code: '6700', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Loan Interest & Repayment',      code: '6700', type: 'EXPENSE',   currency: 'LKR' },
 
     // 7xxx — Capex
-    { name: 'Minor Capex',               code: '7100', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Capex — Equipment',         code: '7200', type: 'EXPENSE',   currency: 'LKR' },
-    { name: 'Capex — Buildings',         code: '7300', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Minor Capex',                    code: '7100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Capex — Equipment',              code: '7200', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Capex — Buildings',              code: '7300', type: 'EXPENSE',   currency: 'LKR' },
 
     // 9xxx — Suspense / Control
-    { name: 'Suspense',                  code: '9999', type: 'SUSPENSE',  currency: 'LKR' },
+    { name: 'Suspense',                       code: '9999', type: 'SUSPENSE',  currency: 'LKR' },
   ];
 
   const accountMap: Record<string, string> = {};
