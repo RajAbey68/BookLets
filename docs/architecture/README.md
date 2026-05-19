@@ -7,6 +7,7 @@ Three sequenced documents. Read in order.
 | 1 | [`01-current-state.md`](01-current-state.md) | Snapshot of what's deployed today — topology, layers, data model, auth flow, integrations. |
 | 2 | [`02-target-state.md`](02-target-state.md) | Where the system is going through phases P2–P11. Includes the explicit decisions on NoSQL (no) and small language models (not yet). |
 | 3 | [`03-review-and-risks.md`](03-review-and-risks.md) | Critical audit — 15 risks with severity and recommendation, plus the prioritised fix list. |
+| 4 | [`RISK-DECISIONS.md`](RISK-DECISIONS.md) | Operator verdict on each risk (fix now / fix soon / defer / drop) with execution queue. |
 
 Companion docs:
 - [`../HELP.md`](../HELP.md) — user-facing help.
