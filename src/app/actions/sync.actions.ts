@@ -24,6 +24,16 @@ function describeError(err: unknown): string {
 }
 
 /**
+ * Resolves the primary organization ID for the current deployment.
+ * In a multi-tenant setup this would come from the authenticated session;
+ * for MVP this returns the first (and typically only) organization in the DB.
+ */
+export async function getDefaultOrganizationId(): Promise<string | null> {
+  const org = await prisma.organization.findFirst({ select: { id: true } });
+  return org?.id ?? null;
+}
+
+/**
  * Triggers a manual sync from Hostaway and processes revenue recognition.
  * Returns success only when every reservation and recognition succeeded;
  * a run with any per-record failure is reported as partial so callers can

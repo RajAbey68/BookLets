@@ -19,13 +19,20 @@ export interface HostawayReservation {
  * Responsible for communicating with the Hostaway PMS API
  * and providing normalized data for BookLets ingestion.
  */
+// Module-level token cache — survives Next.js hot-reload and serverless
+// re-use within the same process lifetime (unlike static class fields which
+// reset on every cold start when the class is re-evaluated).
+const _tokenCache: { token: string | null; expiry: number } = {
+  token: null,
+  expiry: 0,
+};
+
 export class HostawayService {
   private static API_BASE = 'https://api.hostaway.com/v1';
 
-  private static CACHED_TOKEN: string | null = null;
-  private static TOKEN_EXPIRY: number = 0;
   // Single-flight guard: concurrent callers share one in-flight refresh
-  // instead of each hitting /access-tokens independently.
+  // instead of each hitting /access-tokens independently. (The token itself
+  // lives in the module-level _tokenCache above so it survives class re-eval.)
   private static REFRESH_INFLIGHT: Promise<string | null> | null = null;
 
   /**
@@ -90,9 +97,9 @@ export class HostawayService {
       return null;
     }
 
-    // Check Cache
-    if (this.CACHED_TOKEN && Date.now() < this.TOKEN_EXPIRY) {
-      return this.CACHED_TOKEN;
+    // Check module-level cache (survives process lifetime, not class re-evaluation)
+    if (_tokenCache.token && Date.now() < _tokenCache.expiry) {
+      return _tokenCache.token;
     }
 
     // Single-flight: if a refresh is already running, await the same promise.
@@ -118,8 +125,8 @@ export class HostawayService {
           grant_type: 'client_credentials',
           client_id: clientId,
           client_secret: clientSecret,
-          scope: 'general'
-        })
+          scope: 'general',
+        }),
       });
 
       if (!response.ok) {
@@ -128,11 +135,11 @@ export class HostawayService {
       }
 
       const data = await response.json();
-      this.CACHED_TOKEN = data.access_token;
-      // Hostaway tokens usually last 24h, but we handle the expiry provided by them
-      this.TOKEN_EXPIRY = Date.now() + (data.expires_in * 1000) - 60000;
+      _tokenCache.token = data.access_token;
+      // Hostaway tokens typically last 24h; subtract 60s to avoid edge-case expiry
+      _tokenCache.expiry = Date.now() + (data.expires_in * 1000) - 60_000;
 
-      return this.CACHED_TOKEN;
+      return _tokenCache.token;
     } catch (err) {
       console.error('[HostawayService] OAuth2 Token Error:', err);
       return null;

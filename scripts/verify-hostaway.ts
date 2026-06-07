@@ -2,8 +2,10 @@ import { HostawayService } from '../src/lib/hostaway.service';
 import * as dotenv from 'dotenv';
 import path from 'path';
 
-// Load .env from root
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
+// Next.js uses .env.local for local credentials — load that first, fall back to .env
+dotenv.config({ path: path.resolve(__dirname, '../.env.local') });
+dotenv.config({ path: path.resolve(__dirname, '../.env'), override: false });
+
 
 async function verify() {
   console.log('--- Hostaway Connectivity Verification ---');

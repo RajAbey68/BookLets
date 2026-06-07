@@ -518,3 +518,66 @@ h3 {
 
 .badge-success { background: rgba(16, 185, 129, 0.1); color: var(--success-color); }
 .badge-warning { background: rgba(245, 158, 11, 0.1); color: var(--warning-color); }
+
+.badge-danger  { background: rgba(244, 63, 94, 0.1);  color: var(--danger-color); }
+
+/* ============================================================
+   Wise Banking Module
+   ============================================================ */
+
+:root {
+  --wise-green:        #37b787;
+  --wise-green-muted:  rgba(55, 183, 135, 0.12);
+  --wise-green-border: rgba(55, 183, 135, 0.25);
+}
+
+.wise-currency-card { background: var(--surface-color); border: 1px solid var(--wise-green-border); border-radius: var(--border-radius); padding: 1.5rem; display: flex; flex-direction: column; gap: 0.75rem; transition: border-color var(--transition-fast), transform var(--transition-fast); }
+.wise-currency-card:hover { border-color: var(--wise-green); transform: translateY(-2px); }
+.wise-currency-card .currency-flag { font-size: 2rem; line-height: 1; }
+.wise-currency-card .currency-code { font-size: 0.75rem; font-weight: 700; color: var(--wise-green); text-transform: uppercase; letter-spacing: 0.08em; }
+.wise-currency-card .currency-amount { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; }
+.wise-currency-card .currency-label { font-size: 0.8rem; color: var(--text-secondary); }
+
+.wise-balances-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1.25rem; margin-bottom: 2.5rem; }
+
+.wise-header-accent { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; font-weight: 700; color: var(--wise-green); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+
+.payment-stepper { display: flex; align-items: flex-start; gap: 0; margin-bottom: 3rem; }
+.payment-step-item { display: flex; flex-direction: column; align-items: center; gap: 0.5rem; flex: 1; position: relative; }
+.payment-step-item:not(:last-child)::after { content: ''; position: absolute; top: 16px; left: 50%; width: 100%; height: 2px; background: var(--surface-border); z-index: 0; }
+.payment-step-item.completed:not(:last-child)::after { background: var(--wise-green); }
+.payment-step-circle { width: 32px; height: 32px; border-radius: 50%; border: 2px solid var(--surface-border); background: var(--bg-color); display: flex; align-items: center; justify-content: center; font-size: 0.8125rem; font-weight: 700; color: var(--text-secondary); position: relative; z-index: 1; transition: all var(--transition-normal); }
+.payment-step-item.active .payment-step-circle { border-color: var(--wise-green); background: var(--wise-green-muted); color: var(--wise-green); }
+.payment-step-item.completed .payment-step-circle { border-color: var(--wise-green); background: var(--wise-green); color: #fff; }
+.payment-step-label { font-size: 0.7rem; font-weight: 600; color: var(--text-secondary); text-align: center; white-space: nowrap; }
+.payment-step-item.active .payment-step-label { color: var(--wise-green); }
+
+.wise-quote-card { background: var(--wise-green-muted); border: 1px solid var(--wise-green-border); border-radius: var(--border-radius); padding: 1.25rem 1.5rem; margin-top: 1rem; display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem 2rem; }
+.wise-quote-row { display: flex; flex-direction: column; gap: 0.2rem; }
+.wise-quote-label { font-size: 0.7rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
+.wise-quote-value { font-size: 1.1rem; font-weight: 700; color: var(--text-primary); }
+.wise-quote-value.highlight { color: var(--wise-green); }
+
+.wise-form-group { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
+.wise-form-label { font-size: 0.8125rem; font-weight: 600; color: var(--text-secondary); }
+.wise-form-input, .wise-form-select { background: var(--surface-color); border: 1px solid var(--surface-border); border-radius: 10px; padding: 0.875rem 1rem; color: var(--text-primary); font-size: 0.9375rem; font-family: inherit; width: 100%; transition: border-color var(--transition-fast); outline: none; }
+.wise-form-input:focus, .wise-form-select:focus { border-color: var(--wise-green); }
+.wise-form-select option { background: #1e293b; }
+
+.btn-wise { padding: 0.875rem 1.5rem; border-radius: var(--border-radius); background: var(--wise-green); color: #fff; font-weight: 700; font-size: 0.9375rem; border: none; cursor: pointer; transition: opacity var(--transition-fast), transform var(--transition-fast); }
+.btn-wise:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+.btn-wise:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.badge-transfer-pending    { background: rgba(245,158,11,0.12); color: var(--warning-color); }
+.badge-transfer-completed  { background: rgba(16,185,129,0.12); color: var(--success-color); }
+.badge-transfer-failed     { background: rgba(244,63,94,0.12);  color: var(--danger-color); }
+.badge-transfer-cancelled  { background: rgba(244,63,94,0.12);  color: var(--danger-color); }
+.badge-transfer-processing { background: rgba(59,130,246,0.12); color: var(--accent-color); }
+
+.wise-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(4px); z-index: 200; display: flex; align-items: center; justify-content: center; animation: fadeIn 0.15s ease; }
+.wise-modal { background: #111827; border: 1px solid var(--surface-border); border-radius: 16px; padding: 2rem; width: 100%; max-width: 420px; margin: 1rem; animation: slideUp 0.2s ease; }
+
+@keyframes fadeIn  { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+.glass-card { background: var(--surface-color); border: 1px solid var(--surface-border); border-radius: var(--border-radius); padding: 1.75rem; backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur); }

@@ -21,6 +21,7 @@ model Organization {
   journalEntries JournalEntry[]
   guestPayouts   GuestPayout[]
   memberships    Membership[]
+  wiseProfiles   WiseProfile[]
 }
 
 // Auth.js v5 — minimal user identity. We use the JWT session strategy so
@@ -299,3 +300,58 @@ model ActionIntentQueue {
   @@index([status])
   @@index([createdAt])
 }
+
+// -----------------------------------------------------------------------------
+// Wise Banking Integration
+// -----------------------------------------------------------------------------
+
+/// Stores linked Wise profiles (personal or business) per organisation.
+model WiseProfile {
+  id             String   @id @default(cuid())
+  organizationId String
+  wiseProfileId  Int      @unique   // Wise's own numeric profile ID
+  type           String   // PERSONAL | BUSINESS
+  name           String
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization   @relation(fields: [organizationId], references: [id])
+  transfers    WiseTransfer[]
+}
+
+enum WiseTransferStatus {
+  INCOMING_PAYMENT_WAITING
+  PROCESSING
+  FUNDS_CONVERTED
+  OUTGOING_PAYMENT_SENT
+  CANCELLED
+  FUNDS_REFUNDED
+  FAILED
+  UNKNOWN
+}
+
+/// Audit record for every transfer initiated via BookLets through Wise.
+model WiseTransfer {
+  id              String              @id @default(cuid())
+  wiseProfileId   String
+  wiseTransferId  Int                 @unique   // Wise's transfer ID
+  status          WiseTransferStatus  @default(PROCESSING)
+  sourceCurrency  String
+  targetCurrency  String
+  sourceAmount    Float
+  targetAmount    Float
+  fee             Float               @default(0)
+  exchangeRate    Float               @default(1)
+  reference       String?
+  recipientName   String?
+  recipientIban   String?
+  journalEntryId  String?  // FK to JournalEntry if auto-posted
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  wiseProfile WiseProfile @relation(fields: [wiseProfileId], references: [id])
+
+  @@index([wiseProfileId])
+}
+

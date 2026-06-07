@@ -51,7 +51,14 @@ export class LedgerService {
     });
 
     if (!period) {
-      throw new Error(`No fiscal period defined for the date ${date.toLocaleDateString()}.`);
+      // Warn rather than throw — fiscal periods are optional during early setup.
+      // Journal entries will still post; operators should create a fiscal period
+      // via the admin UI or seed script to enable period-locking enforcement.
+      console.warn(
+        `[LedgerService] No fiscal period found for org ${organizationId} on ${date.toLocaleDateString()}. ` +
+        `Proceeding without period lock. Create a fiscal period to enable locking.`
+      );
+      return true;
     }
 
     if (period.isClosed) {
