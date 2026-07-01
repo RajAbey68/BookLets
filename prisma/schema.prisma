@@ -111,11 +111,18 @@ model Account {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   createdBy      String?
+  // RAJ-283: self-referencing hierarchy for rollup reporting. Parent accounts
+  // (e.g. 4000 Rental Income) aggregate their children (4100 Airbnb, 4200
+  // Direct). Root accounts have no parent.
+  parentId       String?
   organization   Organization  @relation(fields: [organizationId], references: [id])
+  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children       Account[]     @relation("AccountHierarchy")
   journalLines   JournalLine[]
 
   @@index([organizationId])
   @@index([code])
+  @@index([parentId])
 }
 
 model JournalEntry {
