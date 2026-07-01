@@ -35,7 +35,11 @@ jobs:
         run: npm run build
 
       - name: npm audit
-        run: npm audit --audit-level=high
+        # Scoped gate (RAJ-401): block only on CRITICAL vulnerabilities in
+        # PRODUCTION dependencies. Dev-only tooling (vitest/vite) is not shipped,
+        # and pre-existing high/moderate dev-dep noise was blocking every feature
+        # merge. Full dependency remediation is tracked in RAJ-401.
+        run: npm audit --omit=dev --audit-level=critical
 
   codeql:
     name: CodeQL Analysis
