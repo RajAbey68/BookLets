@@ -138,6 +138,9 @@ model JournalEntry {
   // Unique at the DB level so a retried/crash-recovered POST cannot create a
   // duplicate ledger entry. Nullable — manual entries without a source stay null.
   idempotencyKey  String?       @unique
+  // RAJ-285: optimistic-concurrency version. Bumped on every guarded update;
+  // a stale write (version mismatch) becomes a no-op instead of a lost update.
+  version         Int           @default(1)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   createdBy       String?

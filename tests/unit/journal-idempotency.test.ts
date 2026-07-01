@@ -23,7 +23,7 @@ describe('RAJ-284 — schema', () => {
     path.resolve(__dirname, '../../prisma/schema.prisma'),
     'utf-8'
   );
-  const je = schema.match(/model\s+JournalEntry\s*\{([^}]+)\}/s)![1];
+  const je = schema.match(new RegExp('model\\s+JournalEntry\\s*\\{([^}]+)\\}', 's'))![1];
 
   it('JournalEntry has a nullable, unique idempotencyKey', () => {
     expect(je).toMatch(/idempotencyKey\s+String\?\s+@unique/);

@@ -9,6 +9,26 @@ import {
   LedgerValidationResult,
 } from './types';
 
+/**
+ * RAJ-285 — thrown when a guarded update loses to a concurrent writer: the
+ * row's version no longer matches the version the caller read, so the write
+ * was rejected to prevent a lost update. Callers should re-read and retry.
+ */
+export class OptimisticLockError extends Error {
+  readonly entryId: string;
+  readonly expectedVersion: number;
+
+  constructor(entryId: string, expectedVersion: number) {
+    super(
+      `Optimistic lock failed for JournalEntry "${entryId}": expected version ${expectedVersion}, ` +
+        `but the entry was modified by another writer. Re-read the entry and retry.`
+    );
+    this.name = 'OptimisticLockError';
+    this.entryId = entryId;
+    this.expectedVersion = expectedVersion;
+  }
+}
+
 export class LedgerService {
   /**
    * Validates that the sum of debits equals the sum of credits.
@@ -274,6 +294,41 @@ export class LedgerService {
       });
 
       return reversal;
+    });
+  }
+
+  /**
+   * RAJ-285 — Update a JournalEntry under optimistic concurrency control.
+   *
+   * The caller passes the `expectedVersion` it read. The update only applies
+   * when the row still has that version, and it atomically increments the
+   * version. A stale write matches zero rows (`count === 0`) and raises
+   * OptimisticLockError instead of silently clobbering a concurrent change.
+   *
+   * `version` is stripped from `data` so a caller can never pin it — the
+   * counter is owned entirely by this method.
+   */
+  static async updateEntryWithVersion(
+    id: string,
+    expectedVersion: number,
+    data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
+  ) {
+    // Strip any caller-supplied version — the counter is owned by this method.
+    const safeData = { ...(data as Prisma.JournalEntryUpdateInput) };
+    delete safeData.version;
+
+    const result = await prisma.journalEntry.updateMany({
+      where: { id, version: expectedVersion },
+      data: { ...safeData, version: { increment: 1 } },
+    });
+
+    if (result.count === 0) {
+      throw new OptimisticLockError(id, expectedVersion);
+    }
+
+    return prisma.journalEntry.findUniqueOrThrow({
+      where: { id },
+      include: { lines: true },
     });
   }
 
