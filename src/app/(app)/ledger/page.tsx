@@ -69,6 +69,12 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
             + New Entry
           </a>
           <a
+            href="/reports/trial-balance"
+            style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
+          >
+            Trial Balance
+          </a>
+          <a
             href="/api/export/ledger"
             download
             style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
