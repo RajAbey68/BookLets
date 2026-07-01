@@ -23,6 +23,11 @@ export interface JournalEntryInput {
   makerIdentity?: string;
   tenantId?: string;
   agentConfidence?: number;
+  // RAJ-284 idempotency. Supply either a precomputed `idempotencyKey`, or a
+  // `source` + `sourceId` pair from which the key is derived (recommended).
+  idempotencyKey?: string;
+  source?: string;
+  sourceId?: string;
 }
 
 export interface LedgerValidationResult {

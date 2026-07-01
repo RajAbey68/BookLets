@@ -1,4 +1,6 @@
+import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
+import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import { EvidenceLogService } from './evidence-log.service';
 import {
@@ -62,7 +64,38 @@ export class LedgerService {
   }
 
   /**
+   * RAJ-284 — Deterministic idempotency key for a journal entry.
+   *
+   * key = sha256(source ‖ sourceId ‖ calendar-day). The day is derived from
+   * the UTC date so that time-of-day jitter on a retry does not change the
+   * key. A NUL separator makes the concatenation unambiguous, so ("a","bc")
+   * and ("ab","c") never collide.
+   */
+  static computeIdempotencyKey(source: string, sourceId: string, date: Date): string {
+    const day = date.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const material = [source, sourceId, day].join('\u0000');
+    return createHash('sha256').update(material).digest('hex');
+  }
+
+  /** True when `err` is the unique-constraint violation on idempotencyKey. */
+  private static isIdempotencyConflict(err: unknown): boolean {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+      return false;
+    }
+    const target = (err.meta as { target?: string[] | string } | undefined)?.target;
+    if (!target) return true; // no field info — assume it's ours (key is the only unique nullable field involved)
+    return Array.isArray(target)
+      ? target.includes('idempotencyKey')
+      : target.includes('idempotencyKey');
+  }
+
+  /**
    * Posts a new Journal Entry atomically after validating the balance and fiscal period.
+   *
+   * Idempotent when an `idempotencyKey` (or `source` + `sourceId`) is supplied:
+   * a duplicate POST returns the already-persisted entry instead of creating a
+   * second one — both on the fast path (key already visible) and after losing a
+   * concurrent race (unique-constraint P2002).
    */
   static async postEntry(input: JournalEntryInput) {
     const {
@@ -75,6 +108,22 @@ export class LedgerService {
       tenantId,
       agentConfidence,
     } = input;
+
+    // RAJ-284: explicit key wins; otherwise derive from source + sourceId.
+    const idempotencyKey = input.idempotencyKey
+      ?? (input.source && input.sourceId
+        ? this.computeIdempotencyKey(input.source, input.sourceId, date)
+        : undefined);
+
+    // Fast path: this key already posted → return it, skipping validation and
+    // the transaction entirely.
+    if (idempotencyKey) {
+      const existing = await prisma.journalEntry.findUnique({
+        where: { idempotencyKey },
+        include: { lines: true },
+      });
+      if (existing) return existing;
+    }
 
     // 1. Strict Validation for POSTED entries
     if (status === JournalStatus.POSTED) {
@@ -93,7 +142,8 @@ export class LedgerService {
     await this.checkFiscalPeriod(organizationId, date);
 
     // 3. Atomic Transaction — entry + evidence row succeed or fail together.
-    return await prisma.$transaction(async (tx) => {
+    try {
+      return await prisma.$transaction(async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
           organizationId,
@@ -103,6 +153,7 @@ export class LedgerService {
           makerIdentity,
           tenantId,
           agentConfidence,
+          idempotencyKey,
           lines: {
             create: lines.map(line => ({
               accountId: line.accountId,
@@ -137,7 +188,20 @@ export class LedgerService {
       });
 
       return entry;
-    });
+      });
+    } catch (err) {
+      // Lost an idempotency race: a concurrent POST with the same key won and
+      // tripped the unique constraint. The winner is now persisted — return it
+      // rather than surfacing the conflict to the caller.
+      if (idempotencyKey && this.isIdempotencyConflict(err)) {
+        const existing = await prisma.journalEntry.findUnique({
+          where: { idempotencyKey },
+          include: { lines: true },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   /**

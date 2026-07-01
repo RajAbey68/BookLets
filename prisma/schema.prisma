@@ -134,6 +134,10 @@ model JournalEntry {
   makerIdentity   String?
   tenantId        String?
   agentConfidence Float?
+  // RAJ-284: idempotency key = sha256(source + sourceId + calendar-day).
+  // Unique at the DB level so a retried/crash-recovered POST cannot create a
+  // duplicate ledger entry. Nullable — manual entries without a source stay null.
+  idempotencyKey  String?       @unique
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   createdBy       String?
