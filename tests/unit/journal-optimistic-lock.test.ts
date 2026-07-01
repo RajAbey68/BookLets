@@ -6,7 +6,7 @@
  * version field + a conditional updateMany(where: {id, version}) makes the
  * stale write a no-op (count === 0) which we surface as OptimisticLockError.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
@@ -31,17 +31,25 @@ describe('LedgerService.updateEntryWithVersion', () => {
 
   beforeEach(() => vi.resetModules());
 
-  it('updates and returns the entry when the expected version matches', async () => {
+  // The update + read run inside prisma.$transaction for read-your-write
+  // atomicity, so the mock exposes a tx client to the transaction callback.
+  const mockPrisma = (updateMany: Mock, findUniqueOrThrow: Mock) => {
+    const tx = { journalEntry: { updateMany, findUniqueOrThrow } };
+    const $transaction = vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx));
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: { $transaction, journalEntry: tx.journalEntry } }));
+    return { $transaction };
+  };
+
+  it('updates and returns the entry (inside a transaction) when the expected version matches', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const findUniqueOrThrow = vi.fn().mockResolvedValue(updatedEntry);
-    vi.doMock('../../src/lib/prisma', () => ({
-      prisma: { journalEntry: { updateMany, findUniqueOrThrow } },
-    }));
+    const { $transaction } = mockPrisma(updateMany, findUniqueOrThrow);
     const { LedgerService } = await import('../../src/lib/ledger.service');
 
     const result = await LedgerService.updateEntryWithVersion('je-1', 1, { memo: 'fixed' });
 
     expect(result).toBe(updatedEntry);
+    expect($transaction).toHaveBeenCalledOnce(); // atomic update+read
     // guard is on both id AND the expected version
     expect(updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -54,9 +62,7 @@ describe('LedgerService.updateEntryWithVersion', () => {
   it('throws OptimisticLockError when the version has moved on (count 0)', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 0 });
     const findUniqueOrThrow = vi.fn();
-    vi.doMock('../../src/lib/prisma', () => ({
-      prisma: { journalEntry: { updateMany, findUniqueOrThrow } },
-    }));
+    mockPrisma(updateMany, findUniqueOrThrow);
     const { LedgerService, OptimisticLockError } = await import('../../src/lib/ledger.service');
 
     await expect(
@@ -69,9 +75,7 @@ describe('LedgerService.updateEntryWithVersion', () => {
   it('never lets the caller overwrite the version counter itself', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const findUniqueOrThrow = vi.fn().mockResolvedValue(updatedEntry);
-    vi.doMock('../../src/lib/prisma', () => ({
-      prisma: { journalEntry: { updateMany, findUniqueOrThrow } },
-    }));
+    mockPrisma(updateMany, findUniqueOrThrow);
     const { LedgerService } = await import('../../src/lib/ledger.service');
 
     // caller tries to pin version to 99 — must be ignored in favour of increment

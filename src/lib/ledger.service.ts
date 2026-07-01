@@ -148,10 +148,11 @@ export class LedgerService {
         : undefined);
 
     // Fast path: this key already posted → return it, skipping validation and
-    // the transaction entirely.
+    // the transaction entirely. The lookup is ALWAYS scoped by organizationId
+    // so a key can never resolve to another tenant's entry (N-02 isolation).
     if (idempotencyKey) {
-      const existing = await prisma.journalEntry.findUnique({
-        where: { idempotencyKey },
+      const existing = await prisma.journalEntry.findFirst({
+        where: { organizationId, idempotencyKey },
         include: { lines: true },
       });
       if (existing) return existing;
@@ -226,8 +227,8 @@ export class LedgerService {
       // tripped the unique constraint. The winner is now persisted — return it
       // rather than surfacing the conflict to the caller.
       if (idempotencyKey && this.isIdempotencyConflict(err)) {
-        const existing = await prisma.journalEntry.findUnique({
-          where: { idempotencyKey },
+        const existing = await prisma.journalEntry.findFirst({
+          where: { organizationId, idempotencyKey },
           include: { lines: true },
         });
         if (existing) return existing;
@@ -329,18 +330,25 @@ export class LedgerService {
     const safeData = { ...(data as Prisma.JournalEntryUpdateInput) };
     delete safeData.version;
 
-    const result = await prisma.journalEntry.updateMany({
-      where: { id, version: expectedVersion },
-      data: { ...safeData, version: { increment: 1 } },
-    });
+    // Guarded update + read run in one transaction for read-your-write
+    // consistency: the returned entry reflects exactly the version this call
+    // wrote, not a state a concurrent writer slipped in between the two queries.
+    // updateMany (not update) is required because the version guard is a
+    // non-unique filter; update({where:{id,version}}) does not compile.
+    return prisma.$transaction(async (tx) => {
+      const result = await tx.journalEntry.updateMany({
+        where: { id, version: expectedVersion },
+        data: { ...safeData, version: { increment: 1 } },
+      });
 
-    if (result.count === 0) {
-      throw new OptimisticLockError(id, expectedVersion);
-    }
+      if (result.count === 0) {
+        throw new OptimisticLockError(id, expectedVersion);
+      }
 
-    return prisma.journalEntry.findUniqueOrThrow({
-      where: { id },
-      include: { lines: true },
+      return tx.journalEntry.findUniqueOrThrow({
+        where: { id },
+        include: { lines: true },
+      });
     });
   }
 

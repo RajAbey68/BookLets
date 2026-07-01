@@ -15,6 +15,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import { Decimal } from 'decimal.js';
+import type { JournalEntryInput } from '../../src/lib/types';
 
 // ─── 1. schema gate ───────────────────────────────────────────────────────────
 
@@ -25,8 +26,16 @@ describe('RAJ-284 — schema', () => {
   );
   const je = schema.match(new RegExp('model\\s+JournalEntry\\s*\\{([^}]+)\\}', 's'))![1];
 
-  it('JournalEntry has a nullable, unique idempotencyKey', () => {
-    expect(je).toMatch(/idempotencyKey\s+String\?\s+@unique/);
+  it('idempotencyKey is nullable', () => {
+    expect(je).toMatch(/idempotencyKey\s+String\?/);
+  });
+
+  it('is NOT a bare global unique — that would leak entries across tenants', () => {
+    expect(je).not.toMatch(/idempotencyKey\s+String\?\s+@unique/);
+  });
+
+  it('uniqueness is scoped to the organization (composite @@unique)', () => {
+    expect(je).toMatch(/@@unique\(\[organizationId,\s*idempotencyKey\]\)/);
   });
 });
 
@@ -128,14 +137,29 @@ describe('LedgerService.postEntry — idempotency', () => {
     { accountId: 'b', amount: new Decimal('100.00'), isDebit: false },
   ];
 
+  const post = (
+    LedgerService: typeof import('../../src/lib/ledger.service').LedgerService,
+    JournalStatus: typeof import('../../src/lib/types').JournalStatus,
+    over: Partial<JournalEntryInput> = {},
+  ) =>
+    LedgerService.postEntry({
+      organizationId: 'org1',
+      date: new Date('2026-07-01'),
+      status: JournalStatus.POSTED,
+      lines: balancedLines,
+      source: 'hostaway',
+      sourceId: 'res-42',
+      ...over,
+    });
+
   beforeEach(() => vi.resetModules());
 
   it('returns the existing entry without posting when the key already exists (fast path)', async () => {
-    const findUnique = vi.fn().mockResolvedValue(existingEntry);
+    const findFirst = vi.fn().mockResolvedValue(existingEntry);
     const $transaction = vi.fn();
     vi.doMock('../../src/lib/prisma', () => ({
       prisma: {
-        journalEntry: { findUnique, create: vi.fn() },
+        journalEntry: { findFirst, create: vi.fn() },
         fiscalPeriod: { findFirst: vi.fn().mockResolvedValue(openPeriod) },
         $transaction,
       },
@@ -144,17 +168,33 @@ describe('LedgerService.postEntry — idempotency', () => {
     const { LedgerService } = await import('../../src/lib/ledger.service');
     const { JournalStatus } = await import('../../src/lib/types');
 
-    const result = await LedgerService.postEntry({
-      organizationId: 'org1',
-      date: new Date('2026-07-01'),
-      status: JournalStatus.POSTED,
-      lines: balancedLines,
-      source: 'hostaway',
-      sourceId: 'res-42',
-    });
+    const result = await post(LedgerService, JournalStatus);
 
     expect(result).toBe(existingEntry);
     expect($transaction).not.toHaveBeenCalled();
+  });
+
+  it('scopes the idempotency lookup by organizationId — never a bare key (no cross-tenant leak)', async () => {
+    const findFirst = vi.fn().mockResolvedValue(existingEntry);
+    vi.doMock('../../src/lib/prisma', () => ({
+      prisma: {
+        journalEntry: { findFirst, create: vi.fn() },
+        fiscalPeriod: { findFirst: vi.fn().mockResolvedValue(openPeriod) },
+        $transaction: vi.fn(),
+      },
+    }));
+    vi.doMock('../../src/lib/evidence-log.service', () => ({ EvidenceLogService: { record: vi.fn() } }));
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+    const { JournalStatus } = await import('../../src/lib/types');
+
+    await post(LedgerService, JournalStatus, { organizationId: 'org-B' });
+
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ organizationId: 'org-B' }) })
+    );
+    // and the where must NOT be a bare { idempotencyKey } with no org scope
+    const whereArg = findFirst.mock.calls[0][0].where;
+    expect(whereArg).toHaveProperty('organizationId');
   });
 
   it('recovers by returning the winning entry when a concurrent POST hits the unique constraint (P2002)', async () => {
@@ -162,17 +202,17 @@ describe('LedgerService.postEntry — idempotency', () => {
     const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
       code: 'P2002',
       clientVersion: 'test',
-      meta: { target: ['idempotencyKey'] },
+      meta: { target: ['organizationId', 'idempotencyKey'] },
     });
     // First lookup: no existing entry → proceed to transaction, which loses the
     // race and throws P2002. Second lookup: the winner is now visible.
-    const findUnique = vi.fn()
+    const findFirst = vi.fn()
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(existingEntry);
     const $transaction = vi.fn().mockRejectedValue(p2002);
     vi.doMock('../../src/lib/prisma', () => ({
       prisma: {
-        journalEntry: { findUnique, create: vi.fn() },
+        journalEntry: { findFirst, create: vi.fn() },
         fiscalPeriod: { findFirst: vi.fn().mockResolvedValue(openPeriod) },
         $transaction,
       },
@@ -181,26 +221,23 @@ describe('LedgerService.postEntry — idempotency', () => {
     const { LedgerService } = await import('../../src/lib/ledger.service');
     const { JournalStatus } = await import('../../src/lib/types');
 
-    const result = await LedgerService.postEntry({
-      organizationId: 'org1',
-      date: new Date('2026-07-01'),
-      status: JournalStatus.POSTED,
-      lines: balancedLines,
-      source: 'hostaway',
-      sourceId: 'res-42',
-    });
+    const result = await post(LedgerService, JournalStatus);
 
     expect(result).toBe(existingEntry);
     expect($transaction).toHaveBeenCalledOnce();
+    // the recovery re-read is also org-scoped
+    expect(findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ organizationId: 'org1' }) })
+    );
   });
 
   it('rethrows a non-idempotency error unchanged', async () => {
     const boom = new Error('database on fire');
-    const findUnique = vi.fn().mockResolvedValue(null);
+    const findFirst = vi.fn().mockResolvedValue(null);
     const $transaction = vi.fn().mockRejectedValue(boom);
     vi.doMock('../../src/lib/prisma', () => ({
       prisma: {
-        journalEntry: { findUnique, create: vi.fn() },
+        journalEntry: { findFirst, create: vi.fn() },
         fiscalPeriod: { findFirst: vi.fn().mockResolvedValue(openPeriod) },
         $transaction,
       },
@@ -209,15 +246,6 @@ describe('LedgerService.postEntry — idempotency', () => {
     const { LedgerService } = await import('../../src/lib/ledger.service');
     const { JournalStatus } = await import('../../src/lib/types');
 
-    await expect(
-      LedgerService.postEntry({
-        organizationId: 'org1',
-        date: new Date('2026-07-01'),
-        status: JournalStatus.POSTED,
-        lines: balancedLines,
-        source: 'hostaway',
-        sourceId: 'res-42',
-      })
-    ).rejects.toThrow(/database on fire/);
+    await expect(post(LedgerService, JournalStatus)).rejects.toThrow(/database on fire/);
   });
 });

@@ -116,7 +116,7 @@ model Account {
   // Direct). Root accounts have no parent.
   parentId       String?
   organization   Organization  @relation(fields: [organizationId], references: [id])
-  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id])
+  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
   children       Account[]     @relation("AccountHierarchy")
   journalLines   JournalLine[]
 
@@ -135,9 +135,11 @@ model JournalEntry {
   tenantId        String?
   agentConfidence Float?
   // RAJ-284: idempotency key = sha256(source + sourceId + calendar-day).
-  // Unique at the DB level so a retried/crash-recovered POST cannot create a
-  // duplicate ledger entry. Nullable — manual entries without a source stay null.
-  idempotencyKey  String?       @unique
+  // Uniqueness is scoped to the organization (see @@unique below), NOT global —
+  // a bare global unique would let one org's explicit key collide with (and leak)
+  // another org's entry. Nullable — manual entries without a source stay null;
+  // Postgres treats NULLs as distinct so multiple keyless entries per org are fine.
+  idempotencyKey  String?
   // RAJ-285: optimistic-concurrency version. Bumped on every guarded update;
   // a stale write (version mismatch) becomes a no-op instead of a lost update.
   version         Int           @default(1)
@@ -148,6 +150,8 @@ model JournalEntry {
   organization    Organization  @relation(fields: [organizationId], references: [id])
   lines           JournalLine[]
 
+  // RAJ-284: tenant-scoped idempotency uniqueness (see field comment).
+  @@unique([organizationId, idempotencyKey])
   @@index([organizationId])
   @@index([status])
 }
