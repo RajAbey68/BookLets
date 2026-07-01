@@ -86,14 +86,26 @@ export class LedgerService {
   /**
    * RAJ-284 — Deterministic idempotency key for a journal entry.
    *
-   * key = sha256(source ‖ sourceId ‖ calendar-day). The day is derived from
-   * the UTC date so that time-of-day jitter on a retry does not change the
-   * key. A NUL separator makes the concatenation unambiguous, so ("a","bc")
-   * and ("ab","c") never collide.
+   * key = sha256(organizationId ‖ source ‖ sourceId ‖ operation ‖ calendar-day).
+   * The day is derived from the UTC date so time-of-day jitter on a retry does
+   * not change the key. A NUL separator makes the concatenation unambiguous, so
+   * ("a","bc") and ("ab","c") never collide.
+   *
+   * `organizationId` scopes the key per tenant — two orgs syncing the same
+   * external id on the same day must NOT collide (N-02 multi-tenant isolation).
+   * `operation` distinguishes genuinely different entries from the same source
+   * entity on one day (e.g. a booking's revenue vs a separate fee), so a real
+   * second transaction is not silently deduped. Both are optional, so existing
+   * 3-arg callers keep working unchanged.
    */
-  static computeIdempotencyKey(source: string, sourceId: string, date: Date): string {
+  static computeIdempotencyKey(
+    source: string,
+    sourceId: string,
+    date: Date,
+    opts?: { organizationId?: string; operation?: string },
+  ): string {
     const day = date.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-    const material = [source, sourceId, day].join('\u0000');
+    const material = [opts?.organizationId ?? '', source, sourceId, opts?.operation ?? '', day].join('\u0000');
     return createHash('sha256').update(material).digest('hex');
   }
 
@@ -132,7 +144,7 @@ export class LedgerService {
     // RAJ-284: explicit key wins; otherwise derive from source + sourceId.
     const idempotencyKey = input.idempotencyKey
       ?? (input.source && input.sourceId
-        ? this.computeIdempotencyKey(input.source, input.sourceId, date)
+        ? this.computeIdempotencyKey(input.source, input.sourceId, date, { organizationId, operation: input.operation })
         : undefined);
 
     // Fast path: this key already posted → return it, skipping validation and

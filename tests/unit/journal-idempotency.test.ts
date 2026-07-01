@@ -81,6 +81,40 @@ describe('LedgerService.computeIdempotencyKey', () => {
       LedgerService.computeIdempotencyKey('hostaway', 'res-42', new Date('2026-07-01T23:30:00Z'))
     );
   });
+
+  // Post-review hardening (independent review, DeepSeek b29386ba):
+  it('is scoped by organization — same source/sourceId/day across orgs never collide', async () => {
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: {} }));
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+    const d = new Date('2026-07-01');
+    expect(
+      LedgerService.computeIdempotencyKey('hostaway', 'res-42', d, { organizationId: 'org-a' })
+    ).not.toBe(
+      LedgerService.computeIdempotencyKey('hostaway', 'res-42', d, { organizationId: 'org-b' })
+    );
+  });
+
+  it('distinguishes different operations on the same source entity + day', async () => {
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: {} }));
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+    const d = new Date('2026-07-01');
+    expect(
+      LedgerService.computeIdempotencyKey('hostaway', 'res-42', d, { operation: 'REVENUE' })
+    ).not.toBe(
+      LedgerService.computeIdempotencyKey('hostaway', 'res-42', d, { operation: 'FEE' })
+    );
+  });
+
+  it('stays backward-compatible: the 3-arg form is unchanged and deterministic', async () => {
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: {} }));
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+    const d = new Date('2026-07-01');
+    // omitting opts must equal passing empty opts — no silent drift for callers
+    // that have not adopted org/operation scoping yet
+    expect(LedgerService.computeIdempotencyKey('hostaway', 'res-42', d)).toBe(
+      LedgerService.computeIdempotencyKey('hostaway', 'res-42', d, {})
+    );
+  });
 });
 
 // ─── 3. postEntry idempotent behaviour (mocked Prisma) ─────────────────────────
