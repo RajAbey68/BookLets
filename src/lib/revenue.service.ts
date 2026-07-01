@@ -172,6 +172,11 @@ export class RevenueService {
     if (!booking) {
       throw new Error(`Booking ${bookingId} not found.`);
     }
+    // Tenant isolation: never post an entry for a booking that belongs to a
+    // different organisation than the one the caller resolved.
+    if (booking.property.organizationId !== organizationId) {
+      throw new Error(`Booking ${bookingId} does not belong to this organisation.`);
+    }
     if (booking.deferredPosted) {
       return; // already posted — nothing to do
     }

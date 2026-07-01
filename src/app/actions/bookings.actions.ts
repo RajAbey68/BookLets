@@ -141,7 +141,17 @@ export async function createBooking(
       try {
         await RevenueService.recordBookingPrepayment(organizationId, booking.id, userId);
       } catch (postError) {
-        await prisma.booking.delete({ where: { id: booking.id } }).catch(() => {});
+        // Compensating rollback so the caller never keeps a booking with no
+        // ledger entry. Surface a delete failure loudly — a swallowed failure
+        // here would leave exactly the orphan we are trying to prevent.
+        try {
+          await prisma.booking.delete({ where: { id: booking.id } });
+        } catch (deleteError) {
+          console.error(
+            `[bookings.actions] createBooking: CRITICAL — ledger post failed AND rollback delete failed for booking ${booking.id}. Orphan booking with no journal entry:`,
+            deleteError,
+          );
+        }
         console.error('[bookings.actions] createBooking: ledger post failed, rolled back booking:', postError);
         return {
           success: false,

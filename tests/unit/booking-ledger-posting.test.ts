@@ -17,7 +17,7 @@ const booking = {
   totalAmount: '1250.00',
   propertyId: 'prop-1',
   deferredPosted: false,
-  property: { id: 'prop-1', name: 'Villa One' },
+  property: { id: 'prop-1', name: 'Villa One', organizationId: 'org-1' },
 };
 
 function mockDeps(bookingOverride: Record<string, unknown> = {}) {
@@ -91,6 +91,16 @@ describe('RevenueService.recordBookingPrepayment', () => {
 
     expect(postEntry).not.toHaveBeenCalled();
     expect(bookingUpdate).not.toHaveBeenCalled();
+  });
+
+  it('refuses to post when the booking belongs to a different organisation (tenant isolation)', async () => {
+    const { postEntry } = mockDeps({ property: { id: 'prop-1', name: 'Villa One', organizationId: 'org-OTHER' } });
+    const { RevenueService } = await import('../../src/lib/revenue.service');
+
+    await expect(
+      RevenueService.recordBookingPrepayment('org-1', 'bk-1', 'user-1'),
+    ).rejects.toThrow(/organi[sz]ation/i);
+    expect(postEntry).not.toHaveBeenCalled();
   });
 
   it('throws when the booking does not exist', async () => {
