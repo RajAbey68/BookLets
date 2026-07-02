@@ -77,6 +77,7 @@ export default function SpreadsheetImporter() {
         <input
           type="file"
           name="file"
+          aria-label="Upload monthly workbook (.xlsx)"
           accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
           required
           disabled={pending}

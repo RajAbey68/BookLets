@@ -70,8 +70,10 @@ def add_multiline(slide, x, y, w, h, lines, *, size=12, color=INK,
     tb = slide.shapes.add_textbox(x, y, w, h)
     tf = tb.text_frame
     tf.word_wrap = True
-    tf.margin_left = Emu(0); tf.margin_right = Emu(0)
-    tf.margin_top = Emu(0); tf.margin_bottom = Emu(0)
+    tf.margin_left = Emu(0)
+    tf.margin_right = Emu(0)
+    tf.margin_top = Emu(0)
+    tf.margin_bottom = Emu(0)
     for i, line in enumerate(lines):
         para = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         para.line_spacing = line_space
@@ -114,8 +116,10 @@ def add_pill(slide, x, y, label, kind="live"):
     shape.fill.fore_color.rgb = fill
     shape.line.color.rgb = fill
     tf = shape.text_frame
-    tf.margin_left = Emu(0); tf.margin_right = Emu(0)
-    tf.margin_top = Emu(0); tf.margin_bottom = Emu(0)
+    tf.margin_left = Emu(0)
+    tf.margin_right = Emu(0)
+    tf.margin_top = Emu(0)
+    tf.margin_bottom = Emu(0)
     p_ = tf.paragraphs[0]
     p_.alignment = PP_ALIGN.CENTER
     run = p_.add_run()

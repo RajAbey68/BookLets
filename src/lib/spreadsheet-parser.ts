@@ -177,7 +177,6 @@ const COLUMN_TO_ACCOUNT: Record<string, string> = {
 
   // Cost of sales
   'food & bev exp':                     '5100',
-  'food  & bev exp':                    '5100', // operator double-space
   'food and beverage':                  '5100',
   'refunds':                            '5110',
 
@@ -247,7 +246,6 @@ const SKIP_MARKERS: RegExp[] = [
   /^monthly\s+total/i,
   /^net\s+(profit|loss|cash|income)/i,
   /^adjustments?$/i,                  // pure section header, no data
-  /^recurring\s+expenses?$/i,         // pure section header, no data
 ];
 
 function normaliseHeader(raw: string): string {
@@ -375,6 +373,10 @@ export async function parseSpreadsheet(buffer: Buffer | ArrayBuffer): Promise<Pa
   const wb = new ExcelJS.Workbook();
   await wb.xlsx.load(buffer as ArrayBuffer);
 
+  if (wb.worksheets.length === 0) {
+    throw new Error('The uploaded workbook contains no worksheets.');
+  }
+
   // Pick the first sheet whose name looks like a month, else first sheet.
   const ws = wb.worksheets.find((w) =>
     /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i.test(w.name),
@@ -441,13 +443,20 @@ export async function parseSpreadsheet(buffer: Buffer | ArrayBuffer): Promise<Pa
 
     // Collect amounts from every mapped column on this row.
     const rowAmounts: ParsedAmount[] = [];
+    const rowParseWarnings: string[] = [];
     let pettyCashTopUp: Decimal | null = null;
 
     for (const [col, info] of columnAccountCodes) {
       if (col === dateCol || col === descCol) continue;
       const v = row.getCell(col).value;
       const amt = toDecimal(v);
-      if (amt === null || amt.isZero()) continue;
+      if (amt === null) {
+        if (!isBlankCell(unwrapCell(v))) {
+          rowParseWarnings.push(`could not parse amount in "${info.header}"`);
+        }
+        continue;
+      }
+      if (amt.isZero()) continue;
 
       if (col === pettyCashCol) {
         pettyCashTopUp = amt.abs();
@@ -476,19 +485,19 @@ export async function parseSpreadsheet(buffer: Buffer | ArrayBuffer): Promise<Pa
       }
     }
 
-    const warnings: string[] = [];
-    if (dateForwardFilled) warnings.push('date forward-filled from previous row');
+    const rowWarnings: string[] = [...rowParseWarnings];
+    if (dateForwardFilled) rowWarnings.push('date forward-filled from previous row');
     if (!rowDate && (rowAmounts.length > 0 || pettyCashTopUp !== null)) {
-      warnings.push('no date — could not forward-fill');
+      rowWarnings.push('no date — could not forward-fill');
     }
     if (/no\s+receipt|no\s+invoice|hand\s*written|no\s+date/i.test(descStr)) {
-      warnings.push('evidence-quality flag in description');
+      rowWarnings.push('evidence-quality flag in description');
     }
     if (rowAmounts.some((a) => a.accountCode === null)) {
-      warnings.push('one or more amounts in unmapped columns');
+      rowWarnings.push('one or more amounts in unmapped columns');
     }
     if (pettyCashTopUp && pettyCashTopUp.greaterThan(5000) && !descStr) {
-      warnings.push('petty-cash entry > LKR 5,000 has no description (memo required)');
+      rowWarnings.push('petty-cash entry > LKR 5,000 has no description (memo required)');
     }
 
     // Accumulate totals.
@@ -510,7 +519,7 @@ export async function parseSpreadsheet(buffer: Buffer | ArrayBuffer): Promise<Pa
       description: descStr,
       pettyCashTopUp,
       amounts: rowAmounts,
-      warnings,
+      warnings: rowWarnings,
     });
   }
 

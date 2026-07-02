@@ -318,14 +318,16 @@ everywhere. Promoting to multi-tenant is:
 
 ```mermaid
 flowchart LR
-  STEP1["Enable RLS policies<br/>on every domain table<br/>(already in schema, audit usage)"] --> STEP2["Auth callback maps<br/>JWT.user → Membership → orgId<br/>set as session GUC"]
-  STEP2 --> STEP3["All Prisma queries inherit<br/>RLS-enforced WHERE org_id = current"]
+  STEP1["Enable RLS policies<br/>on every domain table<br/>(already in schema, audit usage)"] --> STEP2["Auth callback maps<br/>JWT.user → Membership → orgId<br/>set as transaction-local context<br/>(SET LOCAL app.org_id)"]
+  STEP2 --> STEP3["All Prisma queries inherit<br/>RLS-enforced WHERE org_id = current_setting('app.org_id')<br/>(transaction-scoped, safe with PgBouncer)"]
   STEP3 --> STEP4["Add org-creation flow<br/>+ invite flow<br/>(no schema migration needed)"]
   STEP4 --> STEP5["Stripe billing on Organization<br/>(future)"]
 ```
 
-No data migration needed — only policies, the session context, and UI
-for org switching.
+No data migration needed — only policies, transaction-local context, and
+UI for org switching. Use `SET LOCAL app.org_id = '…'` inside each
+transaction (not `SET` / session GUC) — PgBouncer runs in transaction mode
+and session state is not preserved across pooled connections.
 
 ---
 

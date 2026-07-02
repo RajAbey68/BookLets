@@ -1,6 +1,6 @@
 # BookLets Architecture Pack
 
-Three sequenced documents. Read in order.
+Four sequenced documents. Read in order.
 
 | # | Doc | What it covers |
 |---|-----|----------------|

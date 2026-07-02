@@ -52,9 +52,13 @@ integration test that signs in as a synthetic non-owner JWT and confirms
 zero rows return on cross-org queries.
 
 ### R4 — Server Action serialisation fragility
-**Verdict:** **Drop.**
-**Rationale:** The Decimal bug from PR #38 was caught by Codex review.
-Developer discipline + review process is the accepted control.
+**Verdict:** Fix now.
+**Recommended action:** Add a TypeScript lint rule or a runtime assertion
+that Server Actions may only return plain JSON-serialisable types. The
+`Decimal`/class-instance bug (PR #38) was caught in review this time, but
+it's a recurring class of error. Enforce serialisability at the type layer
+(e.g. `SerializedParseResult` shape) and add a Vitest test that mounts the
+action and asserts the returned value survives `JSON.parse(JSON.stringify(…))`.
 
 ### R5 — No background-job infrastructure
 **Verdict:** Fix soon.
@@ -124,6 +128,6 @@ review process to catch a future change that would.
 
 ## Closed (Drop) summary
 
-R4, R14, R15 are closed. They are no longer tracked in the risk register;
-the rationale is preserved above in case a future change re-opens any of
-them.
+R14, R15 are closed. They are no longer tracked in the risk register;
+the rationale is preserved above in case a future change re-opens either
+of them. R4 has been re-opened — see decision detail above.
