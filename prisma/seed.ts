@@ -33,31 +33,142 @@ async function main() {
   console.log('✅ Organization:', org.id);
 
   // 2. Chart of Accounts
+  //
+  // Drafted from the operator's "KO_LAKE Income & Petty Cash Analysis"
+  // spreadsheet (March 2026) column headers, refined per operator
+  // confirmation on 2026-05-19. Numbering follows a standard SME pattern:
+  //   1xxx Assets         (cash, bank, petty cash, fixed assets)
+  //   2xxx Liabilities    (guest pre-payments, loans, payroll deductions)
+  //   4xxx Revenue        (rent, events, F&B, other)
+  //   5xxx Cost of Sales  (food & beverage, refunds)
+  //   6xxx Operating Exp  (payroll, utilities, property, ops, sales/admin)
+  //   7xxx Capex          (separate from operating expense)
+  //   9xxx Suspense
+  //
+  // ---------------------------------------------------------------------
+  // Operator-confirmed conventions (P0 sign-off, 2026-05-19):
+  //
+  // • Books currency = LKR. EUR/USD/GBP bookings get converted at
+  //   recognition (the source-currency amount lives on Booking; the JE
+  //   is in LKR). For USD management reporting, take a single spot rate
+  //   on the month-close day and re-value every LKR JournalLine — i.e.
+  //   USD reporting is a derived view at close, not a per-entry capture.
+  //   A future `FxRate` table will store the chosen month-end rate per
+  //   period; the export-to-accountant step (P5) writes both LKR and
+  //   USD-equivalent columns using that rate. Out of scope for this PR.
+  //
+  // • Payroll split (Sri Lanka):
+  //     6100 Salaries (Gross Accrual)   — agreed monthly compensation
+  //     6110 Wages    (Net Paid)        — what hits employee bank after
+  //                                         APIT + EPF-employee deductions
+  //     6150 Statutory Contributions    — employer-side EPF (12%) + ETF (3%)
+  //   Deduction payables sit in 2200–2220 (liability). Operator's
+  //   spreadsheet uses Salaries vs Wages as two separate columns;
+  //   keeping both lets the operator record either the accrual or the
+  //   cash payment depending on what they have to hand.
+  //
+  // • Petty Cash float held by the Villa Captain. Top-ups debit
+  //   1010 Petty Cash Fund (credit 1000 Bank). Daily purchases credit
+  //   1010 and debit the relevant expense account. Single-line petty-
+  //   cash entries above LKR 5,000 should carry a memo explaining why
+  //   (enforce as a validation rule in P2, not a schema constraint).
+  //
+  // • Booking-month attribution: when a stay crosses month-end, the
+  //   entire revenue posts to the CHECKOUT month — not apportioned by
+  //   days. RevenueService.postRecognitionEntry already does this
+  //   correctly (uses booking.checkOut as the entry date). Documented
+  //   here so future sessions don't try to "fix" it.
+  // ---------------------------------------------------------------------
   const accountDefs = [
-    { name: 'Operating Cash',       code: '1000', type: 'ASSET' },
-    { name: 'Guest Pre-payments',   code: '2000', type: 'LIABILITY' },
-    { name: 'Rental Income',        code: '4000', type: 'REVENUE' },
-    { name: 'Cleaning Fee Income',  code: '4100', type: 'REVENUE' },
-    { name: 'Commission Expense',   code: '6000', type: 'EXPENSE' },
-    { name: 'Suspense',             code: '9999', type: 'SUSPENSE' },
+    // 1xxx — Assets
+    { name: 'Bank — LKR (Wise)',              code: '1000', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Petty Cash Fund',                code: '1010', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Operating Cash',                 code: '1020', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Fixed Assets — Equipment',       code: '1500', type: 'ASSET',     currency: 'LKR' },
+    { name: 'Fixed Assets — Buildings',       code: '1510', type: 'ASSET',     currency: 'LKR' },
+
+    // 2xxx — Liabilities
+    { name: 'Guest Pre-payments',             code: '2000', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'Loans Payable',                  code: '2100', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'APIT Payable',                   code: '2200', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'EPF Payable',                    code: '2210', type: 'LIABILITY', currency: 'LKR' },
+    { name: 'ETF Payable',                    code: '2220', type: 'LIABILITY', currency: 'LKR' },
+
+    // 4xxx — Revenue
+    { name: 'Rent Income',                    code: '4000', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Cleaning Fee Income',            code: '4010', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Event Income',                   code: '4020', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'F&B Income',                     code: '4030', type: 'REVENUE',   currency: 'LKR' },
+    { name: 'Other Income',                   code: '4090', type: 'REVENUE',   currency: 'LKR' },
+
+    // 5xxx — Cost of Sales
+    { name: 'Food & Beverage Expense',        code: '5100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Refunds & Adjustments',          code: '5110', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 6xxx — Operating Expense (payroll)
+    { name: 'Salaries (Gross Accrual)',       code: '6100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Wages (Net Paid)',               code: '6110', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Bonus',                          code: '6120', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Staff Welfare',                  code: '6130', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Complementaries',                code: '6140', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Statutory Contributions (EPF/ETF Employer)', code: '6150', type: 'EXPENSE', currency: 'LKR' },
+
+    // 6xxx — Operating Expense (utilities & subscriptions)
+    { name: 'Electricity',                    code: '6200', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Water',                          code: '6210', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Telephone & Internet',           code: '6220', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Software Subscriptions',         code: '6230', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 6xxx — Operating Expense (property)
+    { name: 'Cleaning & Maintenance',         code: '6300', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Laundry & Housekeeping',         code: '6310', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Pool & Garden',                  code: '6320', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Gym Maintenance',                code: '6330', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 6xxx — Operating Expense (operations)
+    { name: 'Fuel',                           code: '6400', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Gas',                            code: '6410', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Travel',                         code: '6420', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Other Operating Expense',        code: '6490', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 6xxx — Operating Expense (sales & admin)
+    { name: 'Sales Promotion',                code: '6500', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Commission Expense',             code: '6510', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Admin & Professional Fees',      code: '6600', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 6xxx — Operating Expense (financing)
+    { name: 'Loan Interest & Repayment',      code: '6700', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 7xxx — Capex
+    { name: 'Minor Capex',                    code: '7100', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Capex — Equipment',              code: '7200', type: 'EXPENSE',   currency: 'LKR' },
+    { name: 'Capex — Buildings',              code: '7300', type: 'EXPENSE',   currency: 'LKR' },
+
+    // 9xxx — Suspense / Control
+    { name: 'Suspense',                       code: '9999', type: 'SUSPENSE',  currency: 'LKR' },
   ];
 
   const accountMap: Record<string, string> = {};
   for (const acc of accountDefs) {
     const record = await prisma.account.upsert({
       where: { code: acc.code },
-      update: {},
+      update: {
+        name: acc.name,
+        type: acc.type,
+        currency: acc.currency,
+      },
       create: {
         organizationId: org.id,
         name: acc.name,
         code: acc.code,
         type: acc.type,
+        currency: acc.currency,
         createdBy: 'seed',
       },
     });
     accountMap[acc.code] = record.id;
   }
-  console.log('✅ Chart of Accounts seeded');
+  console.log(`✅ Chart of Accounts seeded (${accountDefs.length} accounts)`);
 
   // 3. Fiscal Period (current year)
   const today = new Date();
@@ -216,7 +327,7 @@ async function main() {
       memo: 'Q1 Airbnb platform commission',
       status: 'POSTED',
       lines: [
-        { accountId: accountMap['6000'], amount: '465.00',  isDebit: true },
+        { accountId: accountMap['6510'], amount: '465.00',  isDebit: true },
         { accountId: accountMap['1000'], amount: '465.00',  isDebit: false },
       ],
     },
@@ -247,7 +358,7 @@ async function main() {
       memo: 'May Booking.com commission',
       status: 'POSTED',
       lines: [
-        { accountId: accountMap['6000'], amount: '108.00',  isDebit: true },
+        { accountId: accountMap['6510'], amount: '108.00',  isDebit: true },
         { accountId: accountMap['1000'], amount: '108.00',  isDebit: false },
       ],
     },
