@@ -99,12 +99,27 @@ model PropertyOwnership {
   @@index([ownerId])
 }
 
+// RAJ-403: closed set of ledger account types. Reporting (P&L, Balance Sheet)
+// keys sign conventions off this — free text here made rollup impossible.
+// SUSPENSE is included because live data already uses it (9999 clearing acct).
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+  SUSPENSE
+}
+
 model Account {
   id             String        @id @default(cuid())
   organizationId String
   name           String
   code           String?       @unique
-  type           String
+  type           AccountType
+  // RAJ-403: header accounts group children for reporting and must not carry
+  // direct postings themselves.
+  isHeader       Boolean       @default(false)
   currency       String        @default("EUR")
   closedAt       DateTime?
   locked         Boolean       @default(false)
@@ -114,12 +129,15 @@ model Account {
   // RAJ-283: self-referencing hierarchy for rollup reporting. Parent accounts
   // (e.g. 4000 Rental Income) aggregate their children (4100 Airbnb, 4200
   // Direct). Root accounts have no parent.
+  // RAJ-404: the composite FK (parentId, organizationId) → (id, organizationId)
+  // makes a cross-org parent unrepresentable at the DB level.
   parentId       String?
   organization   Organization  @relation(fields: [organizationId], references: [id])
-  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  parent         Account?      @relation("AccountHierarchy", fields: [parentId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
   children       Account[]     @relation("AccountHierarchy")
   journalLines   JournalLine[]
 
+  @@unique([id, organizationId])
   @@index([organizationId])
   @@index([code])
   @@index([parentId])

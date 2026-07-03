@@ -3,7 +3,7 @@ import { HostawayService, HostawayReservation } from './hostaway.service';
 import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { Decimal } from 'decimal.js';
-import type { Booking, Property } from '@prisma/client';
+import type { AccountType, Booking, Property } from '@prisma/client';
 
 type BookingWithProperty = Booking & { property: Property };
 
@@ -381,7 +381,7 @@ export class RevenueService {
   /**
    * Helper to ensure the necessary Chart of Accounts exists.
    */
-  private static async getOrCreateAccount(organizationId: string, name: string, type: string) {
+  private static async getOrCreateAccount(organizationId: string, name: string, type: AccountType) {
     let account = await prisma.account.findFirst({
       where: { organizationId, name }
     });
