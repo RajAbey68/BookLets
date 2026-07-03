@@ -33,7 +33,7 @@ describe('RAJ-283 — Account self-referencing hierarchy', () => {
 
   it('declares the parent relation with ON DELETE RESTRICT (no silent orphaning of children)', () => {
     expect(model).toMatch(
-      /parent\s+Account\?\s+@relation\("AccountHierarchy",\s*fields:\s*\[parentId\],\s*references:\s*\[id\],\s*onDelete:\s*Restrict\)/
+      /parent\s+Account\?\s+@relation\("AccountHierarchy",\s*fields:\s*\[parentId,\s*organizationId\],\s*references:\s*\[id,\s*organizationId\],\s*onDelete:\s*Restrict/
     );
   });
 

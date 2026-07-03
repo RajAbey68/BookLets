@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, AccountType } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 
 const connectionString = process.env.DATABASE_URL;
@@ -33,7 +33,7 @@ async function main() {
   console.log('✅ Organization:', org.id);
 
   // 2. Chart of Accounts
-  const accountDefs = [
+  const accountDefs: { name: string; code: string; type: AccountType }[] = [
     { name: 'Operating Cash',       code: '1000', type: 'ASSET' },
     { name: 'Guest Pre-payments',   code: '2000', type: 'LIABILITY' },
     { name: 'Rental Income',        code: '4000', type: 'REVENUE' },
