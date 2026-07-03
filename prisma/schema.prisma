@@ -172,6 +172,11 @@ model JournalEntry {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId])
   @@index([status])
+  // RAJ-281: metrics.service.ts + trial-balance-report.ts filter
+  // org + status ('POSTED') + date range. [status] above is NOT subsumed —
+  // this composite leads with organizationId, so status-only scans keep
+  // their own index.
+  @@index([organizationId, status, date])
 }
 
 model JournalLine {
@@ -188,6 +193,10 @@ model JournalLine {
 
   @@index([journalEntryId])
   @@index([accountId])
+  // RAJ-281: getAccountBalance filters lines by accountId and joins their
+  // POSTED entries — the composite serves the lookup and the join key in one
+  // index pass. Subsumes [accountId] as a prefix, kept for zero-risk rollout.
+  @@index([accountId, journalEntryId])
 }
 
 model FiscalPeriod {
@@ -233,6 +242,9 @@ model Booking {
 
   @@index([propertyId])
   @@index([hostawayId])
+  // RAJ-281: recognizeRevenue sweeps CONFIRMED bookings whose checkOut has
+  // passed, scoped to the org's properties; metrics reads share the shape.
+  @@index([propertyId, status, checkOut])
 }
 
 model BookingCharge {
@@ -318,6 +330,10 @@ model EvidenceLog {
   @@index([tenantId])
   @@index([createdAt])
   @@index([eventType])
+  // RAJ-281: hash-chain head lookup — latest row per tenant
+  // (evidence-log.service.ts record()) runs inside EVERY ledger-post
+  // transaction. DESC matches the orderBy so Postgres reads one index tuple.
+  @@index([tenantId, createdAt(sort: Desc)])
 }
 
 model ActionIntentQueue {
@@ -334,4 +350,6 @@ model ActionIntentQueue {
 
   @@index([status])
   @@index([createdAt])
+  // RAJ-281: queue worker pattern — oldest PENDING first.
+  @@index([status, createdAt])
 }
