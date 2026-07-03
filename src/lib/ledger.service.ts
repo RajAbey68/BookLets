@@ -187,6 +187,11 @@ export class LedgerService {
           tenantId,
           agentConfidence,
           idempotencyKey,
+          // RAJ-455: persist structured provenance so downstream lookups
+          // (e.g. cancellation reversal) can find this entry without memo
+          // substring matching.
+          source: input.source,
+          sourceId: input.sourceId,
           lines: {
             create: lines.map(line => ({
               accountId: line.accountId,
@@ -245,10 +250,20 @@ export class LedgerService {
    * distinct accounting act and the audit trail must attribute it correctly.
    * Falls back to the original entry's maker only when no actor is supplied
    * (e.g. legacy/system-initiated calls).
+   *
+   * RAJ-455: `organizationId` is required and the lookup is tenant-scoped —
+   * an entry id belonging to another organization resolves to "not found"
+   * instead of being reversible cross-tenant (IDOR hardening, mirroring
+   * RevenueService.recordBookingPrepayment).
    */
-  static async reverseEntry(entryId: string, reason: string, makerIdentity?: string): Promise<{ id: string }> {
-    const originalEntry = await prisma.journalEntry.findUnique({
-      where: { id: entryId },
+  static async reverseEntry(
+    organizationId: string,
+    entryId: string,
+    reason: string,
+    makerIdentity?: string,
+  ): Promise<{ id: string }> {
+    const originalEntry = await prisma.journalEntry.findFirst({
+      where: { id: entryId, organizationId },
       include: { lines: true }
     });
 
@@ -320,9 +335,19 @@ export class LedgerService {
    *
    * `version` is stripped from `data` so a caller can never pin it — the
    * counter is owned entirely by this method.
+   *
+   * RAJ-410: `organizationId` is required and part of the updateMany guard —
+   * a foreign tenant's entry id matches zero rows, so a cross-tenant write
+   * can never land (it surfaces as OptimisticLockError / "no such entry").
+   *
+   * RAJ-411: a rejected stale write is recorded to the EvidenceLog
+   * (OPTIMISTIC_LOCK_REJECTED) before the error is rethrown. The evidence is
+   * written OUTSIDE the failed transaction — writing it inside would roll it
+   * back along with everything else.
    */
   static async updateEntryWithVersion(
     id: string,
+    organizationId: string,
     expectedVersion: number,
     data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
   ) {
@@ -330,26 +355,51 @@ export class LedgerService {
     const safeData = { ...(data as Prisma.JournalEntryUpdateInput) };
     delete safeData.version;
 
-    // Guarded update + read run in one transaction for read-your-write
-    // consistency: the returned entry reflects exactly the version this call
-    // wrote, not a state a concurrent writer slipped in between the two queries.
-    // updateMany (not update) is required because the version guard is a
-    // non-unique filter; update({where:{id,version}}) does not compile.
-    return prisma.$transaction(async (tx) => {
-      const result = await tx.journalEntry.updateMany({
-        where: { id, version: expectedVersion },
-        data: { ...safeData, version: { increment: 1 } },
-      });
+    try {
+      // Guarded update + read run in one transaction for read-your-write
+      // consistency: the returned entry reflects exactly the version this call
+      // wrote, not a state a concurrent writer slipped in between the two queries.
+      // updateMany (not update) is required because the version guard is a
+      // non-unique filter; update({where:{id,version}}) does not compile.
+      return await prisma.$transaction(async (tx) => {
+        const result = await tx.journalEntry.updateMany({
+          where: { id, organizationId, version: expectedVersion },
+          data: { ...safeData, version: { increment: 1 } },
+        });
 
-      if (result.count === 0) {
-        throw new OptimisticLockError(id, expectedVersion);
+        if (result.count === 0) {
+          throw new OptimisticLockError(id, expectedVersion);
+        }
+
+        return tx.journalEntry.findUniqueOrThrow({
+          where: { id },
+          include: { lines: true },
+        });
+      });
+    } catch (err) {
+      if (err instanceof OptimisticLockError) {
+        // RAJ-411: audit the rejected stale write. Best-effort — an evidence
+        // write failure is logged loudly but must never mask the concurrency
+        // error the caller relies on for its re-read-and-retry loop.
+        try {
+          await EvidenceLogService.record(prisma, {
+            eventType: 'OPTIMISTIC_LOCK_REJECTED',
+            tenantId: organizationId,
+            makerIdentity: 'system',
+            description:
+              `Rejected stale write to JournalEntry ${id}: expected version ${expectedVersion} ` +
+              `no longer matched (or the entry is not in org ${organizationId}).`,
+            payload: { entryId: id, organizationId, expectedVersion },
+          });
+        } catch (logErr) {
+          console.error(
+            `[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence for entry ${id}:`,
+            logErr,
+          );
+        }
       }
-
-      return tx.journalEntry.findUniqueOrThrow({
-        where: { id },
-        include: { lines: true },
-      });
-    });
+      throw err;
+    }
   }
 
   /**

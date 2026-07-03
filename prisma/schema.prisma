@@ -140,6 +140,12 @@ model JournalEntry {
   // another org's entry. Nullable — manual entries without a source stay null;
   // Postgres treats NULLs as distinct so multiple keyless entries per org are fine.
   idempotencyKey  String?
+  // RAJ-455: structured provenance — which domain object produced this entry
+  // (e.g. source='booking', sourceId=<booking.id>). Persisted so lookups like
+  // the cancellation reversal can find the entry structurally instead of via
+  // fragile memo-substring matching. Nullable — manual entries have no source.
+  source          String?
+  sourceId        String?
   // RAJ-285: optimistic-concurrency version. Bumped on every guarded update;
   // a stale write (version mismatch) becomes a no-op instead of a lost update.
   version         Int           @default(1)
@@ -154,6 +160,8 @@ model JournalEntry {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId])
   @@index([status])
+  // RAJ-455: structured provenance lookups (e.g. cancellation reversal).
+  @@index([organizationId, source, sourceId])
 }
 
 model JournalLine {
