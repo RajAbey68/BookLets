@@ -80,6 +80,12 @@ export class LedgerService {
       throw new Error(`The fiscal period "${period.name}" is closed. No new entries allowed.`);
     }
 
+    // RAJ-282: a period can be locked (e.g. under audit) without being closed;
+    // both states must reject postings.
+    if (period.locked) {
+      throw new Error(`The fiscal period "${period.name}" is locked. No new entries allowed.`);
+    }
+
     return true;
   }
 
