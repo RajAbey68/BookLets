@@ -99,25 +99,24 @@ describe('entryLineMatches', () => {
 describe('computeDrilldownTotal — sign conventions match getPortfolioMetrics', () => {
   it('revenue: credits add, debits subtract (CR-normal account)', () => {
     // metrics.service: curr.isDebit ? acc.minus(amount) : acc.plus(amount)
-    const total = computeDrilldownTotal([rev('1000.00', false), rev('200.00', false), rev('50.00', true)], 'revenue');
+    const total = computeDrilldownTotal([rev('1000.00', false), rev('200.00', false), rev('50.00', true)]);
     expect(total.toFixed(2)).toBe('1150.00');
   });
 
   it('netIncome: revenue minus expenses (expense debits reduce, expense credits restore)', () => {
     // revenue 1000 CR − (expense 300 DR − expense 40 CR) = 740
-    const total = computeDrilldownTotal(
-      [rev('1000.00', false), exp('300.00', true), exp('40.00', false)],
-      'netIncome',
-    );
+    const total = computeDrilldownTotal([
+      rev('1000.00', false), exp('300.00', true), exp('40.00', false),
+    ]);
     expect(total.toFixed(2)).toBe('740.00');
   });
 
   it('returns 0.00 for no lines', () => {
-    expect(computeDrilldownTotal([], 'revenue').toFixed(2)).toBe('0.00');
+    expect(computeDrilldownTotal([]).toFixed(2)).toBe('0.00');
   });
 
   it('uses Decimal math (no float drift on cents)', () => {
     const lines: DrilldownLine[] = Array.from({ length: 10 }, () => rev('0.10', false));
-    expect(computeDrilldownTotal(lines, 'revenue').toFixed(2)).toBe('1.00');
+    expect(computeDrilldownTotal(lines).toFixed(2)).toBe('1.00');
   });
 });

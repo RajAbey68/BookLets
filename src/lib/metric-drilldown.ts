@@ -87,7 +87,7 @@ export interface DrilldownLine {
  *   EXPENSE credit restores it — so for both account types the contribution
  *   collapses to (credit − debit).
  */
-export function computeDrilldownTotal(lines: readonly DrilldownLine[], _metric: DrilldownMetric): Decimal {
+export function computeDrilldownTotal(lines: readonly DrilldownLine[]): Decimal {
   return lines.reduce(
     (acc, line) => (line.isDebit ? acc.minus(new Decimal(line.amount.toString())) : acc.plus(new Decimal(line.amount.toString()))),
     new Decimal(0),

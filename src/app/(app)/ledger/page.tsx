@@ -74,7 +74,6 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
             accountType: line.account.type,
           })),
         ),
-        drilldown.metric,
       )
     : null;
 
