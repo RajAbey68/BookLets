@@ -131,24 +131,35 @@ export class RevenueService {
   private static async handleBookingCancellation(organizationId: string, booking: Booking, makerIdentity: string) {
     console.log(`[RevenueService] Reversing deferred entry for Cancelled Booking ${booking.id}`);
 
-    if (!booking.hostawayId) return;
-
-    // Find the latest journal entry for this booking (memo contains hostawayId)
+    // RAJ-455: find the deferred-liability entry via the structured
+    // source/sourceId provenance (the contract recordBookingPrepayment and
+    // postInitialDeferredEntry write), tenant-scoped. The old
+    // memo: { contains: hostawayId } substring match silently no-oped when
+    // the memo drifted — leaving the liability on the books.
     const entry = await prisma.journalEntry.findFirst({
       where: {
-        memo: { contains: booking.hostawayId },
-        lines: { some: { account: { organizationId } } }
+        organizationId,
+        source: 'booking',
+        sourceId: booking.id,
+        status: 'POSTED',
       },
-      orderBy: { createdAt: 'desc' }
+      orderBy: { createdAt: 'desc' },
     });
 
-    if (entry) {
-       await LedgerService.reverseEntry(entry.id, "Booking Cancellation", makerIdentity);
-       await prisma.booking.update({
-         where: { id: booking.id },
-         data: { deferredPosted: false }
-       });
+    if (!entry) {
+      console.error(
+        `[RevenueService] CANCELLATION REVERSAL MISSED: no POSTED journal entry found for ` +
+          `booking ${booking.id} (source='booking', sourceId='${booking.id}', org='${organizationId}'). ` +
+          `The deferred liability was NOT reversed — investigate and reverse manually.`,
+      );
+      return;
     }
+
+    await LedgerService.reverseEntry(organizationId, entry.id, 'Booking Cancellation', makerIdentity);
+    await prisma.booking.update({
+      where: { id: booking.id },
+      data: { deferredPosted: false },
+    });
   }
 
   /**
@@ -225,6 +236,12 @@ export class RevenueService {
       memo,
       status: JournalStatus.POSTED,
       makerIdentity,
+      // RAJ-455: same provenance contract as recordBookingPrepayment, so the
+      // cancellation reversal can find this entry structurally (and RAJ-284
+      // idempotency guards a same-day re-sync from double-posting).
+      source: 'booking',
+      sourceId: booking.id,
+      operation: 'prepayment',
       lines: [
         {
           accountId: cashAccount.id,
