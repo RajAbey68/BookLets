@@ -63,12 +63,13 @@ describe('getPLStatementReport', () => {
     );
 
     const args = groupBy.mock.calls[0][0] as {
-      where: { journalEntry: { organizationId: string; status: string; date: { gte: Date; lte: Date } } };
+      where: { journalEntry: { organizationId: string; status: string; date: { gte: Date; lt: Date } } };
     };
     expect(args.where.journalEntry.organizationId).toBe('org-1');
     expect(args.where.journalEntry.status).toBe('POSTED');
     expect(args.where.journalEntry.date.gte.toISOString()).toBe('2026-07-01T00:00:00.000Z');
-    expect(args.where.journalEntry.date.lte.toISOString()).toBe('2026-07-03T23:59:59.999Z');
+    // Half-open interval: strictly less than the start of the next day.
+    expect(args.where.journalEntry.date.lt.toISOString()).toBe('2026-07-04T00:00:00.000Z');
   });
 
   it('uses the YTD range when requested', async () => {

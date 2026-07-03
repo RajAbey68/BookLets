@@ -39,7 +39,9 @@ export async function GET(request: Request) {
   rows.push(['', '', csvCell(statement.netProfit.isNegative() ? 'NET LOSS' : 'NET PROFIT'), '', statement.netProfit.toFixed(2)].join(','));
 
   const csv = rows.join('\r\n');
-  const filename = `booklets-pl-${preset.toLowerCase()}-${range.end.toISOString().slice(0, 10)}.csv`;
+  // range.endExclusive is the start of the next day — name the file after the last covered day.
+  const lastCoveredDay = new Date(range.endExclusive.getTime() - 1);
+  const filename = `booklets-pl-${preset.toLowerCase()}-${lastCoveredDay.toISOString().slice(0, 10)}.csv`;
 
   return new NextResponse(csv, {
     headers: {

@@ -161,8 +161,13 @@ export function isPLPreset(value: string): value is PLPreset {
 export interface PLPeriodRange {
   /** Inclusive period start (00:00:00.000 UTC). */
   start: Date;
-  /** Inclusive period end — end of the reference day (23:59:59.999 UTC). */
-  end: Date;
+  /**
+   * EXCLUSIVE period end — the start of the day after the reference date.
+   * Query with `date < endExclusive`: a half-open interval can never drop a
+   * posting stamped in the final (micro)second of the day, unlike an
+   * inclusive 23:59:59.999 cutoff.
+   */
+  endExclusive: Date;
 }
 
 /**
@@ -177,7 +182,8 @@ export function presetRange(preset: PLPreset, reference: Date): PLPeriodRange {
 
   const startMonth = preset === 'MTD' ? month : preset === 'QTD' ? month - (month % 3) : 0;
   const start = new Date(Date.UTC(year, startMonth, 1));
-  const end = new Date(Date.UTC(year, month, reference.getUTCDate(), 23, 59, 59, 999));
+  // Date.UTC normalizes day+1 across month/year boundaries (31 Dec → 1 Jan).
+  const endExclusive = new Date(Date.UTC(year, month, reference.getUTCDate() + 1));
 
-  return { start, end };
+  return { start, endExclusive };
 }

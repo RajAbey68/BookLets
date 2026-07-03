@@ -179,10 +179,12 @@ describe('computePLStatement', () => {
 describe('presetRange', () => {
   const utc = (iso: string) => new Date(iso);
 
-  it('MTD spans the first of the reference month to end of the reference day', () => {
+  it('MTD spans the first of the reference month to the start of the next day (exclusive)', () => {
     const range = presetRange('MTD', utc('2026-07-03T10:30:00.000Z'));
     expect(range.start.toISOString()).toBe('2026-07-01T00:00:00.000Z');
-    expect(range.end.toISOString()).toBe('2026-07-03T23:59:59.999Z');
+    // Half-open interval [start, endExclusive): querying `date < endExclusive`
+    // cannot drop a posting stamped in the last (micro)second of the day.
+    expect(range.endExclusive.toISOString()).toBe('2026-07-04T00:00:00.000Z');
   });
 
   it('QTD starts at the first month of the reference quarter', () => {
@@ -194,7 +196,7 @@ describe('presetRange', () => {
   it('YTD starts on 1 January of the reference year', () => {
     const range = presetRange('YTD', utc('2026-07-03T00:00:00.000Z'));
     expect(range.start.toISOString()).toBe('2026-01-01T00:00:00.000Z');
-    expect(range.end.toISOString()).toBe('2026-07-03T23:59:59.999Z');
+    expect(range.endExclusive.toISOString()).toBe('2026-07-04T00:00:00.000Z');
   });
 
   it('handles the first day of a year (all presets collapse to a single day)', () => {
@@ -202,8 +204,14 @@ describe('presetRange', () => {
     for (const preset of ['MTD', 'QTD', 'YTD'] as const) {
       const range = presetRange(preset, ref);
       expect(range.start.toISOString()).toBe('2026-01-01T00:00:00.000Z');
-      expect(range.end.toISOString()).toBe('2026-01-01T23:59:59.999Z');
+      expect(range.endExclusive.toISOString()).toBe('2026-01-02T00:00:00.000Z');
     }
+  });
+
+  it('rolls the exclusive end across a month boundary (31 Dec → 1 Jan next year)', () => {
+    const range = presetRange('MTD', utc('2026-12-31T12:00:00.000Z'));
+    expect(range.start.toISOString()).toBe('2026-12-01T00:00:00.000Z');
+    expect(range.endExclusive.toISOString()).toBe('2027-01-01T00:00:00.000Z');
   });
 });
 

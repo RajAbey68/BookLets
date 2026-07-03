@@ -33,7 +33,7 @@ export type PLReport =
       ok: true;
       organizationName: string;
       preset: PLPreset;
-      range: { start: Date; end: Date };
+      range: { start: Date; endExclusive: Date };
       presetOptions: readonly PLPresetOption[];
       statement: PLStatement;
     }
@@ -69,7 +69,7 @@ export async function getPLStatementReport(
         journalEntry: {
           organizationId,
           status: 'POSTED',
-          date: { gte: range.start, lte: range.end },
+          date: { gte: range.start, lt: range.endExclusive },
         },
       },
       _sum: { amount: true },

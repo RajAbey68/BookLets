@@ -12,6 +12,9 @@ const formatCurrency = (amount: { toString(): string }) =>
 const formatDay = (date: Date) =>
   date.toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 
+/** The range end is exclusive (start of the next day); display the last covered day. */
+const lastCoveredDay = (endExclusive: Date) => new Date(endExclusive.getTime() - 1);
+
 function SectionRows({ section }: { section: PLSection }) {
   return (
     <>
@@ -64,7 +67,7 @@ export default async function PLStatementPage({ searchParams }: { searchParams: 
           </div>
           <h1 style={{ marginBottom: 0 }}>Profit &amp; Loss</h1>
           <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
-            {formatDay(range.start)} – {formatDay(range.end)}
+            {formatDay(range.start)} – {formatDay(lastCoveredDay(range.endExclusive))}
           </div>
         </div>
 
