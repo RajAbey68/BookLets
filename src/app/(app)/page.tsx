@@ -8,6 +8,7 @@ const IconTrendingUp = () => (
 import Link from 'next/link';
 import { ReceiptUploader } from '@/components/ReceiptUploader';
 import { getDashboardMetrics, getRevenueTrend } from '@/app/actions/portfolio.actions';
+import { drilldownHref } from '@/lib/metric-drilldown';
 import { getDefaultUploadContext } from '@/app/actions/context.actions';
 import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 
@@ -64,23 +65,34 @@ export default async function Home() {
       </div>
       
       <div className="stats-grid">
-        <div className="glass-card">
+        {/* RAJ-291: ledger-backed money metrics drill down to the journal entries behind them */}
+        <Link
+          href={drilldownHref('revenue')}
+          className="glass-card"
+          aria-label="View the journal entries behind Total Revenue"
+          style={{ display: 'block', textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
+        >
           <h3>Total Revenue</h3>
           <div className="stat-value">{formatCurrency(metrics.totalRevenue)}</div>
           <div className="stat-trend trend-up">
             <IconTrendingUp />
-            <span>MTD Performance</span>
+            <span>MTD Performance · view entries →</span>
           </div>
-        </div>
-        
-        <div className="glass-card">
+        </Link>
+
+        <Link
+          href={drilldownHref('netIncome')}
+          className="glass-card"
+          aria-label="View the journal entries behind Net Income"
+          style={{ display: 'block', textDecoration: 'none', color: 'inherit', cursor: 'pointer' }}
+        >
           <h3>Net Income</h3>
           <div className="stat-value">{formatCurrency(metrics.netIncome)}</div>
           <div className="stat-trend trend-up">
             <IconTrendingUp />
-            <span>Normalized Margin: {metrics.netMargin}%</span>
+            <span>Normalized Margin: {metrics.netMargin}% · view entries →</span>
           </div>
-        </div>
+        </Link>
         
         <div className="glass-card">
           <h3>ADR / RevPAR</h3>

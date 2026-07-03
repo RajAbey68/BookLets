@@ -1,5 +1,6 @@
 import { prisma } from './prisma';
 import { Decimal } from 'decimal.js';
+import { monthToDateStart } from './metric-drilldown';
 
 export interface PortfolioMetrics {
   totalRevenue: number;
@@ -26,7 +27,9 @@ export class MetricsService {
 
   static async getPortfolioMetrics(organizationId: string): Promise<PortfolioMetrics> {
     const today = new Date();
-    const firstOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    // Shared with the dashboard drill-down (RAJ-291) so /ledger?metric=… can
+    // never disagree with these numbers on the window boundary.
+    const firstOfMonth = monthToDateStart(today);
 
     // 1. Calculate Total Revenue (CR entries in Revenue accounts)
     const revenueLines = await prisma.journalLine.findMany({
