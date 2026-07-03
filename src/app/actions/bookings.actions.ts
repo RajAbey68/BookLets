@@ -2,8 +2,12 @@
 
 import { prisma } from '@/lib/prisma';
 import { resolveActiveContext } from '@/lib/auth-context';
+import { RevenueService } from '@/lib/revenue.service';
 import { revalidatePath } from 'next/cache';
 import type { Prisma } from '@prisma/client';
+
+// Booking statuses that represent funds received → post a guest pre-payment.
+const LEDGER_POSTING_STATUSES = ['CONFIRMED', 'COMPLETED'];
 
 export type BookingRow = Prisma.BookingGetPayload<{
   include: { property: true; channel: true };
@@ -77,7 +81,7 @@ export async function createBooking(
   const resolved = await resolveActiveContext();
   if (!resolved.ok) return { success: false, error: resolved.error };
 
-  const { organizationId } = resolved.context;
+  const { organizationId, userId } = resolved.context;
   const { propertyId, channelId, checkIn, checkOut, totalAmount, status } = input;
 
   if (!propertyId || !channelId || !checkIn || !checkOut || !totalAmount) {
@@ -118,7 +122,7 @@ export async function createBooking(
       return { success: false, error: 'Selected channel no longer exists.' };
     }
 
-    await prisma.booking.create({
+    const booking = await prisma.booking.create({
       data: {
         propertyId,
         channelId,
@@ -129,7 +133,37 @@ export async function createBooking(
       },
     });
 
+    // RAJ-287: a booking that represents received funds MUST post to the ledger
+    // immediately (DR Cash / CR Guest Pre-payments) — no more phantom revenue
+    // waiting on a later sync. If the post fails, roll back the booking so the
+    // caller never ends up with a booking that has no journal entry.
+    if (LEDGER_POSTING_STATUSES.includes(bookingStatus)) {
+      try {
+        await RevenueService.recordBookingPrepayment(organizationId, booking.id, userId);
+      } catch (postError) {
+        // Compensating rollback so the caller never keeps a booking with no
+        // ledger entry. Surface a delete failure loudly — a swallowed failure
+        // here would leave exactly the orphan we are trying to prevent.
+        try {
+          await prisma.booking.delete({ where: { id: booking.id } });
+        } catch (deleteError) {
+          console.error(
+            `[bookings.actions] createBooking: CRITICAL — ledger post failed AND rollback delete failed for booking ${booking.id}. Orphan booking with no journal entry:`,
+            deleteError,
+          );
+        }
+        console.error('[bookings.actions] createBooking: ledger post failed, rolled back booking:', postError);
+        return {
+          success: false,
+          error: postError instanceof Error
+            ? `Booking not created — ledger post failed: ${postError.message}`
+            : 'Booking not created — ledger post failed.',
+        };
+      }
+    }
+
     revalidatePath('/bookings');
+    revalidatePath('/ledger');
     revalidatePath('/');
     return { success: true };
   } catch (error) {

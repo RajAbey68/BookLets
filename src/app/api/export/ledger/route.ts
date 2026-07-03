@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { resolveActiveContext } from '@/lib/auth-context';
 import { prisma } from '@/lib/prisma';
+import { csvCell } from '@/lib/csv';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,17 +31,16 @@ export async function GET() {
     for (const line of entry.lines) {
       const debit = line.isDebit ? line.amount.toString() : '';
       const credit = line.isDebit ? '' : line.amount.toString();
-      const memo = (entry.memo ?? '').replace(/"/g, '""');
       rows.push(
         [
           new Date(entry.date).toISOString().slice(0, 10),
           entry.id,
           entry.status,
-          line.account.code ?? '',
-          `"${line.account.name.replace(/"/g, '""')}"`,
+          csvCell(line.account.code ?? ''),
+          csvCell(line.account.name),
           debit,
           credit,
-          `"${memo}"`,
+          csvCell(entry.memo ?? ''),
         ].join(','),
       );
     }

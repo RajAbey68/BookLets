@@ -111,11 +111,18 @@ model Account {
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
   createdBy      String?
+  // RAJ-283: self-referencing hierarchy for rollup reporting. Parent accounts
+  // (e.g. 4000 Rental Income) aggregate their children (4100 Airbnb, 4200
+  // Direct). Root accounts have no parent.
+  parentId       String?
   organization   Organization  @relation(fields: [organizationId], references: [id])
+  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  children       Account[]     @relation("AccountHierarchy")
   journalLines   JournalLine[]
 
   @@index([organizationId])
   @@index([code])
+  @@index([parentId])
 }
 
 model JournalEntry {
@@ -127,6 +134,15 @@ model JournalEntry {
   makerIdentity   String?
   tenantId        String?
   agentConfidence Float?
+  // RAJ-284: idempotency key = sha256(source + sourceId + calendar-day).
+  // Uniqueness is scoped to the organization (see @@unique below), NOT global —
+  // a bare global unique would let one org's explicit key collide with (and leak)
+  // another org's entry. Nullable — manual entries without a source stay null;
+  // Postgres treats NULLs as distinct so multiple keyless entries per org are fine.
+  idempotencyKey  String?
+  // RAJ-285: optimistic-concurrency version. Bumped on every guarded update;
+  // a stale write (version mismatch) becomes a no-op instead of a lost update.
+  version         Int           @default(1)
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
   createdBy       String?
@@ -134,6 +150,8 @@ model JournalEntry {
   organization    Organization  @relation(fields: [organizationId], references: [id])
   lines           JournalLine[]
 
+  // RAJ-284: tenant-scoped idempotency uniqueness (see field comment).
+  @@unique([organizationId, idempotencyKey])
   @@index([organizationId])
   @@index([status])
 }

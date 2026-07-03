@@ -152,6 +152,63 @@ export class RevenueService {
   }
 
   /**
+   * RAJ-287 — Post a manually-created booking's guest pre-payment to the ledger
+   * immediately: DR Operating Cash / CR Guest Pre-payments.
+   *
+   * Public, reusable entry point the createBooking action calls so a manual
+   * booking never becomes "phantom" revenue waiting on a later Hostaway sync.
+   * Idempotent: the post carries source/sourceId/operation (RAJ-284) so a
+   * retry cannot double-post, and an already-posted booking short-circuits.
+   */
+  static async recordBookingPrepayment(
+    organizationId: string,
+    bookingId: string,
+    makerIdentity: string,
+  ): Promise<void> {
+    const booking = await prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { property: true },
+    });
+    if (!booking) {
+      throw new Error(`Booking ${bookingId} not found.`);
+    }
+    // Tenant isolation: never post an entry for a booking that belongs to a
+    // different organisation than the one the caller resolved.
+    if (booking.property.organizationId !== organizationId) {
+      throw new Error(`Booking ${bookingId} does not belong to this organisation.`);
+    }
+    if (booking.deferredPosted) {
+      return; // already posted — nothing to do
+    }
+
+    const cashAccount = await this.getOrCreateAccount(organizationId, 'Operating Cash', 'ASSET');
+    const deferredAccount = await this.getOrCreateAccount(organizationId, 'Guest Pre-payments', 'LIABILITY');
+
+    const memo = `Booking pre-payment: ${booking.property?.name ?? booking.propertyId} (${bookingId.slice(0, 8)})`;
+
+    await LedgerService.postEntry({
+      organizationId,
+      date: new Date(),
+      memo,
+      status: JournalStatus.POSTED,
+      makerIdentity,
+      // RAJ-284 idempotency — stable per booking + operation.
+      source: 'booking',
+      sourceId: bookingId,
+      operation: 'prepayment',
+      lines: [
+        { accountId: cashAccount.id, amount: new Decimal(booking.totalAmount), isDebit: true }, // DR Cash
+        { accountId: deferredAccount.id, amount: new Decimal(booking.totalAmount), isDebit: false }, // CR Liability
+      ],
+    });
+
+    await prisma.booking.update({
+      where: { id: bookingId },
+      data: { deferredPosted: true },
+    });
+  }
+
+  /**
    * Posts the initial entry when guest payment is received/confirmed.
    * DR Cash (Asset) / CR Guest Pre-payments (Liability)
    */

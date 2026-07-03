@@ -1,4 +1,6 @@
+import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
+import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import { EvidenceLogService } from './evidence-log.service';
 import {
@@ -6,6 +8,26 @@ import {
   JournalStatus,
   LedgerValidationResult,
 } from './types';
+
+/**
+ * RAJ-285 — thrown when a guarded update loses to a concurrent writer: the
+ * row's version no longer matches the version the caller read, so the write
+ * was rejected to prevent a lost update. Callers should re-read and retry.
+ */
+export class OptimisticLockError extends Error {
+  readonly entryId: string;
+  readonly expectedVersion: number;
+
+  constructor(entryId: string, expectedVersion: number) {
+    super(
+      `Optimistic lock failed for JournalEntry "${entryId}": expected version ${expectedVersion}, ` +
+        `but the entry was modified by another writer. Re-read the entry and retry.`
+    );
+    this.name = 'OptimisticLockError';
+    this.entryId = entryId;
+    this.expectedVersion = expectedVersion;
+  }
+}
 
 export class LedgerService {
   /**
@@ -62,7 +84,50 @@ export class LedgerService {
   }
 
   /**
+   * RAJ-284 — Deterministic idempotency key for a journal entry.
+   *
+   * key = sha256(organizationId ‖ source ‖ sourceId ‖ operation ‖ calendar-day).
+   * The day is derived from the UTC date so time-of-day jitter on a retry does
+   * not change the key. A NUL separator makes the concatenation unambiguous, so
+   * ("a","bc") and ("ab","c") never collide.
+   *
+   * `organizationId` scopes the key per tenant — two orgs syncing the same
+   * external id on the same day must NOT collide (N-02 multi-tenant isolation).
+   * `operation` distinguishes genuinely different entries from the same source
+   * entity on one day (e.g. a booking's revenue vs a separate fee), so a real
+   * second transaction is not silently deduped. Both are optional, so existing
+   * 3-arg callers keep working unchanged.
+   */
+  static computeIdempotencyKey(
+    source: string,
+    sourceId: string,
+    date: Date,
+    opts?: { organizationId?: string; operation?: string },
+  ): string {
+    const day = date.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const material = [opts?.organizationId ?? '', source, sourceId, opts?.operation ?? '', day].join('\u0000');
+    return createHash('sha256').update(material).digest('hex');
+  }
+
+  /** True when `err` is the unique-constraint violation on idempotencyKey. */
+  private static isIdempotencyConflict(err: unknown): boolean {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+      return false;
+    }
+    const target = (err.meta as { target?: string[] | string } | undefined)?.target;
+    if (!target) return true; // no field info — assume it's ours (key is the only unique nullable field involved)
+    return Array.isArray(target)
+      ? target.includes('idempotencyKey')
+      : target.includes('idempotencyKey');
+  }
+
+  /**
    * Posts a new Journal Entry atomically after validating the balance and fiscal period.
+   *
+   * Idempotent when an `idempotencyKey` (or `source` + `sourceId`) is supplied:
+   * a duplicate POST returns the already-persisted entry instead of creating a
+   * second one — both on the fast path (key already visible) and after losing a
+   * concurrent race (unique-constraint P2002).
    */
   static async postEntry(input: JournalEntryInput) {
     const {
@@ -75,6 +140,23 @@ export class LedgerService {
       tenantId,
       agentConfidence,
     } = input;
+
+    // RAJ-284: explicit key wins; otherwise derive from source + sourceId.
+    const idempotencyKey = input.idempotencyKey
+      ?? (input.source && input.sourceId
+        ? this.computeIdempotencyKey(input.source, input.sourceId, date, { organizationId, operation: input.operation })
+        : undefined);
+
+    // Fast path: this key already posted → return it, skipping validation and
+    // the transaction entirely. The lookup is ALWAYS scoped by organizationId
+    // so a key can never resolve to another tenant's entry (N-02 isolation).
+    if (idempotencyKey) {
+      const existing = await prisma.journalEntry.findFirst({
+        where: { organizationId, idempotencyKey },
+        include: { lines: true },
+      });
+      if (existing) return existing;
+    }
 
     // 1. Strict Validation for POSTED entries
     if (status === JournalStatus.POSTED) {
@@ -93,7 +175,8 @@ export class LedgerService {
     await this.checkFiscalPeriod(organizationId, date);
 
     // 3. Atomic Transaction — entry + evidence row succeed or fail together.
-    return await prisma.$transaction(async (tx) => {
+    try {
+      return await prisma.$transaction(async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
           organizationId,
@@ -103,6 +186,7 @@ export class LedgerService {
           makerIdentity,
           tenantId,
           agentConfidence,
+          idempotencyKey,
           lines: {
             create: lines.map(line => ({
               accountId: line.accountId,
@@ -137,7 +221,20 @@ export class LedgerService {
       });
 
       return entry;
-    });
+      });
+    } catch (err) {
+      // Lost an idempotency race: a concurrent POST with the same key won and
+      // tripped the unique constraint. The winner is now persisted — return it
+      // rather than surfacing the conflict to the caller.
+      if (idempotencyKey && this.isIdempotencyConflict(err)) {
+        const existing = await prisma.journalEntry.findFirst({
+          where: { organizationId, idempotencyKey },
+          include: { lines: true },
+        });
+        if (existing) return existing;
+      }
+      throw err;
+    }
   }
 
   /**
@@ -210,6 +307,48 @@ export class LedgerService {
       });
 
       return reversal;
+    });
+  }
+
+  /**
+   * RAJ-285 — Update a JournalEntry under optimistic concurrency control.
+   *
+   * The caller passes the `expectedVersion` it read. The update only applies
+   * when the row still has that version, and it atomically increments the
+   * version. A stale write matches zero rows (`count === 0`) and raises
+   * OptimisticLockError instead of silently clobbering a concurrent change.
+   *
+   * `version` is stripped from `data` so a caller can never pin it — the
+   * counter is owned entirely by this method.
+   */
+  static async updateEntryWithVersion(
+    id: string,
+    expectedVersion: number,
+    data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
+  ) {
+    // Strip any caller-supplied version — the counter is owned by this method.
+    const safeData = { ...(data as Prisma.JournalEntryUpdateInput) };
+    delete safeData.version;
+
+    // Guarded update + read run in one transaction for read-your-write
+    // consistency: the returned entry reflects exactly the version this call
+    // wrote, not a state a concurrent writer slipped in between the two queries.
+    // updateMany (not update) is required because the version guard is a
+    // non-unique filter; update({where:{id,version}}) does not compile.
+    return prisma.$transaction(async (tx) => {
+      const result = await tx.journalEntry.updateMany({
+        where: { id, version: expectedVersion },
+        data: { ...safeData, version: { increment: 1 } },
+      });
+
+      if (result.count === 0) {
+        throw new OptimisticLockError(id, expectedVersion);
+      }
+
+      return tx.journalEntry.findUniqueOrThrow({
+        where: { id },
+        include: { lines: true },
+      });
     });
   }
 
