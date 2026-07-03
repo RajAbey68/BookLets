@@ -307,6 +307,11 @@ model ActionIntentQueue {
   status          String    @default("PENDING")
   action          String
   payload         Json
+  // RAJ-292/294: tenant scope for the 4-eyes queue. Nullable only because the
+  // column is retrofitted onto an empty table (zero producers exist yet); every
+  // future producer MUST set it — the /approvals surface filters on it, so an
+  // org-less intent is invisible and undecidable rather than cross-tenant.
+  organizationId  String?
   makerIdentity   String
   checkerIdentity String?
   confidence      Float
@@ -316,4 +321,5 @@ model ActionIntentQueue {
 
   @@index([status])
   @@index([createdAt])
+  @@index([organizationId])
 }
