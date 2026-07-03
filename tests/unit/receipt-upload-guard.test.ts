@@ -140,7 +140,7 @@ describe('RAJ-456 — assertImageMagicBytes', () => {
 
 describe('RAJ-456 — RateLimiter (token bucket, injectable clock)', () => {
   it('allows up to the burst capacity within one minute', () => {
-    let now = 0;
+    const now = 0;
     const limiter = new RateLimiter({ capacity: 10, refillPerMinute: 10, now: () => now });
     for (let i = 0; i < 10; i++) {
       expect(limiter.tryConsume('org-1')).toBe(true);
@@ -177,7 +177,7 @@ describe('RAJ-456 — RateLimiter (token bucket, injectable clock)', () => {
   });
 
   it('buckets are independent per organizationId', () => {
-    let now = 0;
+    const now = 0;
     const limiter = new RateLimiter({ capacity: 10, refillPerMinute: 10, now: () => now });
     for (let i = 0; i < 10; i++) limiter.tryConsume('org-1');
     expect(limiter.tryConsume('org-1')).toBe(false);
