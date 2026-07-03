@@ -1,5 +1,13 @@
+import Link from 'next/link';
 import { fetchLedgerEntries } from '@/app/actions/ledger.actions';
 import LedgerPeriodFilter, { type LedgerPeriodOption } from '@/components/LedgerPeriodFilter';
+import {
+  DRILLDOWN_METRIC_LABELS,
+  computeDrilldownTotal,
+  entryLineMatches,
+  getDrilldownFilter,
+  parseDrilldownMetric,
+} from '@/lib/metric-drilldown';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -12,9 +20,15 @@ const monthKey = (date: Date | string) => {
   return `${d.getFullYear()}-${d.getMonth()}`;
 };
 
-export default async function LedgerPage({ searchParams }: { searchParams: Promise<{ period?: string }> }) {
-  const { period } = await searchParams;
+export default async function LedgerPage({ searchParams }: { searchParams: Promise<{ period?: string; metric?: string }> }) {
+  const { period, metric } = await searchParams;
   const allEntries = await fetchLedgerEntries();
+
+  // RAJ-291 drill-down: /ledger?metric=revenue|netIncome shows exactly the
+  // journal lines behind the corresponding dashboard stat card, plus a total
+  // row that reconciles with the dashboard number.
+  const drilldownMetric = parseDrilldownMetric(metric);
+  const drilldown = drilldownMetric ? getDrilldownFilter(drilldownMetric, new Date()) : null;
 
   // Period options are derived from the actual entry dates, newest first.
   const monthLabels = new Map<string, string>();
@@ -35,9 +49,33 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
   ];
 
   const selectedPeriod = period && monthLabels.has(period) ? period : 'all';
-  const entries = selectedPeriod === 'all'
+
+  // In drill-down mode the metric defines the window (MTD) and predicate, so
+  // the period filter does not apply. Only lines on the metric's account
+  // types count — other lines of the same entry are omitted, exactly as in
+  // MetricsService.getPortfolioMetrics.
+  const entries = drilldown
     ? allEntries
-    : allEntries.filter((entry) => monthKey(entry.date) === selectedPeriod);
+        .map((entry) => ({
+          ...entry,
+          lines: entry.lines.filter((line) => entryLineMatches(drilldown, entry, line.account.type)),
+        }))
+        .filter((entry) => entry.lines.length > 0)
+    : selectedPeriod === 'all'
+      ? allEntries
+      : allEntries.filter((entry) => monthKey(entry.date) === selectedPeriod);
+
+  const drilldownTotal = drilldown
+    ? computeDrilldownTotal(
+        entries.flatMap((entry) =>
+          entry.lines.map((line) => ({
+            amount: line.amount.toString(),
+            isDebit: line.isDebit,
+            accountType: line.account.type,
+          })),
+        ),
+      )
+    : null;
 
   const formatCurrency = (amount: number | { toString(): string }) => {
     return new Intl.NumberFormat('de-DE', {
@@ -61,7 +99,7 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
         </div>
         
         <div style={{ display: 'flex', gap: '1rem' }}>
-          <LedgerPeriodFilter options={periodOptions} />
+          {!drilldown && <LedgerPeriodFilter options={periodOptions} />}
           <a
             href="/ledger/new"
             style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}
@@ -84,6 +122,36 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
         </div>
       </div>
 
+      {drilldown && drilldownTotal !== null && (
+        <div
+          className="glass-card"
+          style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', padding: '1rem 1.5rem' }}
+        >
+          <div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--accent-color)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '0.25rem' }}>
+              Dashboard drill-down
+            </div>
+            <div style={{ fontWeight: '600' }}>
+              {DRILLDOWN_METRIC_LABELS[drilldown.metric]} — POSTED entries since {formatDate(drilldown.dateFrom)}
+            </div>
+            <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
+              Total below equals the dashboard figure for this metric.
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
+            <div style={{ fontSize: '1.5rem', fontWeight: '700', color: 'var(--accent-color)' }}>
+              {formatCurrency(drilldownTotal.toNumber())}
+            </div>
+            <Link
+              href="/ledger"
+              style={{ padding: '0.5rem 1rem', borderRadius: '10px', background: 'var(--surface-color)', border: '1px solid var(--surface-border)', color: 'var(--text-primary)', fontWeight: '600', fontSize: '0.8125rem', textDecoration: 'none' }}
+            >
+              Clear filter
+            </Link>
+          </div>
+        </div>
+      )}
+
       <div className="glass-card">
         <table className="premium-table">
           <thead>
@@ -100,8 +168,14 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
             {entries.length === 0 ? (
               <tr>
                 <td colSpan={6} style={{ textAlign: 'center', padding: '4rem', color: 'var(--text-secondary)' }}>
-                  <div style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>No ledger entries found</div>
-                  <div>Sync your Hostaway account to populate the ledger.</div>
+                  <div style={{ fontSize: '1.25rem', marginBottom: '0.5rem' }}>
+                    {drilldown ? 'No journal entries behind this metric yet' : 'No ledger entries found'}
+                  </div>
+                  <div>
+                    {drilldown
+                      ? 'No POSTED entries on this metric’s accounts in the month-to-date window. If the dashboard shows a non-zero figure, the numbers have not reconciled — please report it.'
+                      : 'Sync your Hostaway account to populate the ledger.'}
+                  </div>
                 </td>
               </tr>
             ) : (
@@ -149,6 +223,18 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
               )
             )}
           </tbody>
+          {drilldown && drilldownTotal !== null && entries.length > 0 && (
+            <tfoot>
+              <tr style={{ borderTop: '2px solid var(--surface-border)' }}>
+                <td colSpan={5} style={{ textAlign: 'right', padding: '1rem', fontWeight: '700' }}>
+                  {DRILLDOWN_METRIC_LABELS[drilldown.metric]} — reconciled total
+                </td>
+                <td style={{ textAlign: 'right', padding: '1rem', fontWeight: '700', color: 'var(--accent-color)' }}>
+                  {formatCurrency(drilldownTotal.toNumber())}
+                </td>
+              </tr>
+            </tfoot>
+          )}
         </table>
       </div>
     </>

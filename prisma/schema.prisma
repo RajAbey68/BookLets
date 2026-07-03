@@ -99,12 +99,27 @@ model PropertyOwnership {
   @@index([ownerId])
 }
 
+// RAJ-403: closed set of ledger account types. Reporting (P&L, Balance Sheet)
+// keys sign conventions off this — free text here made rollup impossible.
+// SUSPENSE is included because live data already uses it (9999 clearing acct).
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+  SUSPENSE
+}
+
 model Account {
   id             String        @id @default(cuid())
   organizationId String
   name           String
   code           String?       @unique
-  type           String
+  type           AccountType
+  // RAJ-403: header accounts group children for reporting and must not carry
+  // direct postings themselves.
+  isHeader       Boolean       @default(false)
   currency       String        @default("EUR")
   closedAt       DateTime?
   locked         Boolean       @default(false)
@@ -114,12 +129,15 @@ model Account {
   // RAJ-283: self-referencing hierarchy for rollup reporting. Parent accounts
   // (e.g. 4000 Rental Income) aggregate their children (4100 Airbnb, 4200
   // Direct). Root accounts have no parent.
+  // RAJ-404: the composite FK (parentId, organizationId) → (id, organizationId)
+  // makes a cross-org parent unrepresentable at the DB level.
   parentId       String?
   organization   Organization  @relation(fields: [organizationId], references: [id])
-  parent         Account?      @relation("AccountHierarchy", fields: [parentId], references: [id], onDelete: Restrict)
+  parent         Account?      @relation("AccountHierarchy", fields: [parentId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Cascade)
   children       Account[]     @relation("AccountHierarchy")
   journalLines   JournalLine[]
 
+  @@unique([id, organizationId])
   @@index([organizationId])
   @@index([code])
   @@index([parentId])
@@ -154,6 +172,11 @@ model JournalEntry {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId])
   @@index([status])
+  // RAJ-281: metrics.service.ts + trial-balance-report.ts filter
+  // org + status ('POSTED') + date range. [status] above is NOT subsumed —
+  // this composite leads with organizationId, so status-only scans keep
+  // their own index.
+  @@index([organizationId, status, date])
 }
 
 model JournalLine {
@@ -170,6 +193,10 @@ model JournalLine {
 
   @@index([journalEntryId])
   @@index([accountId])
+  // RAJ-281: getAccountBalance filters lines by accountId and joins their
+  // POSTED entries — the composite serves the lookup and the join key in one
+  // index pass. Subsumes [accountId] as a prefix, kept for zero-risk rollout.
+  @@index([accountId, journalEntryId])
 }
 
 model FiscalPeriod {
@@ -215,6 +242,9 @@ model Booking {
 
   @@index([propertyId])
   @@index([hostawayId])
+  // RAJ-281: recognizeRevenue sweeps CONFIRMED bookings whose checkOut has
+  // passed, scoped to the org's properties; metrics reads share the shape.
+  @@index([propertyId, status, checkOut])
 }
 
 model BookingCharge {
@@ -300,6 +330,10 @@ model EvidenceLog {
   @@index([tenantId])
   @@index([createdAt])
   @@index([eventType])
+  // RAJ-281: hash-chain head lookup — latest row per tenant
+  // (evidence-log.service.ts record()) runs inside EVERY ledger-post
+  // transaction. DESC matches the orderBy so Postgres reads one index tuple.
+  @@index([tenantId, createdAt(sort: Desc)])
 }
 
 model ActionIntentQueue {
@@ -322,4 +356,6 @@ model ActionIntentQueue {
   @@index([status])
   @@index([createdAt])
   @@index([organizationId])
+  // RAJ-281: queue worker pattern — oldest PENDING first.
+  @@index([status, createdAt])
 }
