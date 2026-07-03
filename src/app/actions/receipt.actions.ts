@@ -2,6 +2,12 @@
 
 import { AutomationService, type AutomationResult } from '../../lib/automation.service';
 import { resolveActiveContext } from '@/lib/auth-context';
+import {
+  assertPayloadSize,
+  assertImageMagicBytes,
+  receiptRateLimiter,
+  UploadGuardError,
+} from '@/lib/upload-guard';
 
 export interface ProcessReceiptInput {
   propertyId: string;
@@ -22,6 +28,12 @@ export type ProcessReceiptResult =
  * is still client-supplied (the user picks a property) but
  * AutomationService.processReceipt validates it belongs to the resolved
  * organisation before posting.
+ *
+ * RAJ-456: before AutomationService is invoked, the payload passes three
+ * server-side guards (see src/lib/upload-guard.ts) — size cap (5 MB
+ * decoded, estimated without a full decode), real image magic-byte
+ * validation (JPEG/PNG/HEIC/WebP) and a per-organisation in-memory rate
+ * limit (10 receipts/min, per-process only).
  */
 export async function processReceiptAction(
   input: ProcessReceiptInput,
@@ -29,6 +41,28 @@ export async function processReceiptAction(
   const resolved = await resolveActiveContext();
   if (!resolved.ok) {
     return { success: false, error: resolved.error };
+  }
+
+  try {
+    assertPayloadSize(input.imageBase64);
+    assertImageMagicBytes(input.imageBase64);
+    if (!receiptRateLimiter.tryConsume(resolved.context.organizationId)) {
+      console.warn(
+        `[receipt.actions] upload rejected: RATE_LIMITED org=${resolved.context.organizationId}`,
+      );
+      return {
+        success: false,
+        error: 'Too many receipts uploaded in the last minute. Please wait a moment and try again.',
+      };
+    }
+  } catch (error) {
+    if (error instanceof UploadGuardError) {
+      console.warn(
+        `[receipt.actions] upload rejected: ${error.code} org=${resolved.context.organizationId} payloadChars=${input.imageBase64?.length ?? 0}`,
+      );
+      return { success: false, error: error.message };
+    }
+    throw error;
   }
 
   try {
