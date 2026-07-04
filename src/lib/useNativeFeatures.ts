@@ -89,7 +89,7 @@ export function useNativeFeatures() {
           return !!credential;
         }
         // Fallback — password-based autocomplete
-        const cred = await navigator.credentials.get({ password: true });
+        const cred = await navigator.credentials.get({ password: true } as CredentialRequestOptions);
         return !!cred;
       } catch {
         return false;
