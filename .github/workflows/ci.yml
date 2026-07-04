@@ -31,6 +31,25 @@ jobs:
       - name: Lint
         run: npm run lint -- --max-warnings 0
 
+      # Prisma schema validation (npx prisma validate) is already gated in
+      # .github/workflows/p0-blockers.yml (step P0.4) on the same push/PR
+      # triggers — not duplicated here (RAJ-279).
+      - name: Unit tests + coverage gate
+        # Runs vitest with v8 coverage; thresholds live in vitest.config.ts
+        # (RAJ-279 ratchet — target 80%, see config comment for rationale).
+        run: npm run test:unit:coverage
+
+      - name: Upload coverage report
+        # Adopted from independent review (RAJ-279): keep the lcov report
+        # inspectable even when the coverage gate fails.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Build
         run: npm run build
 

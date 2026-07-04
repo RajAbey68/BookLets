@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated coverage reports (RAJ-279): never lint vitest coverage output.
+    "coverage/**",
   ]),
 ]);
 
