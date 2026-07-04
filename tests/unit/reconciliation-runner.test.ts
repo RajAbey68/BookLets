@@ -86,6 +86,24 @@ describe('runReconciliation', () => {
     expect(summary.exceptions).toHaveLength(0);
   });
 
+  it('records the LLM confidence and rationale in the DRAFT memo for the human reviewer', async () => {
+    const deps = makeDeps({
+      payouts: [po('po-1', '500.00', '2026-07-01T00:00:00Z')],
+      bookings: [
+        bk('bk-1', '500.00', '2026-06-30T00:00:00Z'),
+        bk('bk-2', '500.00', '2026-07-02T00:00:00Z'),
+      ],
+      adjudicate: vi.fn().mockResolvedValue({ bookingId: 'bk-2', confidence: 0.85, rationale: 'closest settlement date' }),
+    });
+
+    await runReconciliation(deps);
+
+    const entry = (deps.postEntry as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(entry.memo).toContain('0.85');
+    expect(entry.memo).toContain('closest settlement date');
+    expect(entry.agentConfidence).toBe(0.85);
+  });
+
   it('keeps an undecided ambiguous row as an exception (no posting, no status change)', async () => {
     const deps = makeDeps({
       payouts: [po('po-1', '500.00', '2026-07-01T00:00:00Z')],

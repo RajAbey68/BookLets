@@ -75,6 +75,20 @@ describe('adjudicateAmbiguity', () => {
     expect(await adjudicateAmbiguity(ambiguity, { apiKey: 'k', fetchImpl })).toBeNull();
   });
 
+  it('omits the raw payout reference from the prompt by default (data minimisation)', async () => {
+    const fetchImpl = deepseekResponse(JSON.stringify({ bookingId: 'bk-1', confidence: 0.8, rationale: 'r' }));
+    await adjudicateAmbiguity(ambiguity, { apiKey: 'k', fetchImpl });
+    const body = fetchImpl.mock.calls[0][1].body as string;
+    expect(body).not.toContain('HSBC-771');
+  });
+
+  it('includes the reference only when allowReferences is explicitly enabled', async () => {
+    const fetchImpl = deepseekResponse(JSON.stringify({ bookingId: 'bk-1', confidence: 0.8, rationale: 'r' }));
+    await adjudicateAmbiguity(ambiguity, { apiKey: 'k', fetchImpl, allowReferences: true });
+    const body = fetchImpl.mock.calls[0][1].body as string;
+    expect(body).toContain('HSBC-771');
+  });
+
   it('skips the network entirely when no API key is configured', async () => {
     const fetchImpl = vi.fn();
     expect(await adjudicateAmbiguity(ambiguity, { apiKey: undefined, fetchImpl })).toBeNull();

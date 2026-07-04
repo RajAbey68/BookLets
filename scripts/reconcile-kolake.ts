@@ -29,29 +29,33 @@ import { adjudicateAmbiguity } from '../src/lib/reconciliation-llm';
 const MS_PER_DAY = 86_400_000;
 const DEFAULT_LOOKBACK_DAYS = 30;
 
+/**
+ * Pre-flight account validation. Deliberately NO auto-creation: the chart of
+ * accounts must never be mutated by a cron job (four-eyes review finding —
+ * silent account creation is an audit/control violation and a rename would
+ * spawn duplicates). Missing accounts fail the run loudly instead.
+ */
 async function resolveAccounts(organizationId: string) {
   const bankName = process.env.RECON_BANK_ACCOUNT ?? 'Operating Cash';
-  const bank = await prisma.account.findFirst({
-    where: { organizationId, name: bankName },
-  });
-  if (!bank) {
+  const clearingName = process.env.RECON_CLEARING_ACCOUNT ?? 'Payout Clearing';
+
+  const [bank, clearing] = await Promise.all([
+    prisma.account.findFirst({ where: { organizationId, name: bankName } }),
+    prisma.account.findFirst({ where: { organizationId, name: clearingName } }),
+  ]);
+
+  const missing = [
+    ...(bank ? [] : [`"${bankName}" (bank/debit side — set RECON_BANK_ACCOUNT or create it)`]),
+    ...(clearing
+      ? []
+      : [`"${clearingName}" (SUSPENSE clearing/credit side — set RECON_CLEARING_ACCOUNT or create it)`]),
+  ];
+  if (missing.length > 0 || !bank || !clearing) {
     throw new Error(
-      `Bank account "${bankName}" not found for org ${organizationId}. ` +
-        `Set RECON_BANK_ACCOUNT or create the account first.`
+      `Pre-flight failed for org ${organizationId} — missing account(s): ${missing.join('; ')}. ` +
+        `The reconciliation job never creates accounts itself.`
     );
   }
-
-  const clearingName = 'Payout Clearing';
-  const clearing =
-    (await prisma.account.findFirst({ where: { organizationId, name: clearingName } })) ??
-    (await prisma.account.create({
-      data: {
-        organizationId,
-        name: clearingName,
-        type: 'SUSPENSE',
-        createdBy: 'recon-bot',
-      },
-    }));
 
   return { bankAccountId: bank.id, clearingAccountId: clearing.id };
 }
@@ -132,10 +136,22 @@ async function main() {
       await prisma.guestPayout.update({ where: { id: payoutId }, data: { status } });
     },
     adjudicate: (ambiguity) =>
-      adjudicateAmbiguity(ambiguity, { apiKey: process.env.DEEPSEEK_API_KEY }),
+      adjudicateAmbiguity(ambiguity, {
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        allowReferences: process.env.RECON_ALLOW_REFERENCES === 'true',
+      }),
     notify,
     runDate,
   });
+
+  // Silent-degradation guard (four-eyes review finding): ambiguous rows piling
+  // up because the key vanished must be loud, not a quiet exception trickle.
+  if (!process.env.DEEPSEEK_API_KEY && summary.exceptions.some((e) => e.reason.startsWith('ambiguous'))) {
+    console.error(
+      '[recon] WARNING: ambiguous payouts left unresolved because DEEPSEEK_API_KEY is not set — ' +
+        'check the Keychain "deepseek-api" entry on this machine.'
+    );
+  }
 
   // Business exceptions are reported in the digest, not as a process failure —
   // cron exit != 0 is reserved for setup/infra faults.

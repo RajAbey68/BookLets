@@ -82,6 +82,10 @@ export async function runReconciliation(deps: RunnerDeps): Promise<RunSummary> {
       bookingId: decision.bookingId,
       amount: ambiguity.payout.amount,
       date: ambiguity.payout.date,
+      // Audit trail for the human approver: the memo carries the LLM's
+      // confidence and rationale into the DRAFT entry (and the EvidenceLog).
+      note: `LLM adjudicated (confidence ${decision.confidence}): ${decision.rationale}`,
+      agentConfidence: decision.confidence,
     });
     if (posted) llmResolved += 1;
   }

@@ -8,6 +8,15 @@ serverless fleet for now — agentisation-design.md §9, Linear RAJ-510).
 This is the **1-month kill-criteria test** from the 10–50-unit strategy:
 if clean books + instant answers don't prove value at Ko Lake, the venture pivots.
 
+**Quantified pass/fail thresholds** (proposed by the independent DeepSeek
+review, 2026-07-04 — Raj to confirm or adjust before day 7 of the pilot):
+
+| Metric | Pass threshold |
+| --- | --- |
+| Exception rate over the 30-day window | ≤ 2% of payout count |
+| DeepSeek adjudication cost | ≤ $50/month at Ko Lake volume |
+| Manual review time for exceptions | ≤ 30 min/week |
+
 ## How it works
 
 1. Load `GuestPayout` rows with `status=PENDING` in the lookback window
@@ -23,7 +32,11 @@ if clean books + instant answers don't prove value at Ko Lake, the venture pivot
    wrong match, and never abort the run.
 4. Each confirmed match posts a **DRAFT** journal pair via
    `LedgerService.postEntry`: DR bank (default `Operating Cash`) /
-   CR `Payout Clearing` (auto-created SUSPENSE). Debits==credits is asserted
+   CR `Payout Clearing`. Both accounts must exist — pre-flight fails loudly,
+   the job **never creates or mutates the chart of accounts** (four-eyes
+   review finding). LLM-adjudicated matches carry the model's confidence and
+   rationale in the memo + `agentConfidence`, and every posting is recorded in
+   the `EvidenceLog`. Debits==credits is asserted
    in `buildDraftJournalInput` before posting. `source='reconciliation'`,
    `sourceId=<payout id>` makes re-runs idempotent (RAJ-284). The payout is
    flipped to `MATCHED` only after its entry persists.
@@ -56,6 +69,8 @@ tail -f ~/Library/Logs/booklets-recon.log
 | `RECON_ORG_NAME` | first org | Organization to reconcile |
 | `RECON_LOOKBACK_DAYS` | `30` | Payout lookback window |
 | `RECON_BANK_ACCOUNT` | `Operating Cash` | Debit-side account name |
+| `RECON_CLEARING_ACCOUNT` | `Payout Clearing` | Credit-side SUSPENSE account name (must pre-exist) |
+| `RECON_ALLOW_REFERENCES` | `false` | Send raw bank references to DeepSeek (withheld by default — data minimisation) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | unset | Digest delivery (console fallback) |
 
 ## Guarantees

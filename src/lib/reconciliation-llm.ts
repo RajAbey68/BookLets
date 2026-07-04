@@ -24,10 +24,17 @@ export interface AdjudicateOptions {
   apiKey: string | undefined;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /**
+   * Data minimisation: bank references may carry guest-identifying fragments,
+   * so they are withheld from the external model unless explicitly enabled
+   * (RECON_ALLOW_REFERENCES=true).
+   */
+  allowReferences?: boolean;
 }
 
-function buildPrompt(ambiguity: Ambiguity): string {
+function buildPrompt(ambiguity: Ambiguity, allowReferences: boolean): string {
   const { payout, candidates } = ambiguity;
+  const reference = allowReferences ? (payout.reference ?? 'none') : 'withheld';
   return [
     'You are reconciling a villa bank payout against candidate bookings.',
     'All candidates already have the exact same amount as the payout, so decide',
@@ -35,7 +42,7 @@ function buildPrompt(ambiguity: Ambiguity): string {
     'with confidence >= 0.7, return bookingId null.',
     '',
     `Payout: id=${payout.id} date=${payout.date.toISOString().slice(0, 10)} ` +
-      `amount=${payout.amount} reference=${payout.reference ?? 'none'}`,
+      `amount=${payout.amount} reference=${reference}`,
     'Candidates:',
     ...candidates.map(
       (c) => `- id=${c.id} checkOut=${c.checkOut.toISOString().slice(0, 10)} amount=${c.totalAmount}`
@@ -56,7 +63,7 @@ export async function adjudicateAmbiguity(
   ambiguity: Ambiguity,
   opts: AdjudicateOptions
 ): Promise<AdjudicationDecision | null> {
-  const { apiKey, fetchImpl = fetch, timeoutMs = 30_000 } = opts;
+  const { apiKey, fetchImpl = fetch, timeoutMs = 30_000, allowReferences = false } = opts;
   if (!apiKey) return null;
 
   try {
@@ -70,7 +77,7 @@ export async function adjudicateAmbiguity(
         model: DEEPSEEK_MODEL,
         max_tokens: MAX_TOKENS,
         temperature: 0,
-        messages: [{ role: 'user', content: buildPrompt(ambiguity) }],
+        messages: [{ role: 'user', content: buildPrompt(ambiguity, allowReferences) }],
       }),
       signal: AbortSignal.timeout(timeoutMs),
     });

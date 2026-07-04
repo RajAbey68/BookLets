@@ -35,6 +35,10 @@ export interface Match {
   bookingId: string;
   amount: string;
   date: Date;
+  /** Audit note appended to the DRAFT memo (e.g. LLM confidence + rationale). */
+  note?: string;
+  /** LLM confidence for adjudicated matches; deterministic matches leave it unset. */
+  agentConfidence?: number;
 }
 
 export interface Ambiguity {
@@ -158,16 +162,18 @@ export function buildDraftJournalInput(
   ];
   assertBalanced(lines);
 
+  const baseMemo = `Reconciliation: payout ${match.payoutId} matched to booking ${match.bookingId}`;
   return {
     organizationId,
     date: match.date,
-    memo: `Reconciliation: payout ${match.payoutId} matched to booking ${match.bookingId}`,
+    memo: match.note ? `${baseMemo} — ${match.note}` : baseMemo,
     status: JournalStatus.DRAFT,
     lines,
     source: 'reconciliation',
     sourceId: match.payoutId,
     operation: 'payout-match',
     makerIdentity: 'recon-bot',
+    agentConfidence: match.agentConfidence,
   };
 }
 
