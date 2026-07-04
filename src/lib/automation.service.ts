@@ -14,6 +14,14 @@ export class AutomationService {
   private static SYMBIOS_URL = process.env.SYMBIOS_URL || 'http://localhost:8080';
 
   /**
+   * Canonical vendor-name form used for exact matching and the per-org
+   * unique index: trimmed, lowercased, internal whitespace collapsed.
+   */
+  static normalizeVendorName(name: string): string {
+    return name.trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+  /**
    * Processes a receipt by sending it to SymbiOS for vision extraction and then recording it in the ledger.
    */
   static async processReceipt(
@@ -60,15 +68,40 @@ export class AutomationService {
     // 2. Resolve/Create Vendor — ALWAYS scoped to the calling organization.
     // RAJ-513: a bare name `contains` match let two tenants share one Vendor
     // row (cross-tenant bleed). Legacy rows with a NULL organizationId are
-    // deliberately not matched; a tenant-owned vendor is created instead.
-    let vendor = await prisma.vendor.findFirst({
-      where: { organizationId, name: { contains: vendorName } }
-    });
+    // deliberately not matched (prod verified 2026-07-04: Vendor has 0 rows,
+    // so no legacy rows exist — cross-tenant matching WAS the bug).
+    //
+    // Fix round (finding 2) — deterministic selection order:
+    //   1. exact match on normalizedName;
+    //   2. else OLDEST contains-match (createdAt asc) — findFirst without an
+    //      orderBy returns rows in arbitrary Postgres order, which could
+    //      attach the same receipt to different vendors run-to-run;
+    //   3. else create, stamping normalizedName; the per-org unique index on
+    //      normalizedName makes concurrent duplicates impossible — a P2002
+    //      loser re-reads the winner instead of failing the receipt.
+    const normalizedVendorName = AutomationService.normalizeVendorName(vendorName);
+
+    let vendor =
+      (await prisma.vendor.findFirst({
+        where: { organizationId, normalizedName: normalizedVendorName },
+      })) ??
+      (await prisma.vendor.findFirst({
+        where: { organizationId, name: { contains: vendorName } },
+        orderBy: { createdAt: 'asc' },
+      }));
 
     if (!vendor) {
-      vendor = await prisma.vendor.create({
-        data: { name: vendorName, organizationId }
-      });
+      try {
+        vendor = await prisma.vendor.create({
+          data: { name: vendorName, normalizedName: normalizedVendorName, organizationId },
+        });
+      } catch (err) {
+        if ((err as { code?: string } | null)?.code !== 'P2002') throw err;
+        vendor = await prisma.vendor.findFirst({
+          where: { organizationId, normalizedName: normalizedVendorName },
+        });
+        if (!vendor) throw err; // race lost AND winner invisible — surface the original error
+      }
     }
 
     // 3. Resolve Category and GL Account.

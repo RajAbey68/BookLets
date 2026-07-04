@@ -1,13 +1,14 @@
 /**
  * RAJ-513 [Sprint 0] — the single write path onto the 4-eyes ActionIntentQueue.
  *
- * ActionIntentQueue.organizationId is nullable at the DB level only because
- * the column was retrofitted onto an empty table (add-only migration rule —
- * see 20260703_action_intent_org_scope). The tenant invariant is enforced
- * HERE instead: every producer must enqueue through this service, and an
- * intent without a real organizationId is rejected before anything is
- * written. An org-less intent would be filtered out of /approvals forever —
- * invisible and undecidable — which is a silent 4-eyes bypass by omission.
+ * ActionIntentQueue.organizationId is NOT NULL at the DB since the RAJ-513
+ * fix round (20260704_action_intent_org_not_null — safe: prod table verified
+ * empty on 2026-07-04). This service remains the single write path and the
+ * first line of defence: an intent without a real organizationId (including
+ * whitespace-only, which the DB would still accept) is rejected with a clear
+ * error before anything is written. An org-less intent would be filtered out
+ * of /approvals forever — invisible and undecidable — a silent 4-eyes bypass
+ * by omission.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
