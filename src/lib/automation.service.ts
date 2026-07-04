@@ -14,6 +14,14 @@ export class AutomationService {
   private static SYMBIOS_URL = process.env.SYMBIOS_URL || 'http://localhost:8080';
 
   /**
+   * Canonical vendor-name form used for exact matching and the per-org
+   * unique index: trimmed, lowercased, internal whitespace collapsed.
+   */
+  static normalizeVendorName(name: string): string {
+    return name.trim().toLowerCase().replace(/\s+/g, ' ');
+  }
+
+  /**
    * Processes a receipt by sending it to SymbiOS for vision extraction and then recording it in the ledger.
    */
   static async processReceipt(
@@ -57,16 +65,42 @@ export class AutomationService {
     const { extraction } = await response.json();
     const { vendorName, date, totalAmount, categorySuggestion, confidence } = extraction;
 
-    // 2. Resolve/Create Vendor
-    let vendor = await prisma.vendor.findFirst({
-      where: { name: { contains: vendorName } }
-    });
+    // 2. Resolve/Create Vendor — ALWAYS scoped to the calling organization.
+    // RAJ-513: a bare name `contains` match let two tenants share one Vendor
+    // row (cross-tenant bleed). Legacy rows with a NULL organizationId are
+    // deliberately not matched (prod verified 2026-07-04: Vendor has 0 rows,
+    // so no legacy rows exist — cross-tenant matching WAS the bug).
+    //
+    // Fix round (finding 2) — deterministic selection order:
+    //   1. exact match on normalizedName;
+    //   2. else OLDEST contains-match (createdAt asc) — findFirst without an
+    //      orderBy returns rows in arbitrary Postgres order, which could
+    //      attach the same receipt to different vendors run-to-run;
+    //   3. else atomic upsert on the (organizationId, normalizedName) unique
+    //      (round 2: replaces manual create + P2002 recovery) — Postgres
+    //      resolves the concurrent-create race in one statement, returning
+    //      the winner instead of ever surfacing a conflict.
+    const normalizedVendorName = AutomationService.normalizeVendorName(vendorName);
 
-    if (!vendor) {
-      vendor = await prisma.vendor.create({
-        data: { name: vendorName }
-      });
-    }
+    const vendor =
+      (await prisma.vendor.findFirst({
+        where: { organizationId, normalizedName: normalizedVendorName },
+      })) ??
+      (await prisma.vendor.findFirst({
+        where: { organizationId, name: { contains: vendorName } },
+        orderBy: { createdAt: 'asc' },
+        take: 1,
+      })) ??
+      (await prisma.vendor.upsert({
+        where: {
+          organizationId_normalizedName: {
+            organizationId,
+            normalizedName: normalizedVendorName,
+          },
+        },
+        update: {}, // exists ⇒ concurrent writer won the race; adopt their row untouched
+        create: { name: vendorName, normalizedName: normalizedVendorName, organizationId },
+      }));
 
     // 3. Resolve Category and GL Account.
     // Both Suspense (code 9999) and Primary Bank (code 1000) must be seeded

@@ -31,6 +31,12 @@ jobs:
       - name: Lint
         run: npm run lint -- --max-warnings 0
 
+      - name: Unit tests
+        # RAJ-513: the vitest suite (24 files) was green locally but never ran
+        # in CI — typecheck/lint/build alone cannot catch behavioural
+        # regressions in the ledger/approval/automation services.
+        run: npm run test:unit
+
       - name: Build
         run: npm run build
 

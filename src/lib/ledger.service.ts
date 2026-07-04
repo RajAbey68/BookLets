@@ -115,6 +115,67 @@ export class LedgerService {
     return createHash('sha256').update(material).digest('hex');
   }
 
+  /**
+   * RAJ-513 — Agent-safe idempotency key (external review spec).
+   *
+   * key = sha256("agent:{agentName}:{taskId}:{accountId}:{amountMinorUnits}:{bookingReference}")
+   *
+   * Unlike the derived key above, this has NO calendar-day component: an
+   * agent retry that crosses midnight UTC still computes the same key, so a
+   * crash-retry loop can never double-post. Agent callers pass the result as
+   * the explicit `idempotencyKey` on postEntry; the existing fast path and
+   * P2002 race recovery handle the rest. Human/UI paths keep the derived
+   * day-scoped key — no behaviour change there.
+   */
+  static computeAgentIdempotencyKey(params: {
+    agentName: string;
+    taskId: string;
+    accountId: string;
+    amountMinorUnits: number | bigint | string;
+    bookingReference: string;
+  }): string {
+    // Four-eyes fix rounds 1+2: canonicalise inputs so numerically-equal
+    // integer amounts ("12345", 12345, 12345n) hash to ONE key; garbage
+    // (NaN/Infinity/"12,345") and precision-losing forms (fractions,
+    // unsafe-integer doubles) are rejected instead of silently hashed.
+    const amount = this.canonicalMinorUnits(params.amountMinorUnits);
+    const material =
+      `agent:${params.agentName.trim()}:${params.taskId.trim()}:` +
+      `${params.accountId.trim()}:${amount}:${params.bookingReference.trim()}`;
+    return createHash('sha256').update(material).digest('hex');
+  }
+
+  /**
+   * Canonical integer-string form of a minor-unit amount (round-2 spec):
+   *   bigint          → toString()                       (always lossless)
+   *   integer string  → BigInt(x).toString()             (lossless at ANY
+   *                     length — a 20-digit string keeps all 20 digits;
+   *                     Number() would corrupt anything beyond 2^53)
+   *   number          → String(x) iff Number.isSafeInteger(x)
+   * Everything else throws — fractional amounts, non-finite values and
+   * unparsable strings must never mint a "valid" idempotency key, and
+   * silent truncation is precision loss on money.
+   */
+  private static canonicalMinorUnits(value: number | bigint | string): string {
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'number') {
+      if (!Number.isSafeInteger(value)) {
+        throw new Error(
+          `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a safely-representable integer (fraction, non-finite, or beyond 2^53).`
+        );
+      }
+      return String(value);
+    }
+    const trimmed = value.trim();
+    if (!/^[+-]?\d+$/.test(trimmed)) {
+      throw new Error(
+        `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a plain integer string.`
+      );
+    }
+    // BigInt rejects a leading '+', so normalise it away first.
+    return BigInt(trimmed.replace(/^\+/, '')).toString();
+  }
+
   /** True when `err` is the unique-constraint violation on idempotencyKey. */
   private static isIdempotencyConflict(err: unknown): boolean {
     if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {

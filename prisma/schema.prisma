@@ -299,11 +299,26 @@ model ExpenseCategory {
 }
 
 model Vendor {
-  id        String    @id @default(cuid())
-  name      String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  expenses  Expense[]
+  id             String    @id @default(cuid())
+  name           String
+  // RAJ-513: tenant scope for vendor resolution. Nullable only because the
+  // column is retrofitted (add-only rule). Prod verified 2026-07-04
+  // (euqdfxekrxnoibeahogq): Vendor has 0 rows, so NO legacy NULL-org rows
+  // exist — "legacy rows stop matching" is correct-by-design, not data loss.
+  // AutomationService both filters and stamps it, so no new row is ever
+  // created without an organization.
+  organizationId String?
+  // RAJ-513 fix round (finding 2): canonical name (trim/lowercase/collapse
+  // whitespace) for deterministic exact matching. Nullable for the add-only
+  // rule; AutomationService always stamps it on create, and the per-org
+  // unique below kills duplicate-vendor races (safe: table verified empty).
+  normalizedName String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  expenses       Expense[]
+
+  @@unique([organizationId, normalizedName])
+  @@index([organizationId])
 }
 
 model Expense {
@@ -349,11 +364,13 @@ model ActionIntentQueue {
   status          String    @default("PENDING")
   action          String
   payload         Json
-  // RAJ-292/294: tenant scope for the 4-eyes queue. Nullable only because the
-  // column is retrofitted onto an empty table (zero producers exist yet); every
-  // future producer MUST set it — the /approvals surface filters on it, so an
-  // org-less intent is invisible and undecidable rather than cross-tenant.
-  organizationId  String?
+  // RAJ-292/294: tenant scope for the 4-eyes queue. Retrofitted nullable;
+  // RAJ-513 fix round (finding 4) promoted it to NOT NULL after verifying
+  // prod (euqdfxekrxnoibeahogq, 2026-07-04) has 0 rows — SET NOT NULL on an
+  // empty table is safe and still add-only. ActionIntentService.enqueue
+  // remains the single write path and rejects blank orgs with a clear error
+  // before Prisma ever sees them.
+  organizationId  String
   makerIdentity   String
   checkerIdentity String?
   confidence      Float
