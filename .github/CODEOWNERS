@@ -1,0 +1,15 @@
+# BookLets CODEOWNERS
+
+# Default: all code owned by Raj
+* @RajAbey68
+
+# Database schema, migrations, auth — Raj + Hermes
+/prisma/ @RajAbey68
+/src/auth.ts @RajAbey68
+/src/lib/ledger.service.ts @RajAbey68
+
+# GitHub Actions, CI config
+/.github/ @RajAbey68
+
+# Docs
+/docs/ @RajAbey68
