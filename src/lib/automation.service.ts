@@ -57,14 +57,17 @@ export class AutomationService {
     const { extraction } = await response.json();
     const { vendorName, date, totalAmount, categorySuggestion, confidence } = extraction;
 
-    // 2. Resolve/Create Vendor
+    // 2. Resolve/Create Vendor — ALWAYS scoped to the calling organization.
+    // RAJ-513: a bare name `contains` match let two tenants share one Vendor
+    // row (cross-tenant bleed). Legacy rows with a NULL organizationId are
+    // deliberately not matched; a tenant-owned vendor is created instead.
     let vendor = await prisma.vendor.findFirst({
-      where: { name: { contains: vendorName } }
+      where: { organizationId, name: { contains: vendorName } }
     });
 
     if (!vendor) {
       vendor = await prisma.vendor.create({
-        data: { name: vendorName }
+        data: { name: vendorName, organizationId }
       });
     }
 

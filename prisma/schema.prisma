@@ -299,11 +299,20 @@ model ExpenseCategory {
 }
 
 model Vendor {
-  id        String    @id @default(cuid())
-  name      String
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  expenses  Expense[]
+  id             String    @id @default(cuid())
+  name           String
+  // RAJ-513: tenant scope for vendor resolution. Nullable only because the
+  // column is retrofitted onto existing rows (same pattern as
+  // ActionIntentQueue.organizationId, 20260703_action_intent_org_scope);
+  // AutomationService both filters and stamps it, so an unscoped legacy row
+  // is never matched by a tenant-scoped lookup and no new row is created
+  // without an organization.
+  organizationId String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  expenses       Expense[]
+
+  @@index([organizationId])
 }
 
 model Expense {
