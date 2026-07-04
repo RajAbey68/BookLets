@@ -115,6 +115,31 @@ export class LedgerService {
     return createHash('sha256').update(material).digest('hex');
   }
 
+  /**
+   * RAJ-513 — Agent-safe idempotency key (external review spec).
+   *
+   * key = sha256("agent:{agentName}:{taskId}:{accountId}:{amountMinorUnits}:{bookingReference}")
+   *
+   * Unlike the derived key above, this has NO calendar-day component: an
+   * agent retry that crosses midnight UTC still computes the same key, so a
+   * crash-retry loop can never double-post. Agent callers pass the result as
+   * the explicit `idempotencyKey` on postEntry; the existing fast path and
+   * P2002 race recovery handle the rest. Human/UI paths keep the derived
+   * day-scoped key — no behaviour change there.
+   */
+  static computeAgentIdempotencyKey(params: {
+    agentName: string;
+    taskId: string;
+    accountId: string;
+    amountMinorUnits: number | bigint | string;
+    bookingReference: string;
+  }): string {
+    const material =
+      `agent:${params.agentName}:${params.taskId}:${params.accountId}:` +
+      `${params.amountMinorUnits}:${params.bookingReference}`;
+    return createHash('sha256').update(material).digest('hex');
+  }
+
   /** True when `err` is the unique-constraint violation on idempotencyKey. */
   private static isIdempotencyConflict(err: unknown): boolean {
     if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {

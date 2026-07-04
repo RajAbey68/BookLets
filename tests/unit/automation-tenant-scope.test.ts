@@ -23,7 +23,7 @@ describe('RAJ-513 — Vendor schema tenant scope', () => {
     path.resolve(__dirname, '../../prisma/schema.prisma'),
     'utf-8'
   );
-  const vendor = schema.match(/model\s+Vendor\s*\{([^}]+)\}/s)![1];
+  const vendor = schema.match(new RegExp('model\\s+Vendor\\s*\\{([^}]+)\\}', 's'))![1];
 
   it('Vendor has a nullable organizationId (add-only retrofit, no backfill)', () => {
     expect(vendor).toMatch(/organizationId\s+String\?/);
