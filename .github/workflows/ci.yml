@@ -34,6 +34,43 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Unit tests + coverage gate
+        run: npm run test:unit:coverage
+
+      - name: Enforce coverage ratchet
+        run: |
+          # Fetch main's vitest.config.ts thresholds
+          MAIN_VITEST=$(git show origin/main:vitest.config.ts 2>/dev/null || echo "")
+          if [ -z "$MAIN_VITEST" ]; then
+            echo "⚠️  Could not fetch main's vitest.config.ts — skipping ratchet check"
+            exit 0
+          fi
+          # Extract threshold values from main and PR branch
+          MAIN_LINES=$(echo "$MAIN_VITEST" | grep -oP 'lines:\s*\K\d+' | head -1)
+          MAIN_BRANCHES=$(echo "$MAIN_VITEST" | grep -oP 'branches:\s*\K\d+' | head -1)
+          MAIN_FUNCTIONS=$(echo "$MAIN_VITEST" | grep -oP 'functions:\s*\K\d+' | head -1)
+          PR_LINES=$(grep -oP 'lines:\s*\K\d+' vitest.config.ts | head -1)
+          PR_BRANCHES=$(grep -oP 'branches:\s*\K\d+' vitest.config.ts | head -1)
+          PR_FUNCTIONS=$(grep -oP 'functions:\s*\K\d+' vitest.config.ts | head -1)
+          ERR=0
+          if [ -n "$MAIN_LINES" ] && [ "$PR_LINES" -lt "$MAIN_LINES" ]; then
+            echo "❌ Ratchet failed: lines threshold dropped from $MAIN_LINES to $PR_LINES"
+            ERR=1
+          fi
+          if [ -n "$MAIN_BRANCHES" ] && [ "$PR_BRANCHES" -lt "$MAIN_BRANCHES" ]; then
+            echo "❌ Ratchet failed: branches threshold dropped from $MAIN_BRANCHES to $PR_BRANCHES"
+            ERR=1
+          fi
+          if [ -n "$MAIN_FUNCTIONS" ] && [ "$PR_FUNCTIONS" -lt "$MAIN_FUNCTIONS" ]; then
+            echo "❌ Ratchet failed: functions threshold dropped from $MAIN_FUNCTIONS to $PR_FUNCTIONS"
+            ERR=1
+          fi
+          if [ "$ERR" -eq 1 ]; then
+            echo "Coverage thresholds must never decrease. Only INCREASE thresholds in PRs."
+            exit 1
+          fi
+          echo "✅ Coverage ratchet passed — no thresholds decreased."
+
       - name: npm audit
         # Scoped gate (RAJ-401): block only on CRITICAL vulnerabilities in
         # PRODUCTION dependencies. Dev-only tooling (vitest/vite) is not shipped,
