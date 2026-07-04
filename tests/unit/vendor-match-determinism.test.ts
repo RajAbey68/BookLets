@@ -95,21 +95,29 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
   }
 
   async function runProcessReceipt(
-    store: VendorRow[],
-    createImpl?: (args: { data: Record<string, unknown> }) => Promise<VendorRow>
+    store: VendorRow[]
   ) {
     const vendorFindFirst = makeFindFirst(store);
-    const vendorCreate = vi.fn(
-      createImpl ??
-        (async ({ data }: { data: Record<string, unknown> }) => {
-          const row = {
-            id: 'vendor-new',
-            createdAt: new Date('2026-07-04'),
-            ...data,
-          } as VendorRow;
-          store.push(row);
-          return row;
-        })
+    // Atomic upsert on the (organizationId, normalizedName) unique — mirrors
+    // Postgres INSERT ... ON CONFLICT: returns the existing row if present,
+    // otherwise inserts. No P2002 window exists on this path.
+    const vendorUpsert = vi.fn(
+      async ({
+        where,
+        create,
+      }: {
+        where: { organizationId_normalizedName: { organizationId: string; normalizedName: string } };
+        create: Record<string, unknown>;
+      }) => {
+        const key = where.organizationId_normalizedName;
+        const existing = store.find(
+          (r) => r.organizationId === key.organizationId && r.normalizedName === key.normalizedName
+        );
+        if (existing) return existing;
+        const row = { id: 'vendor-new', createdAt: new Date('2026-07-04'), ...create } as VendorRow;
+        store.push(row);
+        return row;
+      }
     );
     const expenseCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
       id: 'exp-1',
@@ -119,7 +127,7 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
     vi.doMock('../../src/lib/prisma', () => ({
       prisma: {
         property: { findFirst: vi.fn().mockResolvedValue({ id: 'prop-1' }) },
-        vendor: { findFirst: vendorFindFirst, create: vendorCreate },
+        vendor: { findFirst: vendorFindFirst, upsert: vendorUpsert },
         account: { findFirst: vi.fn().mockResolvedValue({ id: 'acc-1' }) },
         expenseCategory: {
           findFirst: vi.fn().mockResolvedValue({ id: 'cat-1', accountId: 'acc-exp' }),
@@ -151,7 +159,7 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
     const { AutomationService } = await import('../../src/lib/automation.service');
     const result = await AutomationService.processReceipt('org-A', 'prop-1', 'base64==');
     const expenseData = expenseCreate.mock.calls[0][0].data as { vendorId: string };
-    return { result, vendorFindFirst, vendorCreate, vendorId: expenseData.vendorId };
+    return { result, vendorFindFirst, vendorUpsert, vendorId: expenseData.vendorId };
   }
 
   it('prefers the exact (normalized) name match over any contains match', async () => {
@@ -175,7 +183,7 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
   });
 
   it('falls back to the OLDEST contains-match (createdAt asc) — never arbitrary order', async () => {
-    const { vendorId, vendorCreate } = await runProcessReceipt([
+    const { vendorId, vendorUpsert } = await runProcessReceipt([
       {
         id: 'v-newer',
         name: 'Acme Cleaning Services',
@@ -191,17 +199,26 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
         createdAt: new Date('2026-01-05'),
       },
     ]);
-    expect(vendorCreate).not.toHaveBeenCalled();
+    expect(vendorUpsert).not.toHaveBeenCalled();
     expect(vendorId).toBe('v-older');
   });
 
-  it('stamps normalizedName (trimmed, lowercased) on newly created vendors', async () => {
-    const { vendorCreate } = await runProcessReceipt([]);
-    const data = vendorCreate.mock.calls[0][0].data as { normalizedName?: string };
-    expect(data.normalizedName).toBe('acme cleaning');
+  it('creates through an ATOMIC upsert keyed on (organizationId, normalizedName), stamping the canonical name', async () => {
+    const { vendorUpsert, vendorId } = await runProcessReceipt([]);
+    expect(vendorUpsert).toHaveBeenCalledOnce();
+    const args = vendorUpsert.mock.calls[0][0];
+    expect(args.where).toEqual({
+      organizationId_normalizedName: { organizationId: 'org-A', normalizedName: 'acme cleaning' },
+    });
+    expect(args.create).toMatchObject({
+      name: 'Acme Cleaning',
+      normalizedName: 'acme cleaning',
+      organizationId: 'org-A',
+    });
+    expect(vendorId).toBe('vendor-new');
   });
 
-  it('recovers from the (org, normalizedName) unique race: P2002 → re-read the winner', async () => {
+  it('a concurrent winner is returned by the upsert — no manual P2002 recovery, no duplicate', async () => {
     const winner: VendorRow = {
       id: 'v-winner',
       name: 'Acme Cleaning',
@@ -210,14 +227,26 @@ describe('RAJ-513 fix round — processReceipt vendor selection is deterministic
       createdAt: new Date('2026-07-04'),
     };
     const store: VendorRow[] = [];
-    const { vendorId } = await runProcessReceipt(store, async () => {
-      // Concurrent writer won the unique constraint; surface Prisma's P2002
-      // and make the winner visible to the recovery re-read.
-      store.push(winner);
-      const err = new Error('Unique constraint failed') as Error & { code: string };
-      err.code = 'P2002';
-      throw err;
+    const originalFilter = store.filter.bind(store);
+    // Simulate the race: the winner appears AFTER both lookups miss but
+    // BEFORE the upsert executes — ON CONFLICT semantics return it.
+    let lookups = 0;
+    const raceStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        if (prop === 'filter') {
+          return (...args: Parameters<typeof originalFilter>) => {
+            lookups += 1;
+            const result = originalFilter(...args);
+            if (lookups === 2 && store.length === 0) store.push(winner); // lands after the 2nd findFirst missed
+            return result;
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
     });
+    const { vendorUpsert, vendorId } = await runProcessReceipt(raceStore);
+    expect(vendorUpsert).toHaveBeenCalledOnce();
     expect(vendorId).toBe('v-winner');
+    expect(store.filter((r) => r.normalizedName === 'acme cleaning')).toHaveLength(1);
   });
 });

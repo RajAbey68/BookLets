@@ -66,9 +66,11 @@ describe('RAJ-513 — processReceipt vendor match is org-scoped', () => {
         !where.name?.contains || foreignVendor.name.includes(where.name.contains);
       return orgOk && nameOk ? foreignVendor : null;
     });
-    const vendorCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+    // Round 2: creation goes through an atomic upsert on the per-org unique.
+    // No org-A row exists in this scenario, so the upsert always inserts.
+    const vendorUpsert = vi.fn(async ({ create }: { create: Record<string, unknown> }) => ({
       id: 'vendor-new',
-      ...data,
+      ...create,
     }));
     const expenseCreate = vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
       id: 'exp-1',
@@ -78,7 +80,7 @@ describe('RAJ-513 — processReceipt vendor match is org-scoped', () => {
     vi.doMock('../../src/lib/prisma', () => ({
       prisma: {
         property: { findFirst: vi.fn().mockResolvedValue({ id: 'prop-1' }) },
-        vendor: { findFirst: vendorFindFirst, create: vendorCreate },
+        vendor: { findFirst: vendorFindFirst, upsert: vendorUpsert },
         account: { findFirst: vi.fn().mockResolvedValue({ id: 'acc-1' }) },
         expenseCategory: {
           findFirst: vi.fn().mockResolvedValue({ id: 'cat-1', accountId: 'acc-exp' }),
@@ -109,15 +111,15 @@ describe('RAJ-513 — processReceipt vendor match is org-scoped', () => {
 
     const { AutomationService } = await import('../../src/lib/automation.service');
     const result = await AutomationService.processReceipt('org-A', 'prop-1', 'base64==');
-    return { result, vendorFindFirst, vendorCreate, expenseCreate };
+    return { result, vendorFindFirst, vendorUpsert, expenseCreate };
   }
 
   it('does NOT reuse another organization\'s vendor (no cross-tenant bleed)', async () => {
-    const { vendorCreate, expenseCreate } = await runProcessReceipt();
+    const { vendorUpsert, expenseCreate } = await runProcessReceipt();
 
     // org-A has no vendor of its own — a new one must be created instead of
     // silently attaching org-A's expense to org-B's vendor row.
-    expect(vendorCreate).toHaveBeenCalled();
+    expect(vendorUpsert).toHaveBeenCalled();
     const expenseData = expenseCreate.mock.calls[0][0].data as { vendorId: string };
     expect(expenseData.vendorId).not.toBe(foreignVendor.id);
   });
@@ -132,8 +134,8 @@ describe('RAJ-513 — processReceipt vendor match is org-scoped', () => {
   });
 
   it('stamps organizationId on newly created vendors', async () => {
-    const { vendorCreate } = await runProcessReceipt();
-    const data = vendorCreate.mock.calls[0][0].data as { organizationId?: string };
-    expect(data.organizationId).toBe('org-A');
+    const { vendorUpsert } = await runProcessReceipt();
+    const created = vendorUpsert.mock.calls[0][0].create as { organizationId?: string };
+    expect(created.organizationId).toBe('org-A');
   });
 });

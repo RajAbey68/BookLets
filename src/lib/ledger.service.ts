@@ -134,9 +134,10 @@ export class LedgerService {
     amountMinorUnits: number | bigint | string;
     bookingReference: string;
   }): string {
-    // Four-eyes fix round: canonicalise inputs so numerically-equal amounts
-    // ("12345", 12345, 12345.00, 12345n) hash to ONE key, and garbage
-    // (NaN/Infinity/"12,345") is rejected instead of silently hashed.
+    // Four-eyes fix rounds 1+2: canonicalise inputs so numerically-equal
+    // integer amounts ("12345", 12345, 12345n) hash to ONE key; garbage
+    // (NaN/Infinity/"12,345") and precision-losing forms (fractions,
+    // unsafe-integer doubles) are rejected instead of silently hashed.
     const amount = this.canonicalMinorUnits(params.amountMinorUnits);
     const material =
       `agent:${params.agentName.trim()}:${params.taskId.trim()}:` +
@@ -145,23 +146,34 @@ export class LedgerService {
   }
 
   /**
-   * Canonical integer-string form of a minor-unit amount.
-   * bigint → decimal string; number/string → String(Math.trunc(Number(x))).
-   * Non-finite or blank input throws — a corrupt amount must never mint a
-   * "valid" idempotency key.
+   * Canonical integer-string form of a minor-unit amount (round-2 spec):
+   *   bigint          → toString()                       (always lossless)
+   *   integer string  → BigInt(x).toString()             (lossless at ANY
+   *                     length — a 20-digit string keeps all 20 digits;
+   *                     Number() would corrupt anything beyond 2^53)
+   *   number          → String(x) iff Number.isSafeInteger(x)
+   * Everything else throws — fractional amounts, non-finite values and
+   * unparsable strings must never mint a "valid" idempotency key, and
+   * silent truncation is precision loss on money.
    */
   private static canonicalMinorUnits(value: number | bigint | string): string {
     if (typeof value === 'bigint') return value.toString();
-    if (typeof value === 'string' && value.trim() === '') {
-      throw new Error('Invalid amountMinorUnits: blank string.');
+    if (typeof value === 'number') {
+      if (!Number.isSafeInteger(value)) {
+        throw new Error(
+          `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a safely-representable integer (fraction, non-finite, or beyond 2^53).`
+        );
+      }
+      return String(value);
     }
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
+    const trimmed = value.trim();
+    if (!/^[+-]?\d+$/.test(trimmed)) {
       throw new Error(
-        `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a finite number.`
+        `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a plain integer string.`
       );
     }
-    return String(Math.trunc(numeric));
+    // BigInt rejects a leading '+', so normalise it away first.
+    return BigInt(trimmed.replace(/^\+/, '')).toString();
   }
 
   /** True when `err` is the unique-constraint violation on idempotencyKey. */

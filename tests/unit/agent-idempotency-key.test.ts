@@ -64,14 +64,18 @@ describe('LedgerService.computeAgentIdempotencyKey', () => {
   });
 });
 
-// ─── 1b. canonicalisation (four-eyes fix round) ───────────────────────────────
+// ─── 1b. canonicalisation (four-eyes fix rounds 1+2) ──────────────────────────
 //
-// External review finding 3: numerically-equal amounts expressed differently
-// ("12345" vs 12345 vs 12345.00) hashed to DIFFERENT keys, defeating
-// idempotency; NaN/Infinity silently hashed the string "NaN". Amounts are now
-// canonicalised to an integer string (String(Math.trunc(Number(x))), bigint
-// via toString) and non-finite input is rejected; identifier inputs are
-// trimmed.
+// Round 1 (finding 3): numerically-equal amounts expressed differently
+// ("12345" vs 12345) hashed to DIFFERENT keys, defeating idempotency;
+// NaN/Infinity silently hashed the string "NaN".
+// Round 2 (finding 2): Math.trunc(Number(x)) silently LOST PRECISION on
+// integer strings beyond 2^53 (e.g. "12345678901234567890") and silently
+// truncated fractional amounts — both are now rejected or routed losslessly:
+//   bigint          → toString()
+//   integer string  → BigInt(x).toString()  (lossless at ANY length)
+//   number          → String(x) only if Number.isSafeInteger(x)
+//   anything else   → throw (fractions, non-finite, comma/exponent strings)
 
 describe('LedgerService.computeAgentIdempotencyKey — canonical amounts & trimmed inputs', () => {
   beforeEach(() => vi.resetModules());
@@ -81,32 +85,47 @@ describe('LedgerService.computeAgentIdempotencyKey — canonical amounts & trimm
     return (await import('../../src/lib/ledger.service')).LedgerService;
   };
 
-  it('numeric-equivalent amounts produce ONE key (number, string, decimal string, bigint)', async () => {
+  it('numeric-equivalent INTEGER amounts produce ONE key (number, string, bigint, leading zeros)', async () => {
     const LedgerService = await load();
     const base = LedgerService.computeAgentIdempotencyKey(agentParams); // 12345
     expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '12345' })).toBe(base);
-    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '12345.00' })).toBe(base);
-    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345.0 })).toBe(base);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '012345' })).toBe(base);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345.0 })).toBe(base); // 12345.0 IS the integer 12345
     expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: BigInt(12345) })).toBe(base);
   });
 
-  it('truncates decimal amounts toward zero (canonical integer string)', async () => {
+  it('round 2: >15-digit integer strings are BigInt-lossless — no silent Number truncation', async () => {
     const LedgerService = await load();
-    const expectedPos = createHash('sha256')
-      .update('agent:receipt-bot:task-77:acc-1:12345:BK-2026-042')
+    const twentyDigits = '12345678901234567890';
+    const expected = createHash('sha256')
+      .update(`agent:receipt-bot:task-77:acc-1:${twentyDigits}:BK-2026-042`)
       .digest('hex');
-    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345.9 })).toBe(expectedPos);
+    // string and bigint paths agree byte-for-byte on the exact digits…
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: twentyDigits })).toBe(expected);
+    expect(
+      LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: BigInt(twentyDigits) })
+    ).toBe(expected);
+    // …and the round-1 formula WAS lossy here, so this proves the fix matters
+    expect(String(Math.trunc(Number(twentyDigits)))).not.toBe(twentyDigits);
+    // a number literal that already lost precision as a double is rejected, not guessed at
+    expect(
+      () => LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345678901234567890 })
+    ).toThrow(/amountMinorUnits/);
+  });
 
+  it('negative integer amounts stay exact across number and string forms', async () => {
+    const LedgerService = await load();
     const expectedNeg = createHash('sha256')
       .update('agent:receipt-bot:task-77:acc-1:-50:BK-2026-042')
       .digest('hex');
-    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: -50.9 })).toBe(expectedNeg);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: -50 })).toBe(expectedNeg);
     expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '-50' })).toBe(expectedNeg);
   });
 
-  it('rejects non-finite / non-numeric amounts (NaN, Infinity, comma-string, blank, garbage)', async () => {
+  it('rejects fractional, non-finite and non-numeric amounts — never silently truncates', async () => {
     const LedgerService = await load();
-    for (const bad of [NaN, Infinity, -Infinity, '12,345', '', '   ', 'abc']) {
+    const bads = [12345.9, -50.9, '12345.00', '1e5', NaN, Infinity, -Infinity, '12,345', '', '   ', 'abc'];
+    for (const bad of bads) {
       expect(
         () => LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: bad }),
         `expected ${JSON.stringify(bad)} to be rejected`

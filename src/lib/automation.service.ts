@@ -76,33 +76,31 @@ export class AutomationService {
     //   2. else OLDEST contains-match (createdAt asc) — findFirst without an
     //      orderBy returns rows in arbitrary Postgres order, which could
     //      attach the same receipt to different vendors run-to-run;
-    //   3. else create, stamping normalizedName; the per-org unique index on
-    //      normalizedName makes concurrent duplicates impossible — a P2002
-    //      loser re-reads the winner instead of failing the receipt.
+    //   3. else atomic upsert on the (organizationId, normalizedName) unique
+    //      (round 2: replaces manual create + P2002 recovery) — Postgres
+    //      resolves the concurrent-create race in one statement, returning
+    //      the winner instead of ever surfacing a conflict.
     const normalizedVendorName = AutomationService.normalizeVendorName(vendorName);
 
-    let vendor =
+    const vendor =
       (await prisma.vendor.findFirst({
         where: { organizationId, normalizedName: normalizedVendorName },
       })) ??
       (await prisma.vendor.findFirst({
         where: { organizationId, name: { contains: vendorName } },
         orderBy: { createdAt: 'asc' },
+        take: 1,
+      })) ??
+      (await prisma.vendor.upsert({
+        where: {
+          organizationId_normalizedName: {
+            organizationId,
+            normalizedName: normalizedVendorName,
+          },
+        },
+        update: {}, // exists ⇒ concurrent writer won the race; adopt their row untouched
+        create: { name: vendorName, normalizedName: normalizedVendorName, organizationId },
       }));
-
-    if (!vendor) {
-      try {
-        vendor = await prisma.vendor.create({
-          data: { name: vendorName, normalizedName: normalizedVendorName, organizationId },
-        });
-      } catch (err) {
-        if ((err as { code?: string } | null)?.code !== 'P2002') throw err;
-        vendor = await prisma.vendor.findFirst({
-          where: { organizationId, normalizedName: normalizedVendorName },
-        });
-        if (!vendor) throw err; // race lost AND winner invisible — surface the original error
-      }
-    }
 
     // 3. Resolve Category and GL Account.
     // Both Suspense (code 9999) and Primary Bank (code 1000) must be seeded
