@@ -44,11 +44,13 @@ async function resolveAccounts(organizationId: string) {
     prisma.account.findFirst({ where: { organizationId, name: clearingName } }),
   ]);
 
+  // Env-derived names are not echoed into the thrown message (CodeQL
+  // js/clear-text-logging) — the env var name tells the operator where to look.
   const missing = [
-    ...(bank ? [] : [`"${bankName}" (bank/debit side — set RECON_BANK_ACCOUNT or create it)`]),
+    ...(bank ? [] : ['bank/debit account (name from RECON_BANK_ACCOUNT, default "Operating Cash")']),
     ...(clearing
       ? []
-      : [`"${clearingName}" (SUSPENSE clearing/credit side — set RECON_CLEARING_ACCOUNT or create it)`]),
+      : ['SUSPENSE clearing/credit account (name from RECON_CLEARING_ACCOUNT, default "Payout Clearing")']),
   ];
   if (missing.length > 0 || !bank || !clearing) {
     throw new Error(
@@ -81,8 +83,10 @@ async function notify(digest: string): Promise<void> {
 async function main() {
   const runDate = new Date();
   const lookbackDays = Number(process.env.RECON_LOOKBACK_DAYS ?? DEFAULT_LOOKBACK_DAYS);
+  // Env values are never interpolated into thrown/logged messages
+  // (CodeQL js/clear-text-logging — name the variable, not its value).
   if (!Number.isFinite(lookbackDays) || lookbackDays <= 0) {
-    throw new Error(`RECON_LOOKBACK_DAYS must be a positive number, got "${process.env.RECON_LOOKBACK_DAYS}".`);
+    throw new Error('RECON_LOOKBACK_DAYS must be a positive number.');
   }
   const since = new Date(runDate.getTime() - lookbackDays * MS_PER_DAY);
 
