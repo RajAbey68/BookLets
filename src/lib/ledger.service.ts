@@ -134,10 +134,34 @@ export class LedgerService {
     amountMinorUnits: number | bigint | string;
     bookingReference: string;
   }): string {
+    // Four-eyes fix round: canonicalise inputs so numerically-equal amounts
+    // ("12345", 12345, 12345.00, 12345n) hash to ONE key, and garbage
+    // (NaN/Infinity/"12,345") is rejected instead of silently hashed.
+    const amount = this.canonicalMinorUnits(params.amountMinorUnits);
     const material =
-      `agent:${params.agentName}:${params.taskId}:${params.accountId}:` +
-      `${params.amountMinorUnits}:${params.bookingReference}`;
+      `agent:${params.agentName.trim()}:${params.taskId.trim()}:` +
+      `${params.accountId.trim()}:${amount}:${params.bookingReference.trim()}`;
     return createHash('sha256').update(material).digest('hex');
+  }
+
+  /**
+   * Canonical integer-string form of a minor-unit amount.
+   * bigint → decimal string; number/string → String(Math.trunc(Number(x))).
+   * Non-finite or blank input throws — a corrupt amount must never mint a
+   * "valid" idempotency key.
+   */
+  private static canonicalMinorUnits(value: number | bigint | string): string {
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'string' && value.trim() === '') {
+      throw new Error('Invalid amountMinorUnits: blank string.');
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) {
+      throw new Error(
+        `Invalid amountMinorUnits: ${JSON.stringify(value)} is not a finite number.`
+      );
+    }
+    return String(Math.trunc(numeric));
   }
 
   /** True when `err` is the unique-constraint violation on idempotencyKey. */

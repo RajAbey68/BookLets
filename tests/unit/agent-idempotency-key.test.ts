@@ -64,6 +64,71 @@ describe('LedgerService.computeAgentIdempotencyKey', () => {
   });
 });
 
+// ─── 1b. canonicalisation (four-eyes fix round) ───────────────────────────────
+//
+// External review finding 3: numerically-equal amounts expressed differently
+// ("12345" vs 12345 vs 12345.00) hashed to DIFFERENT keys, defeating
+// idempotency; NaN/Infinity silently hashed the string "NaN". Amounts are now
+// canonicalised to an integer string (String(Math.trunc(Number(x))), bigint
+// via toString) and non-finite input is rejected; identifier inputs are
+// trimmed.
+
+describe('LedgerService.computeAgentIdempotencyKey — canonical amounts & trimmed inputs', () => {
+  beforeEach(() => vi.resetModules());
+
+  const load = async () => {
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: {} }));
+    return (await import('../../src/lib/ledger.service')).LedgerService;
+  };
+
+  it('numeric-equivalent amounts produce ONE key (number, string, decimal string, bigint)', async () => {
+    const LedgerService = await load();
+    const base = LedgerService.computeAgentIdempotencyKey(agentParams); // 12345
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '12345' })).toBe(base);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '12345.00' })).toBe(base);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345.0 })).toBe(base);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: BigInt(12345) })).toBe(base);
+  });
+
+  it('truncates decimal amounts toward zero (canonical integer string)', async () => {
+    const LedgerService = await load();
+    const expectedPos = createHash('sha256')
+      .update('agent:receipt-bot:task-77:acc-1:12345:BK-2026-042')
+      .digest('hex');
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: 12345.9 })).toBe(expectedPos);
+
+    const expectedNeg = createHash('sha256')
+      .update('agent:receipt-bot:task-77:acc-1:-50:BK-2026-042')
+      .digest('hex');
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: -50.9 })).toBe(expectedNeg);
+    expect(LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: '-50' })).toBe(expectedNeg);
+  });
+
+  it('rejects non-finite / non-numeric amounts (NaN, Infinity, comma-string, blank, garbage)', async () => {
+    const LedgerService = await load();
+    for (const bad of [NaN, Infinity, -Infinity, '12,345', '', '   ', 'abc']) {
+      expect(
+        () => LedgerService.computeAgentIdempotencyKey({ ...agentParams, amountMinorUnits: bad }),
+        `expected ${JSON.stringify(bad)} to be rejected`
+      ).toThrow(/amountMinorUnits/);
+    }
+  });
+
+  it('trims whitespace on agentName/taskId/accountId/bookingReference', async () => {
+    const LedgerService = await load();
+    const base = LedgerService.computeAgentIdempotencyKey(agentParams);
+    expect(
+      LedgerService.computeAgentIdempotencyKey({
+        agentName: '  receipt-bot ',
+        taskId: ' task-77',
+        accountId: 'acc-1  ',
+        amountMinorUnits: 12345,
+        bookingReference: ' BK-2026-042 ',
+      })
+    ).toBe(base);
+  });
+});
+
 // ─── 2. postEntry with an explicit agent key (simulated store) ────────────────
 
 describe('LedgerService.postEntry — explicit agent idempotency key', () => {
