@@ -11,15 +11,27 @@ import { fileURLToPath } from 'node:url';
 
 const METRICS = ['lines', 'statements', 'branches', 'functions'];
 
+// Strip // line comments and /* */ block comments so a commented-out decoy
+// thresholds block can never be matched instead of the real one
+// (bypass found in adversarial review — RAJ-539).
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+}
+
 export function parseThresholds(source) {
-  const block = source.match(/thresholds\s*:\s*\{([^}]*)\}/);
+  const block = stripComments(source).match(/thresholds\s*:\s*\{([^}]*)\}/);
   if (!block) {
     throw new Error('No coverage thresholds block found in vitest config — refusing to pass (fail closed).');
   }
   const thresholds = {};
   for (const metric of METRICS) {
     const m = block[1].match(new RegExp(`${metric}\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)`));
-    if (m) thresholds[metric] = parseFloat(m[1]);
+    if (!m) continue;
+    const value = parseFloat(m[1]);
+    if (!Number.isFinite(value) || value < 0 || value > 100) {
+      throw new Error(`Threshold ${metric}: ${m[1]} is not a valid percentage (0-100) — refusing to pass (fail closed).`);
+    }
+    thresholds[metric] = value;
   }
   if (Object.keys(thresholds).length === 0) {
     throw new Error('Thresholds block contains no recognised metrics — refusing to pass (fail closed).');

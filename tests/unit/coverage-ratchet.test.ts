@@ -70,3 +70,23 @@ describe('compareThresholds', () => {
     expect(violations).toHaveLength(4);
   });
 });
+
+describe('parseThresholds — bypass hardening (Ultra Judge findings)', () => {
+  it('ignores commented-out decoy thresholds blocks (line comments)', () => {
+    const src =
+      '// thresholds: { lines: 80, statements: 80, branches: 80, functions: 80 }\n' +
+      configWith('{ lines: 10, statements: 10, branches: 10, functions: 10 }');
+    expect(parseThresholds(src)).toEqual({ lines: 10, statements: 10, branches: 10, functions: 10 });
+  });
+
+  it('ignores commented-out decoy thresholds blocks (block comments)', () => {
+    const src =
+      '/* thresholds: { lines: 80, statements: 80, branches: 80, functions: 80 } */\n' +
+      configWith('{ lines: 10, statements: 10, branches: 10, functions: 10 }');
+    expect(parseThresholds(src)).toEqual({ lines: 10, statements: 10, branches: 10, functions: 10 });
+  });
+
+  it('rejects thresholds above 100 (invalid percentage)', () => {
+    expect(() => parseThresholds(configWith('{ lines: 150, branches: 83 }'))).toThrow(/150/);
+  });
+});
