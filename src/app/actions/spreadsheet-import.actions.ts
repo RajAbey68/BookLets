@@ -6,6 +6,7 @@ import {
   type SerializedParseResult,
 } from '@/lib/spreadsheet-parser';
 import { resolveActiveContext } from '@/lib/auth-context';
+import { persistImportToScrap } from '@/lib/scrap';
 
 export interface ParseUploadedSpreadsheetResult {
   ok: boolean;
@@ -69,6 +70,8 @@ export async function parseUploadedSpreadsheet(
       `[ImportAction] ${ctx.context.userId} parsed ${file.name}: ` +
       `${result.rows.length} rows, ${result.unmappedColumns.length} unmapped cols, ${result.warnings.length} warnings`,
     );
+    // Persist to scrap schema so data survives between sessions (fire-and-forget).
+    void persistImportToScrap(file.name, result);
     return { ok: true, result: serializeParseResult(result) };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
