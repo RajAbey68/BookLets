@@ -9,6 +9,16 @@ BookLets is a specialized financial management system designed for property mana
 - **Rental Management**: Track guest bookings across channels (Airbnb, Booking.com, Direct) and manage payouts.
 - **Expense Intelligence**: Categorize and track operational expenses to generate accurate Profit & Loss statements.
 
+## Documentation
+
+- **User help:** [`docs/HELP.md`](docs/HELP.md) — comprehensive guide for the bookkeeper, accountant, and operator (screens, workflow, chart of accounts, policies, glossary, FAQ).
+- **Bookkeeper / accountant deck:** [`docs/booklets-walkthrough.html`](docs/booklets-walkthrough.html) (and `.pptx`) — visual walkthrough.
+- **LLM assistant setup:** [`docs/LLM-ASSISTANT.md`](docs/LLM-ASSISTANT.md) — how to stand up a NotebookLM-based help assistant grounded only in BookLets sources.
+- **NotebookLM source bundle:** [`docs/llm-sources/`](docs/llm-sources/README.md) — what to load into the notebook and in what order.
+- **Architecture pack:** [`docs/architecture/`](docs/architecture/README.md) — current state, target state, review & risks.
+
+> NotebookLM notebook URL: *to be added by the operator once the notebook is created.*
+
 ## Getting Started
 
 1. **Install Dependencies**: `npm install`

@@ -1,10 +1,16 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { inter } from "./fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "BookLets - Open Source Bookkeeping",
   description: "Bookkeeping for Short-Term Rental Businesses",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  themeColor: "#0b0f19",
 };
 
 export default function RootLayout({

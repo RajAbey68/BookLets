@@ -19,7 +19,7 @@ export default async function BookingsPage() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '2.5rem' }}>
+      <div className="page-header">
         <div>
           <div style={{ fontSize: '0.875rem', color: 'var(--accent-color)', fontWeight: '600', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Bookings
@@ -27,7 +27,7 @@ export default async function BookingsPage() {
           <h1 style={{ marginBottom: 0 }}>Reservations</h1>
         </div>
 
-        <div style={{ display: 'flex', gap: '1rem' }}>
+        <div className="page-header-actions">
           <Link
             href="/bookings/new"
             style={{ padding: '0.75rem 1.25rem', borderRadius: '10px', background: 'var(--accent-color)', border: 'none', color: '#fff', fontWeight: '600', cursor: 'pointer', textDecoration: 'none', display: 'inline-flex', alignItems: 'center' }}

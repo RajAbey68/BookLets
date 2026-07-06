@@ -30,15 +30,17 @@ export default async function PropertiesPage() {
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: '2.5rem' }}>
+      <div className="page-header">
         <div>
           <div style={{ fontSize: '0.875rem', color: 'var(--accent-color)', fontWeight: '600', marginBottom: '0.5rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
             Portfolio
           </div>
           <h1 style={{ marginBottom: 0 }}>Real Estate Assets</h1>
         </div>
-        
-        <SyncPropertiesButton />
+
+        <div className="page-header-actions">
+          <SyncPropertiesButton />
+        </div>
       </div>
 
       {properties.length === 0 ? (
@@ -47,7 +49,7 @@ export default async function PropertiesPage() {
           <p style={{ color: 'var(--text-secondary)', marginBottom: '2rem' }}>Sync your Hostaway account or add properties manually to see analytics.</p>
         </div>
       ) : (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '2rem' }}>
+        <div className="property-grid">
           {properties.map((prop) => (
             <div key={prop.id} className="glass-card" style={{ padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
               <div style={{ padding: '1.5rem', background: `linear-gradient(135deg, ${prop.color}15, transparent)`, borderBottom: '1px solid var(--surface-border)' }}>

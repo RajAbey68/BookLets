@@ -175,6 +175,55 @@ body {
   }
 }
 
+/* Page header (title + actions). Stacks on mobile, row on tablet+. */
+.page-header {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.page-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  width: 100%;
+}
+.page-header-actions > * {
+  flex: 1 1 auto;
+  text-align: center;
+  justify-content: center;
+}
+@media (min-width: 640px) {
+  .page-header {
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: space-between;
+    margin-bottom: 2.5rem;
+  }
+  .page-header-actions {
+    width: auto;
+    flex-wrap: nowrap;
+    gap: 1rem;
+  }
+  .page-header-actions > * {
+    flex: 0 0 auto;
+  }
+}
+
+/* Property grid: card minimum shrinks on narrow screens to avoid overflow. */
+.property-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 1.25rem;
+}
+@media (min-width: 640px) {
+  .property-grid {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 2rem;
+  }
+}
+
 /* Dashboard Grids */
 .dashboard-grid {
   display: grid;
