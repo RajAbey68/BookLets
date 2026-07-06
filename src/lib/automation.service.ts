@@ -2,6 +2,7 @@ import { prisma } from './prisma';
 import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { fetchWithTimeout } from './http';
+import { extractReceipt } from './gemini-ocr';
 
 export interface AutomationResult {
   expenseId: string;
@@ -34,28 +35,54 @@ export class AutomationService {
       throw new Error(`Receipt context invalid: property ${propertyId} not found for organization ${organizationId}.`);
     }
 
-    // 1. Vision Extraction via SymbiOS
-    // NOTE: confidence is unknown at extraction time; send a sentinel of 1.0
-    // and the real confidence returned by SymbiOS is used for all downstream calls.
-    const response = await fetchWithTimeout(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-maker-identity': 'booklets-automation-service',
-        'x-tenant-id': organizationId,
-        'x-agent-confidence': '1.0', // updated after extraction in subsequent calls
-      },
-      body: JSON.stringify({ image: imageBase64 }),
-    });
+    // 1. Vision Extraction — Gemini Flash Vision OCR with SymbiOS fallback
+    // Try Google Gemini Flash Vision first (handles English + Sinhala receipts).
+    // Falls back to SymbiOS if Gemini is unavailable, times out, or returns low confidence.
+    let vendorName: string;
+    let date: string;
+    let totalAmount: number;
+    let categorySuggestion: string;
+    let confidence: number;
 
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      const detail = body ? ` - ${body.slice(0, 500)}` : '';
-      throw new Error(`SymbiOS Extraction Failed: ${response.status} ${response.statusText}${detail}`);
+    try {
+      const geminiResult = await extractReceipt(imageBase64);
+      const extraction = geminiResult.extraction;
+      vendorName = extraction.vendorName;
+      date = extraction.date;
+      totalAmount = extraction.totalAmount;
+      categorySuggestion = extraction.categorySuggestion;
+      confidence = extraction.confidence;
+      console.log(`[Middleware Agent] Gemini OCR succeeded — vendor="${vendorName}" confidence=${confidence}`);
+    } catch (geminiErr) {
+      const msg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+      console.warn(`[Middleware Agent] Gemini OCR failed (${msg}), falling back to SymbiOS...`);
+
+      // Fallback to SymbiOS
+      const response = await fetchWithTimeout(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-maker-identity': 'booklets-automation-service',
+          'x-tenant-id': organizationId,
+          'x-agent-confidence': '1.0',
+        },
+        body: JSON.stringify({ image: imageBase64 }),
+      });
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => '');
+        const detail = body ? ` - ${body.slice(0, 500)}` : '';
+        throw new Error(`SymbiOS Extraction Failed: ${response.status} ${response.statusText}${detail}`);
+      }
+
+      const { extraction } = await response.json();
+      vendorName = extraction.vendorName;
+      date = extraction.date;
+      totalAmount = extraction.totalAmount;
+      categorySuggestion = extraction.categorySuggestion;
+      confidence = extraction.confidence;
+      console.log(`[Middleware Agent] SymbiOS fallback succeeded — vendor="${vendorName}" confidence=${confidence}`);
     }
-
-    const { extraction } = await response.json();
-    const { vendorName, date, totalAmount, categorySuggestion, confidence } = extraction;
 
     // 2. Resolve/Create Vendor
     let vendor = await prisma.vendor.findFirst({
@@ -115,7 +142,7 @@ export class AutomationService {
         }
       });
 
-      // Create Ledger Entry — status driven by real SymbiOS confidence score
+      // Create Ledger Entry — status driven by extraction confidence score
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
