@@ -314,3 +314,16 @@ curl -i https://booklets.vercel.app/api/health
 Failure handling unchanged: any error in step 1 = automatic rollback (report output, stop). Trigger file errors: report, stop. If health ≠ 200 after a clean apply: DB defect fixed, remaining candidate is Vercel env (AUTH_URL scheme — PR #74 diagnosis); report, don't improvise.
 
 Note: step 2's migration file lives on main (merged). Steps run from the orchestration branch checkout which contains both the DDL and (after fetch) the migrations dir — verify `ls prisma/migrations/` shows all 9 before step 3; if the orchestration branch lacks them, run steps 2–3 from a main checkout instead.
+
+---
+
+## 2026-07-13 — 🚨 HERMES READ BEFORE / AFTER RUNNING HR-5: DDL AMENDED (audit blocking finding #5)
+
+The independent adversarial audit found the DDL was missing the `Account_no_self_parent` CHECK constraint — part of 20260701_account_hierarchy's end-state but invisible to `prisma migrate diff` (it does not model CHECK constraints). Running the old script + resolve would have recorded that migration as applied while its self-parent cycle guard was missing.
+
+- **If you have NOT yet run step 1:** `git pull` first. New artifact sha256: `369990554b5e47269b7233724da30ddd695d1a6bb08f543c8ad7101743040d70` (replaces 0d8e9fbb…). Then proceed exactly as before.
+- **If you ALREADY ran the old script:** everything you did is fine — apply this single idempotent fix-up, then continue/finish the remaining steps:
+```
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'ALTER TABLE "Account" ADD CONSTRAINT "Account_no_self_parent" CHECK ("id" <> "parentId");'
+```
+(If it errors with "already exists", that is success.)

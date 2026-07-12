@@ -42,6 +42,12 @@ ALTER TABLE "Account"
 ALTER TABLE "Account"
   ADD COLUMN "isHeader" BOOLEAN NOT NULL DEFAULT false,
   ADD COLUMN "parentId" TEXT;
+-- AUDIT FIX (adversarial audit 2026-07-12, blocking finding #5): this CHECK is
+-- part of 20260701_account_hierarchy's end-state but invisible to
+-- `prisma migrate diff` (it does not model CHECK constraints). Without it,
+-- `migrate resolve --applied` would record that migration as applied while
+-- its DB-level self-parent cycle guard is missing.
+ALTER TABLE "Account" ADD CONSTRAINT "Account_no_self_parent" CHECK ("id" <> "parentId");
 
 -- AlterTable: ActionIntentQueue (nullable — existing rows unaffected)
 ALTER TABLE "ActionIntentQueue" ADD COLUMN "organizationId" TEXT;
