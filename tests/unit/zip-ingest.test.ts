@@ -200,6 +200,40 @@ describe('S5 zip-ingest — checkpoint 4a: hostile zip guards', () => {
     }
   });
 
+  it('skipped (non-allowlisted) entries do not consume the declared-size cap', () => {
+    // A real WhatsApp export carries large .opus voice notes and videos that
+    // are never inflated — they must not trip TOTAL_SIZE_EXCEEDED. Same cap
+    // as the rejection test above; only the allowlisted jpg counts.
+    const buf = buildZip([
+      { name: 'voice1.opus', data: Buffer.alloc(300 * 1024) },
+      { name: 'video.mp4', data: Buffer.alloc(300 * 1024) },
+      { name: 'doc.pdf', data: Buffer.alloc(300 * 1024) },
+      { name: 'app.exe', data: Buffer.alloc(300 * 1024) },
+      { name: 'receipt.jpg', data: jpeg(100 * 1024) },
+      { name: 'chat.txt', data: 'chat log' },
+    ]);
+    const inspected = inspectZip(buf, { maxTotalUncompressedBytes: 256 * 1024 });
+    expect(inspected.images).toHaveLength(1);
+    expect(inspected.texts).toHaveLength(1);
+    expect(inspected.skipped).toHaveLength(4);
+  });
+
+  it('path traversal is still rejected on non-allowlisted entries', () => {
+    // The traversal guard must keep covering entries the size cap now skips.
+    const tampered = tamperEntryName(
+      buildZip([{ name: 'AA/evil.opus', data: Buffer.from('x') }]),
+      'AA/evil.opus',
+      '../evil.opus',
+    );
+    try {
+      inspectZip(tampered);
+      expect.unreachable('expected PATH_TRAVERSAL');
+    } catch (err) {
+      expect(err).toBeInstanceOf(ZipIngestError);
+      expect((err as ZipIngestError).code).toBe('PATH_TRAVERSAL');
+    }
+  });
+
   it('rejects entry names containing ../ (PATH_TRAVERSAL)', () => {
     const tampered = tamperEntryName(
       buildZip([{ name: 'AA/evil.jpg', data: jpeg() }]),

@@ -301,7 +301,10 @@ export function inspectZip(zipBuffer: Buffer, limits: Partial<ZipIngestLimits> =
     );
   }
 
-  // Pass 1 — header-level guards, before inflating anything.
+  // Pass 1 — header-level guards, before inflating anything. The traversal
+  // check covers EVERY entry; the declared-size cap counts only entries the
+  // allowlist will actually inflate — a WhatsApp export full of skipped
+  // .opus/.mp4 attachments must not exhaust a budget it never spends.
   let declaredTotal = 0;
   for (const entry of entries) {
     if (isPathTraversal(entry.entryName)) {
@@ -309,6 +312,13 @@ export function inspectZip(zipBuffer: Buffer, limits: Partial<ZipIngestLimits> =
         'PATH_TRAVERSAL',
         `Entry "${entry.entryName}" uses a path-traversal or absolute name.`,
       );
+    }
+    if (entry.isDirectory) {
+      continue;
+    }
+    const ext = extensionOf(entry.entryName);
+    if (!IMAGE_EXTENSIONS.has(ext) && !TEXT_EXTENSIONS.has(ext)) {
+      continue;
     }
     declaredTotal += entry.header.size;
     if (declaredTotal > cfg.maxTotalUncompressedBytes) {
