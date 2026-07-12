@@ -229,7 +229,9 @@ describe('AutomationService.processReceipt — expense + journal entry in ONE tr
     expect(postEntry).toHaveBeenCalledOnce();
     expect(postEntry.mock.calls[0][1]).toBe(innerTx);
     expect(result.journalEntryId).toBe('entry-1');
-    expect(result.status).toBe('SUCCESS');
+    // D3 conf-gate: automated extraction is always human-in-the-loop — no
+    // SUCCESS status exists; even confidence 0.95 lands as DRAFT/HIL_REQUIRED.
+    expect(result.status).toBe('HIL_REQUIRED');
   });
 });
 
