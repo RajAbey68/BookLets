@@ -441,16 +441,23 @@ export async function ingestZip(
   // have a journal entry BEFORE any OCR spend. postEntry re-checks the same
   // key (and the DB unique constraint backstops it), so a race still cannot
   // double-create.
-  const keyed = validImages.map((image) => ({
-    image,
-    idempotencyKey: computeEntryIdempotencyKey(ctx.organizationId, image.sha256),
-  }));
+  // Collapse duplicate content within THIS archive first (the same receipt
+  // forwarded twice shares a sha256 → same key; without this, the second
+  // copy would survive the DB filter, burn OCR, then collide on the unique
+  // constraint at postEntry).
+  const keyedByKey = new Map<string, { image: (typeof validImages)[number]; idempotencyKey: string }>();
+  for (const image of validImages) {
+    const idempotencyKey = computeEntryIdempotencyKey(ctx.organizationId, image.sha256);
+    if (!keyedByKey.has(idempotencyKey)) keyedByKey.set(idempotencyKey, { image, idempotencyKey });
+  }
+  const keyed = [...keyedByKey.values()];
   const existingKeys = await deps.findExistingIdempotencyKeys(
     ctx.organizationId,
     keyed.map((k) => k.idempotencyKey),
   );
   const fresh = keyed.filter((k) => !existingKeys.has(k.idempotencyKey));
-  const deduped = keyed.length - fresh.length;
+  // Deduped counts BOTH intra-archive duplicates and already-ingested keys.
+  const deduped = validImages.length - fresh.length;
 
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 

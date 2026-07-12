@@ -50,12 +50,20 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
           select: { id: true },
         })) ??
         (await prisma.account.findFirst({
-          where: { organizationId, name: { contains: 'Cash' } },
+          where: { organizationId, name: { contains: 'Cash', mode: 'insensitive' } },
           select: { id: true },
         }));
+      if (!bank) {
+        // Falling back to the suspense account would produce a degenerate
+        // draft that debits and credits the SAME account (nets to zero) —
+        // a silent misbooking. Fail loudly, symmetric with the guard above.
+        throw new Error(
+          'Zip ingest setup error: no bank/cash account (code 1000 or name containing "Cash") is seeded for this organization.',
+        );
+      }
       return {
         expenseAccountId: suspense.id,
-        cashAccountId: bank?.id ?? suspense.id,
+        cashAccountId: bank.id,
       };
     },
 

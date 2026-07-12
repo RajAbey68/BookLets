@@ -32,6 +32,32 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   ZIP_BOMB: 422,
 };
 
+class UploadTooLargeError extends Error {}
+
+/**
+ * Wraps the request so its body stream aborts the moment cumulative bytes
+ * exceed the cap — BEFORE formData()/arrayBuffer() finish buffering. This
+ * closes the gap where a chunked or spoofed Content-Length upload pays the
+ * full memory cost before the post-buffer size check runs.
+ */
+function withByteCap(request: Request, cap: number): Request {
+  if (!request.body) return request;
+  let total = 0;
+  const guarded = request.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > cap) {
+          controller.error(new UploadTooLargeError());
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Request(request, { body: guarded, duplex: 'half' } as RequestInit);
+}
+
 export async function POST(request: Request) {
   const resolved = await resolveActiveContext();
   if (!resolved.ok) {
@@ -39,29 +65,42 @@ export async function POST(request: Request) {
   }
   const { organizationId, userId } = resolved.context;
 
-  // Cheap first-line size gate on the declared length, before buffering.
-  const declaredLength = Number(request.headers.get('content-length'));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_ZIP_UPLOAD_BYTES) {
-    return NextResponse.json(
+  const tooLarge = () =>
+    NextResponse.json(
       { error: `Upload exceeds the ${MAX_ZIP_UPLOAD_BYTES / (1024 * 1024)} MB zip limit.` },
       { status: 413 },
     );
+
+  // Cheap first-line size gate on the declared length, before buffering.
+  const declaredLength = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_ZIP_UPLOAD_BYTES) {
+    return tooLarge();
   }
 
   let zipBuffer: Buffer;
   const contentType = request.headers.get('content-type') ?? '';
-  if (contentType.includes('multipart/form-data')) {
-    const form = await request.formData();
-    const file = form.get('file');
-    if (!(file instanceof File)) {
-      return NextResponse.json(
-        { error: 'Missing zip upload: send the archive as the "file" form field.' },
-        { status: 400 },
-      );
+  const capped = withByteCap(request, MAX_ZIP_UPLOAD_BYTES);
+  try {
+    if (contentType.includes('multipart/form-data')) {
+      const form = await capped.formData();
+      const file = form.get('file');
+      if (!(file instanceof File)) {
+        return NextResponse.json(
+          { error: 'Missing zip upload: send the archive as the "file" form field.' },
+          { status: 400 },
+        );
+      }
+      zipBuffer = Buffer.from(await file.arrayBuffer());
+    } else {
+      zipBuffer = Buffer.from(await capped.arrayBuffer());
     }
-    zipBuffer = Buffer.from(await file.arrayBuffer());
-  } else {
-    zipBuffer = Buffer.from(await request.arrayBuffer());
+  } catch (err) {
+    // TransformStream errors surface as the cause or the error itself
+    // depending on the runtime's body-consumption path.
+    if (err instanceof UploadTooLargeError || (err instanceof Error && err.cause instanceof UploadTooLargeError)) {
+      return tooLarge();
+    }
+    throw err;
   }
 
   if (zipBuffer.length === 0) {
