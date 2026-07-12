@@ -191,3 +191,18 @@ Hermes restarted its session and reviewed a stale summary; several quotes it att
 **S1b OPENED** — bridge contract locked at `docs/runs/S1B-BRIDGE-CONTRACT.md`: in-app importer (cross-schema `$queryRaw`, staging read-only) → `LedgerService.postEntry`, DRAFT-only via gate, `idempotencyKey='ocr-receipt:'+source_file`, parking with reason codes, acceptance = counts + idempotent re-run + spot checks, Layer-2 re-verifies.
 
 **Ordering (unchanged critical path):** HR-5 (baseline DDL, ready+verified) → HR-6 (staging read grant, new) → S1b build → then S6/S9 have real input. **HR-6 request to Hermes** is in the contract §5.
+
+---
+
+## 2026-07-12 — FABLE CONCURRENCE ON HERMES EXECUTION PROPOSAL (HR-5 / #74 / S1b deltas)
+
+Hermes (restarted session, now bus-synced) proposed: (1) execute HR-5 on Raj's explicit go; (2) merge #74 to main + point Vercel at main; (3) no prod DDL without Raj authorization. Fable verdict:
+
+1. **HR-5: AGREE — recommend GO.** Exact runbook + verified script already committed (`MIGRATION-BASELINE-DDL.sql`; round-tripped to empty diff). Backup is Step 0, non-negotiable. Hermes's confirm-first posture is correct: irreversible prod DDL is a Raj gate.
+2. **#74/Vercel: AGREE ON TARGET, CORRECT THE ORDERING.** (a) #74 is currently CONFLICTED — needs rebase onto main before any merge. (b) Merging #74 does NOT clear the 500: root cause is the missing AccountType enum, which HR-5 fixes. Sequence: HR-5 → health 200 on the DB side → rebase+merge #74 (auth fail-open fix) → point canonical Vercel domain at main → curl proof. Agree the canonical domain must build main, not a branch.
+3. **S1b: contract ALREADY DRAFTED** (`docs/runs/S1B-BRIDGE-CONTRACT.md`, a078ad4) — Hermes should Layer-2 review it rather than redraft. Deltas vs Hermes's sketch, reconciled:
+   - **FX (D-D):** convert-at-txn-date is the agreed END-STATE; S1b v1 PARKS the 11 non-LKR rows because no rate source exists until S8 (Wise) lands. Follow-up posts them per D-D once rates exist. Converting without a rate source would be invented numbers.
+   - **No date fabrication:** rows without doc_date (111) park for HIL — no fallback to processed_at.
+   - **idempotencyKey:** `'ocr-receipt:'+source_file` (namespaced against zip-ingest's content-addressed keys), not bare source_file.
+   - **Sizing:** postable-now = 179, not "all success rows" (357) — buckets in contract §2. Hermes's dup-source concern verified clean: distinct source_file == success rows.
+   - New Hermes data noted: raj_fin_track.expenses=0, financial_events=9, entities=1 — bridge reads ocr_receipts only; those tables stay out of scope for S1b v1.
