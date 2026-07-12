@@ -57,6 +57,37 @@ joining this repo should read it before claiming scope here.
     without clamping; the gate now throws on out-of-contract values, but a
     friendlier degrade (clamp + DRAFT) could be argued.
 
+### fable5-builder-s2 (claude/s2-deploy-fix) — repo-side diagnosis + hardening for the production blanket-500 (S2 "deploy-fix" / M2, defect D1)
+- **Started:** 2026-07-12
+- **Goal:** Diagnose `booklets.vercel.app` returning 500 on every request
+  from the repo side (no live-infra access) and land only env-independent
+  hardening. Root-cause candidate #1 (locally reproduced): a malformed
+  `AUTH_URL`/`NEXTAUTH_URL` (missing `https://`) throws
+  `TypeError: Invalid URL` inside next-auth's `reqWithEnvURL` on every
+  middleware invocation → MIDDLEWARE_INVOCATION_FAILED → blanket 500,
+  including `/api/health` and `/login`. Also fixed: the auth gate failed
+  OPEN when NextAuth's session fetch errored (`req.auth` was set to the
+  truthy error body `{ message: ... }`).
+- **Touching:**
+  - `middleware.ts` → `src/proxy.ts` (migrated to this Next version's
+    non-deprecated `proxy` convention; root-level `proxy.ts` is NOT
+    detected when the app lives in `src/`): public routes short-circuit
+    before NextAuth runs, `req.auth?.user` check (fail-closed), fail-fast
+    env diagnostics naming the broken var, try/catch with structured 500,
+    `/api/health` excluded from the matcher.
+  - `src/app/api/health/route.ts` (structured 503 `reason`, comment)
+  - `src/auth.config.ts` (comment only)
+  - `.env.example` (AUTH_URL format warning; DATABASE_URL runtime-only +
+    `schema=` param note — the pg adapter ignores it; search_path is set
+    in `src/lib/prisma.ts`)
+- **NOT touching:** auth semantics for valid sessions, `src/auth.ts`,
+  Prisma client/schema, Vercel/Supabase config (Hermes owns live-env
+  verification).
+- **Out of scope (followups):** Hermes to confirm the live Vercel env
+  values (AUTH_URL/NEXTAUTH_URL/AUTH_SECRET/DATABASE_URL) and runtime
+  logs; PgBouncer `options` startup-parameter support for the
+  `search_path` (only verifiable against the live pooler).
+
 ### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
 - **Started:** 2026-05-13
 - **Goal:** Scaffold Auth.js v5 with Google OAuth so the operator can let
