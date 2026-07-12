@@ -5,6 +5,10 @@ import DraftReviewQueue from '@/components/DraftReviewQueue';
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
+// Bounded review page: a checker works through the newest 100 drafts at a
+// time; deciding them surfaces the older remainder on the next load.
+const REVIEW_QUEUE_CAP = 100;
+
 /**
  * S6 — /review: the DRAFT journal-entry review queue as a dedicated page.
  *
@@ -16,7 +20,7 @@ export const dynamic = 'force-dynamic';
  * batch failures are isolated per row.
  */
 export default async function ReviewPage() {
-  const { items } = await fetchDraftReviewQueue();
+  const { items } = await fetchDraftReviewQueue({ limit: REVIEW_QUEUE_CAP });
 
   return (
     <>

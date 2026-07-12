@@ -387,12 +387,6 @@ export interface DraftReviewItem {
 }
 
 /**
- * Bounded review page: a checker works through the newest 100 drafts at a
- * time; deciding them surfaces the older remainder on the next load.
- */
-const REVIEW_QUEUE_CAP = 100;
-
-/**
  * S6 — DRAFT count for the sidebar "Review" badge. Degrades to 0 instead of
  * throwing: a badge must never take down the app shell it renders in.
  */
@@ -429,7 +423,11 @@ function sameUtcDay(a: Date, b: Date): boolean {
  *    never written; uploads are OCR'd in-memory and discarded), so the UI
  *    shows a typed placeholder instead of pretending storage exists.
  */
-export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[] }> {
+export async function fetchDraftReviewQueue(
+  // /review passes its page cap; /approvals omits the option and keeps the
+  // full set — a shared cap would silently hide older drafts there.
+  options: { limit?: number } = {},
+): Promise<{ items: DraftReviewItem[] }> {
   const resolved = await resolveActiveContext();
   if (!resolved.ok) return { items: [] };
 
@@ -441,9 +439,9 @@ export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[
       where: { organizationId, status: 'DRAFT' },
       include: { lines: { include: { account: true } } },
       // Newest first, createdAt as the same-day tiebreaker so the order is
-      // stable; capped so the page stays bounded however large the backlog.
+      // stable for every caller.
       orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
-      take: REVIEW_QUEUE_CAP,
+      ...(options.limit !== undefined ? { take: options.limit } : {}),
     });
   } catch (error) {
     console.error('[approval.actions] fetchDraftReviewQueue: draft load failed:', error);

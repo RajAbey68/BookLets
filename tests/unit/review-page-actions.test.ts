@@ -127,11 +127,11 @@ describe('fetchDraftReviewCount', () => {
 // ─── fetchDraftReviewQueue bounds & ordering ─────────────────────────────────
 
 describe('fetchDraftReviewQueue (review page bounds)', () => {
-  it('is capped and deterministically newest first (date desc, then createdAt desc)', async () => {
+  it('applies the caller-provided cap and deterministic newest-first ordering', async () => {
     const { prisma } = setup();
     const { fetchDraftReviewQueue } = await importActions();
 
-    await fetchDraftReviewQueue();
+    await fetchDraftReviewQueue({ limit: 100 });
 
     expect(prisma.journalEntry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -140,6 +140,17 @@ describe('fetchDraftReviewQueue (review page bounds)', () => {
         take: 100,
       }),
     );
+  });
+
+  it('applies NO cap when called without options — /approvals keeps the full draft set', async () => {
+    const { prisma } = setup();
+    const { fetchDraftReviewQueue } = await importActions();
+
+    await fetchDraftReviewQueue();
+
+    const args = (prisma.journalEntry.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(args).not.toHaveProperty('take');
+    expect(args.orderBy).toEqual([{ date: 'desc' }, { createdAt: 'desc' }]);
   });
 });
 
