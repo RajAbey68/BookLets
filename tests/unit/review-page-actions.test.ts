@@ -136,7 +136,7 @@ describe('fetchDraftReviewQueue (review page bounds)', () => {
     expect(prisma.journalEntry.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { organizationId: 'org-1', status: 'DRAFT' },
-        orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+        orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
         take: 100,
       }),
     );
@@ -150,7 +150,7 @@ describe('fetchDraftReviewQueue (review page bounds)', () => {
 
     const args = (prisma.journalEntry.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(args).not.toHaveProperty('take');
-    expect(args.orderBy).toEqual([{ date: 'desc' }, { createdAt: 'desc' }]);
+    expect(args.orderBy).toEqual([{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }]);
   });
 });
 

@@ -439,8 +439,8 @@ export async function fetchDraftReviewQueue(
       where: { organizationId, status: 'DRAFT' },
       include: { lines: { include: { account: true } } },
       // Newest first, createdAt as the same-day tiebreaker so the order is
-      // stable for every caller.
-      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      // stable for every caller; id breaks exact ties deterministically.
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
       ...(options.limit !== undefined ? { take: options.limit } : {}),
     });
   } catch (error) {
