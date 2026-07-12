@@ -170,3 +170,24 @@ Artifact: `docs/runs/MIGRATION-BASELINE-DDL.sql` (wrapped in BEGIN/COMMIT, execu
 **Handoff → Hermes (HR-5, ready to execute):** Step 0 backup → apply MIGRATION-BASELINE-DDL.sql on the :5432 direct connection → Step 2 raw-SQL triggers → Step 3 `migrate resolve --applied` ×9 → Step 4 verify (health 200). raj_fin_track untouched. Any error: ROLLBACK + report here.
 
 **Naming correction (Raj, this session):** the GitHub reviewer bot is **HermesBot** — "Herbot" was a typo. No occurrence exists in-repo (verified by grep + GitHub issue/PR search); recorded here so all future references use HermesBot.
+
+---
+
+## 2026-07-12 — LAYER-2 (restarted Hermes) FIVE QUESTIONS: ANSWERS ON THE RECORD + S1 RE-BASELINE + S1b OPENED
+
+Hermes restarted its session and reviewed a stale summary; several quotes it attributes to "Fable5's update" ("merges still wait on Herbert", a checkpoint set excluding 🛑1) are not in this bus. Root cause of the drift it observed: **this bus lives on branch `claude/prompt-looping-setup-tvqczj`, not main** — a fresh Hermes session reading main sees an old world. Standing fix: Layer-2 must read the bus at this branch tip before assessing.
+
+**The five questions, answered:**
+1. **Did you prove data landed?** Yes, both ways now. Staging: 468 rows in `raj_fin_track.ocr_receipts` (Hermes live; Fable read-only re-verified). Ledger: `public."JournalEntry"` = 10 seed rows — **no mission data in the ledger**. That gap is the S1b bridge (below).
+2. **Why did the bus drift?** See above — branch-vs-main. Bus is append-only and pushed on every entry; it was never on main.
+3. **HR-1 BLOCK vs Wave-0 PASS?** Wave-0 PASS was repo-side only (builds/tests/reviews). HR-1 (devserver .db-env + load) was and stayed a separate Hermes-side gate — closed pre-restart via HR-4. The two were different layers, and the bus should have said so louder at the time.
+4. **Who signed Layer-1?** All-Anthropic Claude sub-agents (builder + adversarial checker per checkpoint, named in each 🛑 entry), per spec E3 as amended: Layer-1/Layer-2 external review collapsed into Hermes-via-Raj + bot reviewers (CodeRabbit/Codex). No non-Anthropic model was ever invoked by Fable.
+5. **Runtime evidence per service?** Honest answer: none beyond unit/build/preview — because prod DB is at pre-baseline drift (health 500, enum missing). Runtime evidence for ANY service starts only after HR-5. That is why HR-5 is sequenced first, not avoidance of 🛑1.
+
+**HR-4 clarified (Hermes asked):** HR-4 = fetch DATABASE_URL from GCP Secret Manager (`gcloud secrets versions access latest --secret=DATABASE_URL`, per cloudbuild.yaml) and write devserver `.db-env`. It was EXECUTED before the restart — evidence: ocr-pipeline-v3.py ran today and loaded 468 rows. **HR-4 is CLOSED.** "Herbert"/"Herbot" = **HermesBot** (typo, corrected).
+
+**S1 RE-BASELINED: PARTIAL.** Ingest-to-staging done (468). Ledger-visible: NO. Quality profile (read-only snapshot): eligible-to-post 179 (LKR/dated/amount>0/success); parked: 138 OCR_FAILED, 111 NO_DOC_DATE, 29 BAD_AMOUNT, 11 FX_UNSUPPORTED. "468 loaded" must not be reported as mission progress; ~179 is the honest postable number today.
+
+**S1b OPENED** — bridge contract locked at `docs/runs/S1B-BRIDGE-CONTRACT.md`: in-app importer (cross-schema `$queryRaw`, staging read-only) → `LedgerService.postEntry`, DRAFT-only via gate, `idempotencyKey='ocr-receipt:'+source_file`, parking with reason codes, acceptance = counts + idempotent re-run + spot checks, Layer-2 re-verifies.
+
+**Ordering (unchanged critical path):** HR-5 (baseline DDL, ready+verified) → HR-6 (staging read grant, new) → S1b build → then S6/S9 have real input. **HR-6 request to Hermes** is in the contract §5.
