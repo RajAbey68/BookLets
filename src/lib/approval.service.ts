@@ -7,6 +7,8 @@
  * without changing this file (and its tests).
  */
 
+import { JournalStatus } from './types';
+
 /** Thrown when the approver is the maker — or is not a usable identity at all. */
 export class SelfApprovalError extends Error {
   constructor(message: string) {
@@ -68,6 +70,40 @@ export function resolveIntentDecision(
     );
   }
   return decision === 'APPROVE' ? 'APPROVED' : 'REJECTED';
+}
+
+/**
+ * FABLE5 S4 "conf-gate" (defect D3) — status rule for machine-extracted
+ * journal entries (OCR receipts, agent-proposed postings).
+ *
+ * CONTRACT: an automated extraction ALWAYS lands as DRAFT. No confidence
+ * score — not 0.95, not 0.99999, not even exactly 1.0 — authorises
+ * auto-posting; this function deliberately has no POSTED branch, and the
+ * literal return type makes that guarantee at compile time. The ONLY path
+ * from DRAFT to POSTED is an explicit human checker decision:
+ * resolveDraftJournalDecision + assertNotSelfApproval (4-eyes sign-off,
+ * wired through decideDraftJournalEntry in approval.actions).
+ *
+ * The confidence score is still validated here so a broken extractor
+ * (NaN, negative, > 1) fails loudly BEFORE any ledger rows are created,
+ * and call-sites keep passing it through as `agentConfidence` for the
+ * audit trail — it just grants no posting authority.
+ */
+export interface AutomatedEntryGateResult {
+  /** Status every machine-extracted entry must be created with. Always DRAFT. */
+  status: JournalStatus.DRAFT;
+  /** Human-in-the-loop review is unconditional for automated extraction. */
+  requiresHumanReview: true;
+}
+
+export function gateAutomatedJournalEntry(confidence: number): AutomatedEntryGateResult {
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+    throw new RangeError(
+      `Extraction confidence must be a number within [0, 1]; got ${confidence}. ` +
+        'Refusing to create a ledger entry from an out-of-contract extraction.',
+    );
+  }
+  return { status: JournalStatus.DRAFT, requiresHumanReview: true };
 }
 
 /**

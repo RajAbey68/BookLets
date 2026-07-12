@@ -25,6 +25,38 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### fable5-builder-s4 (claude/s4-conf-gate) — OCR confidence gate (defect D3): automated entries always DRAFT
+- **Started:** 2026-07-12
+- **Goal:** Close defect D3 (FABLE5 spec, service S4 "conf-gate" / M9):
+  `AutomationService.processReceipt` auto-POSTed journal entries when OCR
+  confidence exceeded 0.9. New named domain rule
+  `gateAutomatedJournalEntry` (in `approval.service.ts`, the 4-eyes
+  authority) makes every machine-extracted entry land as DRAFT — no
+  confidence, including exactly 1.0, grants posting authority. The only
+  DRAFT→POSTED path remains the human checker sign-off
+  (`decideDraftJournalEntry`). Strict TDD: RED tests proved the 0.9
+  auto-post, then GREEN.
+- **Touching:**
+  - `src/lib/approval.service.ts` (add `gateAutomatedJournalEntry` + result type)
+  - `src/lib/automation.service.ts` (use the gate; result status always `HIL_REQUIRED`)
+  - `src/components/ReceiptUploader.tsx` (copy: HIL message no longer claims a threshold)
+  - `tests/unit/receipt-confidence-gate.test.ts` (new)
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:**
+  - `src/lib/ledger.service.ts` (`postEntry` still defaults to POSTED when
+    `status` is omitted — see out of scope)
+  - `src/lib/prisma.ts` SymbiOS integrity extension (gate composes with it,
+    does not bypass it)
+  - approval actions / 4-eyes flow (unchanged; it stays the sole promotion path)
+- **Out of scope (followups):**
+  - `LedgerService.postEntry` defaulting `status` to POSTED means a future
+    call-site that forgets `status` silently auto-posts; consider requiring
+    an explicit status (or defaulting to DRAFT) for maker identities that
+    are agents.
+  - The SymbiOS fallback path trusts the remote `extraction.confidence`
+    without clamping; the gate now throws on out-of-contract values, but a
+    friendlier degrade (clamp + DRAFT) could be argued.
+
 ### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
 - **Started:** 2026-05-13
 - **Goal:** Scaffold Auth.js v5 with Google OAuth so the operator can let
