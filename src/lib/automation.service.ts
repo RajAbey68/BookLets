@@ -1,6 +1,6 @@
 import { prisma } from './prisma';
 import { LedgerService } from './ledger.service';
-import { JournalStatus } from './types';
+import { gateAutomatedJournalEntry } from './approval.service';
 import { fetchWithTimeout } from './http';
 import { extractReceipt } from './gemini-ocr';
 
@@ -127,6 +127,13 @@ export class AutomationService {
       (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
     const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
 
+    // D3 conf-gate: machine-extracted entries ALWAYS land as DRAFT — no
+    // confidence score (including exactly 1.0) authorises auto-posting.
+    // DRAFT→POSTED happens only via human 4-eyes sign-off in
+    // decideDraftJournalEntry. Also fails loudly on an out-of-contract
+    // confidence (NaN / outside [0, 1]) before any rows are created.
+    const gate = gateAutomatedJournalEntry(confidence);
+
     // 4. Record the Expense and Journal Entry
     return await prisma.$transaction(async (tx) => {
       // Create Expense Record
@@ -142,12 +149,14 @@ export class AutomationService {
         }
       });
 
-      // Create Ledger Entry — status driven by extraction confidence score
+      // Create Ledger Entry — ALWAYS DRAFT for automated extraction (D3).
+      // The confidence score is recorded for the audit trail but never
+      // decides the status; see gateAutomatedJournalEntry.
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
         memo: `AUTOMATED: Receipt for ${vendorName}`,
-        status: confidence > 0.9 ? JournalStatus.POSTED : JournalStatus.DRAFT,
+        status: gate.status,
         // 4-Eyes governance metadata passed through for audit trail
         makerIdentity: 'booklets-automation-service',
         tenantId: organizationId,
@@ -162,7 +171,9 @@ export class AutomationService {
         expenseId: expense.id,
         journalEntryId: entry.id,
         confidence,
-        status: confidence > 0.9 ? 'SUCCESS' : 'HIL_REQUIRED'
+        // Human-in-the-loop is unconditional for automated entries (D3):
+        // the DRAFT sits in the 4-eyes queue until a checker decides it.
+        status: 'HIL_REQUIRED'
       };
     });
   }
