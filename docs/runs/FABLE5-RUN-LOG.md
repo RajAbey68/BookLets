@@ -60,6 +60,9 @@
 2026-07-12 17:55 | fable | WAVE 1 DISPATCH (repo-side, no live DB needed): [B-S3] rls-lock — full table→org-isolation map, RLS policy migration (pooler-compatible pattern), schema-mismatch resolution, S3-HERMES-APPLY.md with apply+verify+rollback → branch claude/s3-rls-lock. [B-S5] zip-ingest — POST /api/ingest/zip, TDD, zip-bomb/path-traversal guards (🛑4a), OCR fan-out cap 5 + text/image split (🛑4b), DRAFT-only, idempotent re-upload → branch claude/s5-zip-ingest. 2 concurrent (≤3 cap). Real DB apply (3a) and real 517-file zip run (🛑4) remain devserver/Hermes items.
 2026-07-12 17:56 | fable | Hermes SUSPEND proposal received via Raj (premise: URL unobtainable). Premise corrected above — URL is one gcloud command away. Wave-1 builders already in flight per Raj's carry-on; suspend decision returned to Raj with a cheaper option: quiet-hold after builders land (kill heartbeat, zero polling) vs full suspend. Wave-0 PRs #72-74 remain DRAFT pending that decision + Layer-1 verdicts.
 
+2026-07-12 17:52 | raj | DIRECTIVE: "proceed" (loop continuation reconfirmed after suspend discussion).
+2026-07-12 17:52 | fable | Wave-0 PRs #72/#73/#74 flipped DRAFT → READY-FOR-REVIEW: full required-check CI now runs + CodeRabbit independent review triggers (extra non-Anthropic reviewer at zero token cost). MERGES still gated on Layer-1 (Qwen/Grok) verdicts or Raj waiver + CI green; rebase-merge serial per D-B when cleared. S3/S5 builders still in flight.
+
 ## CHECKPOINT REPORTS (§7)
 
 ### CHECKPOINT PRE-W0 — doc-drift reconciliation (E5)
