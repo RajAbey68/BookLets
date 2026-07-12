@@ -284,3 +284,33 @@ Loop iteration results:
 **FINAL REPO-SIDE STATE — nothing left for Fable to build in this wave.** Merge queue ready for HermesBot checks + approvals (post HR-5): #74 → #81 → #76 → #80 → #75 → #77 → #79. Known 1-line cross-PR rebase between #81/#76 (service-identity constant), P1.4 gate enforces it.
 
 **Blocking on humans, in order:** (1) Hermes: HR-5 execute + report (authorized ~20:25 UTC; health still 500 at last probe); (2) Raj/Hermes: merges; (3) Hermes: HR-6 grant + OCR_BRIDGE_ORG_ID env in Vercel; (4) Raj: Grok/GLM verdicts on review packet 2 (optional pre-HR-5 check, packet in docs/runs/reviews/); (5) Raj: CF3 + Wise sample files (unblocks S7/S8); (6) rotate the exposed sbp_ token (standing item). Loop continues monitoring health + PR events.
+
+---
+
+## 2026-07-12 — HR-5 UNBLOCKED: OPTION B-HARDENED — FABLE VERDICT: GO (no new secret needed)
+
+Hermes reported HR-5 stuck: direct host auth fails, pg_dump missing, "won't fire 12 DDL statements through the non-atomic pooler." Fable analysis — TWO of the three blockers rest on incorrect premises, the third is closed by Fable directly:
+
+1. **Pooler atomicity fear is unfounded for THIS script.** MIGRATION-BASELINE-DDL.sql is a SINGLE BEGIN…COMMIT transaction. PgBouncer transaction-mode pins one server backend for the whole transaction — all statements execute atomically on one connection; ON_ERROR_STOP aborts inside the txn → automatic full rollback. Transaction pooling breaks session state ACROSS transactions (prepared statements, GUCs) — none used here.
+2. **Direct-host auth failure ≈ username format, not a second password.** Pooler auth = user `postgres.<ref>`; direct host db.<ref>.supabase.co wants plain `postgres` with the SAME password. Also untried: the SESSION-mode pooler — same host + same creds, port 5432 instead of 6543 — behaves like a direct connection (pg_dump works through it). No new secret from Raj required for any path.
+3. **Backup gap CLOSED by Fable (read-only, within authorization):** `docs/runs/backups/2026-07-12-pre-hr5-data.json` — full data snapshot of every public table (57 rows / 20 tables, 23:33:03 UTC) + `2026-07-12-pre-hr5-schema.sql` (pg_catalog-introspected DDL of the same state). Together these are a complete restore capability for the pre-HR-5 state. raj_fin_track excluded by design (HR-5 never touches it).
+
+**HERMES EXECUTION — B-hardened, using the EXISTING .db-env URL, run now:**
+```
+cd /root/BookLets && git fetch origin claude/prompt-looping-setup-tvqczj && git checkout claude/prompt-looping-setup-tvqczj
+# 0. Confirm backup artifacts exist at docs/runs/backups/ (committed by Fable) — that is Step 0 done.
+# 1. Apply (single atomic transaction; works through the pooler):
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/runs/MIGRATION-BASELINE-DDL.sql
+# 2. Triggers (idempotent CREATE OR REPLACE per plan Step 2):
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql
+# 3. Baseline history (through the pooler URL is fine for resolve):
+for m in 20260513_decimal_money_fields 20260701_account_hierarchy 20260701_journal_idempotency_key \
+  20260701_journal_optimistic_lock 20260703_account_type_enum_org_parent 20260703_action_intent_org_scope \
+  20260703_composite_query_indexes 20260703_fiscal_lock_and_posted_delete_triggers 20260703_journal_source_fields; do
+  npx prisma migrate resolve --applied "$m"; done
+# 4. Verify + report verbatim:
+curl -i https://booklets.vercel.app/api/health
+```
+Failure handling unchanged: any error in step 1 = automatic rollback (report output, stop). Trigger file errors: report, stop. If health ≠ 200 after a clean apply: DB defect fixed, remaining candidate is Vercel env (AUTH_URL scheme — PR #74 diagnosis); report, don't improvise.
+
+Note: step 2's migration file lives on main (merged). Steps run from the orchestration branch checkout which contains both the DDL and (after fetch) the migrations dir — verify `ls prisma/migrations/` shows all 9 before step 3; if the orchestration branch lacks them, run steps 2–3 from a main checkout instead.
