@@ -55,6 +55,19 @@ export function assertNotSelfApproval(
 }
 
 /**
+ * True when two identities are the same human under the normalisation
+ * assertNotSelfApproval uses. UI-facing (flagging "your own draft" rows);
+ * assertNotSelfApproval stays the enforcement authority.
+ */
+export function isSameIdentity(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const left = normalizeIdentity(a);
+  return left !== '' && left === normalizeIdentity(b);
+}
+
+/**
  * ActionIntentQueue state machine: decisions are valid only from PENDING.
  * APPROVED / REJECTED / EXECUTED items are terminal for this workflow.
  */
