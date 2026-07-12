@@ -1,6 +1,7 @@
 import { prisma } from './prisma';
 import { LedgerService } from './ledger.service';
 import { gateAutomatedJournalEntry } from './approval.service';
+import { AUTOMATION_MAKER_IDENTITY } from './maker-identity';
 import { fetchWithTimeout } from './http';
 import { extractReceipt } from './gemini-ocr';
 
@@ -64,7 +65,7 @@ export class AutomationService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-maker-identity': 'booklets-automation-service',
+          'x-maker-identity': AUTOMATION_MAKER_IDENTITY,
           'x-tenant-id': organizationId,
           'x-agent-confidence': '1.0',
         },
@@ -171,8 +172,12 @@ export class AutomationService {
         date: new Date(date),
         memo: `AUTOMATED: Receipt for ${vendorName}`,
         status: gate.status,
-        // 4-Eyes governance metadata passed through for audit trail
-        makerIdentity: 'booklets-automation-service',
+        // 4-Eyes governance metadata passed through for audit trail.
+        // E5: the OCR pipeline is an AUTOMATED maker — the service
+        // identity is correct here (the uploading user did not author the
+        // extracted figures). Human-initiated paths pass the session
+        // user id instead; see src/lib/maker-identity.ts.
+        makerIdentity: AUTOMATION_MAKER_IDENTITY,
         tenantId: organizationId,
         agentConfidence: confidence,
         lines: [

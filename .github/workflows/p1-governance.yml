@@ -36,9 +36,21 @@ jobs:
           grep -q 'balance.isZero()' src/lib/ledger.service.ts || (echo "FAIL: Balance check missing" && exit 1)
           echo "PASS: Trial balance validation enforced"
 
-      # P1.4 (Segregation of Duties: makerIdentity !== checkerIdentity) is
-      # tracked as an out-of-scope followup in AGENTS_LOG.md and stays
-      # disabled until a separate PR wires session-based identity.
+      # P1.4 re-enabled (E5): session-based identity is now wired — human
+      # server actions pass the session user id as makerIdentity and the
+      # approval actions enforce maker !== checker via assertNotSelfApproval.
+      - name: "✅ P1.4: Segregation of Duties (maker ≠ checker)"
+        run: |
+          grep -q 'export function assertNotSelfApproval' src/lib/approval.service.ts || (echo "FAIL: SoD rule (assertNotSelfApproval) missing" && exit 1)
+          grep -q 'assertNotSelfApproval(' src/app/actions/approval.actions.ts || (echo "FAIL: approval actions do not enforce SoD" && exit 1)
+          grep -q 'checkerIdentity: userId' src/app/actions/approval.actions.ts || (echo "FAIL: checker identity must come from the session user" && exit 1)
+          grep -q 'makerIdentity: userId' src/app/actions/ledger.actions.ts || (echo "FAIL: manual journal entries must carry the session user as maker" && exit 1)
+          grep -q 'AUTOMATION_MAKER_IDENTITY' src/lib/automation.service.ts || (echo "FAIL: automation must use the shared service-identity constant" && exit 1)
+          if grep -rn --include='*.ts' --include='*.tsx' "booklets-automation-service" src/ | grep -v 'src/lib/maker-identity.ts'; then
+            echo "FAIL: hardcoded service identity outside src/lib/maker-identity.ts"
+            exit 1
+          fi
+          echo "PASS: Segregation of duties enforced (maker != checker, session-derived identities)"
 
       - name: "✅ P1.5: Immutable audit trail (EvidenceLog hash chain)"
         run: |
