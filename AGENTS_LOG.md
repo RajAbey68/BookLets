@@ -81,15 +81,16 @@ joining this repo should read it before claiming scope here.
 - **NOT touching:** all source code, schema, CI workflows.
 
 ### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
-- See PR #2 description. Rebased on `main`. Build is no longer blocked
-  on this PR (PR #8 carved out the `ReceiptUploader → server action`
-  commit with attribution); PR #2 still owns the design-system CSS
-  primitives and page-wiring commits. Held in draft for human visual
-  signoff per PR #2's own test plan.
+- **LANDED (2026-07-12 reconciliation):** the design-system CSS primitives
+  this entry tracked are on `main` via `1e1b1b9` ("feat(ui): add
+  design-system primitives, strip Tailwind from shell"). Do not treat this
+  work as pending. Entry retained for history only.
 
 ### Lead coordinator (claude/float-to-decimal, PR #5) — Float → Decimal money columns
-- See PR #5 description. Draft. Rebased on `main` after PR #3 + PR #8
-  landed. No further conflicts expected.
+- **LANDED (2026-07-12 reconciliation):** Float→Decimal on all monetary
+  fields is on `main` via `bdd8cff` (schema shows `Decimal(19,4)`
+  throughout). Do not treat this work as pending. Entry retained for
+  history only.
 
 ### fable5-builder-doc-drift (claude/fable5-doc-drift) — doc-drift reconciliation
 - **Started:** 2026-07-12

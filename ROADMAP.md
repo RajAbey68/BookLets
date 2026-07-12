@@ -14,19 +14,19 @@
 |---|----|----------|-------|------|
 | 1 | **RAJ-277** | 🔴 | Vercel Pro + Custom Domain Setup | 0.5d |
 | 2 | **RAJ-278** | 🔴 | Supabase Pro Upgrade + RLS Audit | 1d |
-| 3 | **RAJ-279** | 🟡 | CI Pipeline Hardening — ✅ Done (`30700c8`) | 1d |
+| 3 | **RAJ-279** | 🟡 | CI Pipeline Hardening — ✅ Done (`30700c8`; note: coverage gate is the RAJ-539 ratchet, NOT ≥80% — see Gate below) | 1d |
 | 4 | **RAJ-280** | 🔴 | Environment Variable Audit | 0.5d |
 | 5 | **RAJ-281** | 🔴 | Database Indexes — ✅ Done (`de6121e`, #52) | 0.5d |
 | 6 | **RAJ-282** | 🔴 | Fiscal Period DB Trigger — ✅ Done (`03ff97d`, #54) | 1d |
 
-**Gate:**
+**Gate** (statuses corrected 2026-07-12 to match issue states above):
 ```
-✅ Vercel Pro + custom domain resolving
-✅ Supabase on Pro, connection verified
-✅ CI passes with coverage ≥ 80%
-✅ No hardcoded values in code (SYMBIOS_URL, HOSTAWAY_* all env vars)
-✅ 6 partial indexes applied to Postgres
-✅ DB trigger enforces closed-period blocking
+⬜ Vercel Pro + custom domain resolving          (RAJ-277 open — prod currently 500)
+⬜ Supabase on Pro, connection verified          (RAJ-278 open)
+🟡 CI coverage: ratchet policy enforced, NOT ≥80% (thresholds 6/6/69/39 per RAJ-539; 80% is the target, not the gate)
+⬜ No hardcoded values audit                     (RAJ-280 open)
+✅ 6 partial indexes applied to Postgres         (RAJ-281, `de6121e`)
+✅ DB trigger enforces closed-period blocking    (RAJ-282, `03ff97d`)
 ```
 
 ---
@@ -68,7 +68,7 @@
 |---|----|----------|-------|------------|------|
 | 20 | **RAJ-296** | 🔴 | Integration Tests for Journal Posting — ✅ Done (`62807c5`, #57) | 10 | 1d |
 
-**Exit Criteria:**
+**Exit Criteria** (⚠️ 2026-07-12: these are TARGETS, not verified facts — in particular "RLS verified" is NOT true yet: RLS has no policies, pending RAJ-278/S3):
 ```
 ✅ Can create a manual journal entry → appears in GL
 ✅ Manual booking appears in P&L (no more phantom revenue)
@@ -107,7 +107,9 @@ Week 1           Week 2           Week 3
 Read AKOS/BookLets/FRD_BOOKLETS.md and AKOS/BookLets/IARD_BOOKLETS.md.
 Read the full BookLets codebase.
 
-Phase 0 is done (env vars, indexes, triggers, CI).
+Phase 0 is PARTIALLY done (indexes, triggers, CI ratchet landed;
+RAJ-277 domain, RAJ-278 Supabase Pro/RLS, RAJ-280 env audit still OPEN —
+treat as external prerequisites, do not assume them).
 Start executing Phase 1 in order:
   RAJ-283 → RAJ-284 → RAJ-285 → RAJ-286 → RAJ-287 → RAJ-288 → RAJ-289 → RAJ-290 → RAJ-291 → RAJ-292 → RAJ-293 → RAJ-294 → RAJ-295 → RAJ-296
 
