@@ -112,3 +112,5 @@ VERDICT REQUESTED: PASS to rebase-merge PR #74 (repo side); 🛑2 milestone stay
 
 ---
 2026-07-12 18:06 | fable | CodeQL (required check) flagged js/log-injection on PR #75 route rejection log — fixed @ 68cdd51 (control chars stripped from interpolated values), route tests 7/7. Codex quota exhausted (external) — #75/#76 have CodeRabbit + CodeQL as reviewers.
+2026-07-12 18:08 | fable | MERGE ATTEMPT #72 → BLOCKED by branch protection: "At least 1 approving review is required by reviewers with write access." This is the Layer-3 human gate — Fable cannot and must not self-approve (P-3). #72 and #73 are fully green (all 10 checks incl. CodeQL, CodeRabbit success). ACTION FOR RAJ: approve PRs #72/#73/#74/#75/#76 in GitHub; Fable then merges serially (#72→#76) and rebases later branches over AGENTS_LOG conflicts as each lands.
+2026-07-12 18:08 | fable | CodeQL re-flagged #75 log line (custom sanitizer not recognised as taint barrier) — replaced with encodeURIComponent (recognised sanitizer) @ d75de4d. Route tests 7/7.
