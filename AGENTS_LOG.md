@@ -112,6 +112,44 @@ joining this repo should read it before claiming scope here.
     add upstream context, claim scope)
 - **NOT touching:** all source code, schema, CI workflows.
 
+### fable5-builder-s6 (claude/s6-review-ui) — DRAFT review queue with batch 4-eyes decisions
+- **Started:** 2026-07-12
+- **Agent:** fable5-builder-s6
+- **Goal:** S6 review-ui — a review queue where a checker sees each DRAFT
+  journal entry with its evidence side-by-side (extracted vendor/category
+  via memo parsing, amount, date, agentConfidence, source/sourceId,
+  heuristically matched Expense record, per-entry EvidenceLog trail) and
+  can approve/reject many at once. Batch decisions fan out SEQUENTIALLY
+  over the existing `decideDraftJournalEntry` path, so every 4-eyes
+  control holds per entry: session-resolved checker identity (already
+  real — `resolveActiveContext()`), `assertNotSelfApproval` (own drafts
+  fail with a per-entry error, never silently approved), DRAFT-only
+  state machine, guarded update + EvidenceLog in one transaction.
+- **Touching:**
+  - `src/app/actions/approval.actions.ts` (add `batchDecideDraftJournalEntries`, `fetchDraftReviewQueue`)
+  - `src/lib/approval.service.ts` (add exported `isSameIdentity` helper)
+  - `src/lib/draft-evidence.ts` (new — pure memo/source evidence parsing)
+  - `src/components/DraftReviewQueue.tsx` (new — client queue with batch selection)
+  - `src/app/(app)/approvals/page.tsx` (drafts table → `DraftReviewQueue`)
+  - `tests/unit/batch-approval-actions.test.ts`, `tests/unit/draft-evidence.test.ts` (new)
+- **NOT touching:**
+  - `decideDraftJournalEntry` / `decideActionIntent` internals — batch is a caller, not a rewrite
+  - `src/lib/ledger.service.ts`, `src/lib/evidence-log.service.ts`, schema
+  - S5 zip-ingest files (`src/lib/zip-ingest*`, `src/app/api/ingest/zip/`)
+- **Out of scope (followups):**
+  - **Receipt image persistence.** Verified reality: receipt images are
+    NOT stored anywhere. `Expense.receiptCloudId` exists in the schema
+    but nothing writes it; `AutomationService.processReceipt` OCRs the
+    base64 in-memory and discards it; S5 zip-ingest keeps only a sha256
+    (`sourceId`). The review UI renders a clearly-typed placeholder slot
+    that will light up once a stored reference exists. Follow-up: persist
+    uploads to object storage, write `receiptCloudId`, add a viewer.
+  - **Structured JournalEntry ↔ Expense link.** No FK exists; the queue
+    matches heuristically (vendor + amount + same UTC day) and labels the
+    match as heuristic. Follow-up: set `source='receipt-automation'`,
+    `sourceId=<expense.id>` in `AutomationService` at creation time.
+  - Pagination for large DRAFT queues (batch is capped at 50 per request).
+
 ### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
 - **LANDED (2026-07-12 reconciliation):** the design-system CSS primitives
   this entry tracked are on `main` via `1e1b1b9` ("feat(ui): add

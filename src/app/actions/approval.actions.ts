@@ -7,12 +7,14 @@ import { EvidenceLogService } from '@/lib/evidence-log.service';
 import { LedgerService } from '@/lib/ledger.service';
 import {
   assertNotSelfApproval,
+  isSameIdentity,
   resolveIntentDecision,
   resolveDraftJournalDecision,
   SelfApprovalError,
   InvalidApprovalStateError,
   type ApprovalDecision,
 } from '@/lib/approval.service';
+import { parseDraftEvidence, type ParsedDraftEvidence } from '@/lib/draft-evidence';
 
 export type DecisionResult = { success: true } | { success: false; error: string };
 
@@ -276,4 +278,263 @@ export async function decideDraftJournalEntry(
   revalidatePath('/approvals');
   revalidatePath('/ledger');
   return { success: true };
+}
+
+// ─── S6 review-ui — batch decisions ─────────────────────────────────────────
+
+export interface BatchEntryResult {
+  entryId: string;
+  success: boolean;
+  error?: string;
+}
+
+export type BatchDecisionResult =
+  | { ok: true; succeeded: number; failed: number; results: BatchEntryResult[] }
+  | { ok: false; error: string };
+
+/** Bounded work per request — a checker reviews pages, not the whole ledger. */
+const MAX_BATCH_SIZE = 50;
+
+/**
+ * S6 — decide several DRAFT journal entries in one submission.
+ *
+ * Deliberately a thin, SEQUENTIAL fan-out over decideDraftJournalEntry so
+ * every 4-eyes control holds per entry with zero new enforcement code:
+ * session-resolved checker identity, assertNotSelfApproval, DRAFT-only state
+ * machine, org scoping, guarded update + EvidenceLog in one transaction.
+ * An entry the caller made themself fails with a PER-ENTRY error and the
+ * rest of the batch proceeds — exclusion, never silent approval.
+ *
+ * Sequential (not Promise.all) on purpose: EvidenceLog is a hash chain whose
+ * record() reads the tenant's latest row; concurrent decisions would race
+ * the chain head.
+ */
+export async function batchDecideDraftJournalEntries(
+  entryIds: string[],
+  decision: ApprovalDecision,
+): Promise<BatchDecisionResult> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
+  const unique = [...new Set(entryIds)].filter((id) => typeof id === 'string' && id.length > 0);
+  if (unique.length === 0) {
+    return { ok: false, error: 'Select at least one draft entry to decide.' };
+  }
+  if (unique.length > MAX_BATCH_SIZE) {
+    return { ok: false, error: `Batch too large: decide at most ${MAX_BATCH_SIZE} entries at a time.` };
+  }
+
+  const results: BatchEntryResult[] = [];
+  for (const entryId of unique) {
+    const result = await decideDraftJournalEntry(entryId, decision);
+    results.push(
+      result.success ? { entryId, success: true } : { entryId, success: false, error: result.error },
+    );
+  }
+
+  const succeeded = results.filter((r) => r.success).length;
+  return { ok: true, succeeded, failed: results.length - succeeded, results };
+}
+
+// ─── S6 review-ui — DRAFT review queue with side-by-side evidence ───────────
+
+export interface DraftReviewLine {
+  accountName: string;
+  accountCode: string | null;
+  amount: string;
+  isDebit: boolean;
+}
+
+/** Best-effort matched expense record (no FK exists — see fetchDraftReviewQueue). */
+export interface DraftReviewExpense {
+  id: string;
+  vendorName: string;
+  categoryName: string;
+  propertyName: string;
+  amount: string;
+  date: string;
+  description: string | null;
+  confidenceScore: number | null;
+  /** Schema field for a stored receipt reference — currently never written. */
+  receiptCloudId: string | null;
+}
+
+export interface DraftReviewEvidence {
+  id: string;
+  eventType: string;
+  description: string;
+  makerIdentity: string;
+  createdAt: string;
+}
+
+export interface DraftReviewItem {
+  id: string;
+  date: string;
+  memo: string | null;
+  makerIdentity: string | null;
+  source: string | null;
+  sourceId: string | null;
+  agentConfidence: number | null;
+  /** Headline amount = total debit side of the balanced entry. */
+  amount: string;
+  lines: DraftReviewLine[];
+  parsed: ParsedDraftEvidence;
+  expense: DraftReviewExpense | null;
+  evidence: DraftReviewEvidence[];
+  /** True when the session user made this entry — they cannot decide it (4-eyes). */
+  isOwnDraft: boolean;
+}
+
+/** Same calendar day in UTC — extraction dates carry no meaningful time. */
+function sameUtcDay(a: Date, b: Date): boolean {
+  return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
+}
+
+/**
+ * S6 — DRAFT entries with everything a checker can inspect side-by-side.
+ *
+ * Evidence reality (investigated, not invented):
+ *  - extracted fields live in the memo (vendor/category/filename) plus
+ *    agentConfidence and source/sourceId — parsed by parseDraftEvidence;
+ *  - EvidenceLog rows reference the entry via payload.entryId (JSON path);
+ *  - there is NO foreign key between JournalEntry and Expense, so the
+ *    expense record is matched heuristically (vendor + amount + same UTC
+ *    day, org-scoped via property) and labelled as such in the UI;
+ *  - receipt images are NOT persisted anywhere (Expense.receiptCloudId is
+ *    never written; uploads are OCR'd in-memory and discarded), so the UI
+ *    shows a typed placeholder instead of pretending storage exists.
+ */
+export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[] }> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return { items: [] };
+
+  const { organizationId, userId } = resolved.context;
+
+  let drafts;
+  try {
+    drafts = await prisma.journalEntry.findMany({
+      where: { organizationId, status: 'DRAFT' },
+      include: { lines: { include: { account: true } } },
+      orderBy: { date: 'desc' },
+    });
+  } catch (error) {
+    console.error('[approval.actions] fetchDraftReviewQueue: draft load failed:', error);
+    return { items: [] };
+  }
+  if (drafts.length === 0) return { items: [] };
+
+  const draftIds = drafts.map((d) => d.id);
+
+  // EvidenceLog rows for these entries (creation + any prior decisions).
+  // payload.entryId is how LedgerService and the decision actions reference
+  // the entry — a JSON path filter per id, OR'd into one query.
+  let evidenceRows: Awaited<ReturnType<typeof prisma.evidenceLog.findMany>> = [];
+  try {
+    evidenceRows = await prisma.evidenceLog.findMany({
+      where: {
+        tenantId: organizationId,
+        OR: draftIds.map((id) => ({ payload: { path: ['entryId'], equals: id } })),
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  } catch (error) {
+    // Evidence is enrichment, not a gate — the queue still renders without it.
+    console.error('[approval.actions] fetchDraftReviewQueue: evidence load failed:', error);
+  }
+  const evidenceByEntry = new Map<string, DraftReviewEvidence[]>();
+  for (const row of evidenceRows) {
+    const payload = row.payload as { entryId?: unknown } | null;
+    const entryId = typeof payload?.entryId === 'string' ? payload.entryId : null;
+    if (!entryId) continue;
+    const list = evidenceByEntry.get(entryId) ?? [];
+    list.push({
+      id: row.id,
+      eventType: row.eventType,
+      description: row.description,
+      makerIdentity: row.makerIdentity,
+      createdAt: row.createdAt.toISOString(),
+    });
+    evidenceByEntry.set(entryId, list);
+  }
+
+  // Candidate expense records, org-scoped THROUGH the property relation
+  // (Expense has no organizationId column of its own).
+  let expenses: Array<{
+    id: string;
+    amount: { toString(): string };
+    date: Date;
+    description: string | null;
+    confidenceScore: number | null;
+    receiptCloudId: string | null;
+    vendor: { name: string };
+    expenseCategory: { name: string };
+    property: { name: string };
+  }> = [];
+  try {
+    expenses = await prisma.expense.findMany({
+      where: {
+        property: { organizationId },
+        date: { in: drafts.map((d) => d.date) },
+      },
+      include: { vendor: true, expenseCategory: true, property: true },
+    });
+  } catch (error) {
+    console.error('[approval.actions] fetchDraftReviewQueue: expense load failed:', error);
+  }
+
+  const items: DraftReviewItem[] = drafts.map((entry) => {
+    const parsed = parseDraftEvidence(entry.memo, entry.source);
+    const debitTotal = entry.lines
+      .filter((l) => l.isDebit)
+      .reduce((sum, l) => sum + Number(l.amount), 0);
+
+    // Heuristic JournalEntry ↔ Expense match: same vendor (case-insensitive),
+    // same headline amount, same UTC day. No FK exists to do better yet.
+    const matched =
+      parsed.vendor === null
+        ? undefined
+        : expenses.find(
+            (candidate) =>
+              candidate.vendor.name.trim().toLowerCase() === parsed.vendor!.trim().toLowerCase() &&
+              Number(candidate.amount) === debitTotal &&
+              sameUtcDay(candidate.date, entry.date),
+          );
+
+    const makerIdentity = entry.makerIdentity ?? entry.createdBy;
+
+    return {
+      id: entry.id,
+      date: entry.date.toISOString(),
+      memo: entry.memo,
+      makerIdentity,
+      source: entry.source,
+      sourceId: entry.sourceId,
+      agentConfidence: entry.agentConfidence,
+      amount: debitTotal.toFixed(2),
+      lines: entry.lines.map((l) => ({
+        accountName: l.account.name,
+        accountCode: l.account.code,
+        amount: l.amount.toString(),
+        isDebit: l.isDebit,
+      })),
+      parsed,
+      expense: matched
+        ? {
+            id: matched.id,
+            vendorName: matched.vendor.name,
+            categoryName: matched.expenseCategory.name,
+            propertyName: matched.property.name,
+            amount: matched.amount.toString(),
+            date: matched.date.toISOString(),
+            description: matched.description,
+            confidenceScore: matched.confidenceScore,
+            receiptCloudId: matched.receiptCloudId,
+          }
+        : null,
+      evidence: evidenceByEntry.get(entry.id) ?? [],
+      isOwnDraft: isSameIdentity(makerIdentity, userId),
+    };
+  });
+
+  return { items };
 }
