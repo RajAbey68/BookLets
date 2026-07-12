@@ -34,14 +34,17 @@ Executed by Hermes against the prod DB, over a DIRECT connection (:5432, not the
 
 **Step 0 — Backup.** `pg_dump` the `public` schema (schema+data) to a timestamped file. Do not proceed without it.
 
-**Step 1 — Generate corrective schema DDL (does NOT run it yet):**
-```
-npx prisma migrate diff \
-  --from-url "$PROD_DIRECT_URL" \
-  --to-schema-datamodel prisma/schema.prisma \
-  --script > /tmp/drift-fix.sql
-```
-Human-review `/tmp/drift-fix.sql` before applying. Expect: CREATE TYPE "AccountType"; ALTER TABLE "Account" ADD parentId + convert type→enum; ALTER TABLE "JournalEntry" ADD idempotencyKey, source, sourceId, version (+ unique index on idempotencyKey); ALTER TABLE "ActionIntentQueue" ADD organizationId; composite indexes. It must NOT drop/rename existing data columns — if it proposes a destructive change, STOP.
+**Step 1 — Corrective schema DDL: ALREADY GENERATED AND REVIEWED.**
+Use [`MIGRATION-BASELINE-DDL.sql`](./MIGRATION-BASELINE-DDL.sql) (this directory) — do not regenerate.
+It was produced on 2026-07-12 by replaying the read-only-introspected live prod DDL into a
+local shadow Postgres 16 and diffing with `prisma migrate diff --from-config-datasource
+--to-schema prisma/schema.prisma --script` (Prisma 7 removed `--from-url`; the config-datasource
+form reads `DATABASE_URL` from env via prisma.config.ts). The one destructive statement Prisma
+emitted (DROP/re-ADD of `Account.type`) was rewritten as a lossless in-place enum cast —
+live values verified as a subset of the enum labels. Applying the corrected script to the
+shadow and re-diffing yields "No difference detected", so it provably reaches schema.prisma's
+exact end-state. If prod drifts again before execution, regenerate via the same shadow method
+and re-review; anything destructive → STOP.
 
 **Step 2 — Apply the raw-SQL that diff can't see**, from the repo migration files, made idempotent (IF NOT EXISTS / CREATE OR REPLACE):
   - `prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql` (the fiscal-lock + posted-delete triggers).
