@@ -161,4 +161,25 @@ describe('POST /api/ingest/ocr-bridge — body validation', () => {
     expect(res.status).toBe(200);
     expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, 7);
   });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -5],
+    ['non-integer', 1.5],
+    ['above the maximum', 201],
+    ['a string', '50'],
+  ])('rejects batchSize %s with 400 and never runs the import', async (_label, value) => {
+    const { runOcrBridgeImport } = setup();
+    const res = await post(JSON.stringify({ batchSize: value }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe('batchSize must be an integer between 1 and 200.');
+    expect(runOcrBridgeImport).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 200])('accepts the exact boundary batchSize %i', async (value) => {
+    const { runOcrBridgeImport } = setup();
+    const res = await post(JSON.stringify({ batchSize: value }));
+    expect(res.status).toBe(200);
+    expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, value);
+  });
 });
