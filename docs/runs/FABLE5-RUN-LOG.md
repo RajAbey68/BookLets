@@ -152,3 +152,21 @@ An independent reviewer with no run context audited claims vs reality (incl. liv
 
 2026-07-12 19:20 | raj | AUTHORIZED read-only Supabase diagnostics.
 2026-07-12 19:20 | fable | MIGRATION BASELINE PLAN produced (docs/runs/MIGRATION-BASELINE-PLAN.md) from VERIFIED live-DB reads. Findings worse than "4 cols": prod public is at pre-20260701 baseline — missing Account.parentId, JournalEntry.idempotencyKey/version/source/sourceId, AccountType enum (=the 500 cause), ActionIntentQueue.organizationId, fiscal-lock/posted-delete triggers, and all RLS policies. NO _prisma_migrations table → prod is db-push-managed, so `migrate deploy` is WRONG (would conflict). Recommended: Strategy B (migrate diff → human-review DDL → apply + raw-SQL triggers/RLS from migration files → `migrate resolve --applied` all 9 to baseline → verify). ⚠️ Non-BookLets `trg_prevent_auction_delete` present — DB is not clean single-app; backup mandatory before any DDL. This is HR-5 for Hermes. raj_fin_track untouched (separate bridge decision).
+
+---
+
+## 2026-07-12 — HR-5 APPENDIX: EXACT CORRECTIVE DDL GENERATED + VERIFIED (Fable, non-mutating)
+
+Raj authorized option (b). Executed fully read-only against prod:
+
+1. **Introspected live `public` schema** via authorized read-only connector (pg_catalog: columns, constraints, indexes — 20 tables, no enums, no Prisma-managed triggers).
+2. **Replayed that exact state into a local shadow Postgres 16** inside the Fable container (prod untouched).
+3. **`prisma migrate diff` shadow → `prisma/schema.prisma`** (Prisma 7: `--from-config-datasource --to-schema`, `--from-url` was removed — plan Step 1 command corrected accordingly).
+4. **Destructive-statement review:** diff contained exactly ONE destructive statement — `ALTER TABLE "Account" DROP COLUMN "type", ADD COLUMN "type" "AccountType" NOT NULL` (data loss + would fail on non-empty table). Rewritten as lossless in-place cast `ALTER COLUMN "type" TYPE "AccountType" USING ("type"::"AccountType")`. Live values verified read-only: {ASSET, EXPENSE, LIABILITY, REVENUE, SUSPENSE} × 6 rows ⊆ enum labels → cast is safe and fails loudly on surprises.
+5. **Round-trip verification:** corrected script applied to shadow → re-diff = **"No difference detected"**. The script provably produces schema.prisma's exact end-state.
+
+Artifact: `docs/runs/MIGRATION-BASELINE-DDL.sql` (wrapped in BEGIN/COMMIT, execution rules in header). Plan Step 1 updated to point at it.
+
+**Handoff → Hermes (HR-5, ready to execute):** Step 0 backup → apply MIGRATION-BASELINE-DDL.sql on the :5432 direct connection → Step 2 raw-SQL triggers → Step 3 `migrate resolve --applied` ×9 → Step 4 verify (health 200). raj_fin_track untouched. Any error: ROLLBACK + report here.
+
+**Naming correction (Raj, this session):** the GitHub reviewer bot is **HermesBot** — "Herbot" was a typo. No occurrence exists in-repo (verified by grep + GitHub issue/PR search); recorded here so all future references use HermesBot.
