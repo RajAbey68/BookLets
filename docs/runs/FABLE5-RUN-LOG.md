@@ -212,3 +212,24 @@ Hermes (restarted session, now bus-synced) proposed: (1) execute HR-5 on Raj's e
 ## 2026-07-12 — EXTERNAL REVIEW PACKET №2 ISSUED (Grok 4.5 + GLM 5.2, Raj-mediated)
 
 Raj requested third-party adversarial review before HR-5 executes. Fable cannot invoke non-Anthropic models (E3); packet method as before. `docs/runs/reviews/EXTERNAL-REVIEW-PACKET-2-hr5-s1b.md` is self-contained: verified context, the verbatim HR-5 DDL, the S1b contract summary, the sequencing claim, nine specific attack vectors (E1–E9: enum-cast concurrency, NULL-uniqueness semantics, baseline/reality divergence, date-fabrication ethics, stale-idempotency on OCR correction runs, index locking, ordering), and a required verdict format. Raj pastes to both models; verdicts paste back to the bus as Layer-1 external review. HR-5 execution remains gated on Raj's explicit GO — the packet review can run in parallel with his decision or inform it, his call.
+
+---
+
+## 2026-07-12 — 🟢 HR-5 AUTHORIZED BY RAJ — HERMES EXECUTING
+
+Raj: "HR-5 authorized." Hermes executing with backup-first discipline per the artifact's rules.
+
+**Artifact identity (verify before running):**
+- File: `docs/runs/MIGRATION-BASELINE-DDL.sql` @ branch `claude/prompt-looping-setup-tvqczj`, introduced in commit `e6e46b0`
+- sha256: `0d8e9fbbcb020f76862925bfb5d7d8da9354cc6a222d4c595284dd4388b71d73`
+- 73 lines; single BEGIN/COMMIT; contents: 1 CREATE TYPE, 3 ALTER TABLE blocks (Account cast+2 cols, ActionIntentQueue 1 col, JournalEntry 4 cols), 10 indexes, 1 composite FK.
+
+**Execution reminders (from the plan, restated):**
+1. Step 0 backup (`pg_dump` of `public`, schema+data, timestamped) — do not proceed without it.
+2. Apply via psql on the DIRECT :5432 connection: `psql "$DIRECT_URL" -v ON_ERROR_STOP=1 -f docs/runs/MIGRATION-BASELINE-DDL.sql` — script is already transaction-wrapped; ON_ERROR_STOP aborts inside the txn → auto-ROLLBACK.
+3. Step 2 BEFORE resolve: apply the raw-SQL triggers migration (`prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql`), idempotent form.
+4. Step 3: `npx prisma migrate resolve --applied <m>` ×9 (list in MIGRATION-BASELINE-PLAN.md §3) — NOT `migrate deploy`.
+5. Step 4 verify: §1 signature query all-YES; `curl -i https://booklets.vercel.app/api/health`. Baseline check 20:0x UTC by Fable: health = 500 FUNCTION_INVOCATION_FAILED (pre-apply). If health is still non-200 after apply, the DB defect is cleared but a Vercel env defect remains (see PR #74 diagnosis: AUTH_URL scheme) — report, don't improvise.
+6. STOP conditions: any SQL error (ROLLBACK + bus report), any statement targeting raj_fin_track (none exist in the script), backup failure.
+
+Fable status: 3 builder agents in flight (rebase #74, rebase #75, S1b build) — no repo files Hermes needs are being mutated; the DDL artifact is frozen at the sha above.
