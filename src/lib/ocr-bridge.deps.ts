@@ -18,6 +18,15 @@
  *   HR-6  The app role needs read access to the staging schema:
  *         GRANT USAGE ON SCHEMA raj_fin_track TO <app_role>;
  *         GRANT SELECT ON raj_fin_track.ocr_receipts TO <app_role>;
+ *
+ * TENANCY MODEL for an org-less staging source: `raj_fin_track.ocr_receipts`
+ * has NO organization column (single-tenant staging owned by the OCR
+ * pipeline, and we cannot alter it), so row→org attribution cannot come from
+ * the data. Instead the pool is bound to exactly ONE organization by
+ * configuration: the route requires env `OCR_BRIDGE_ORG_ID` and refuses to
+ * run (503) when it is unset, and rejects (403) any caller whose
+ * organizationId differs from it. This fails closed — the staging pool can
+ * only ever be imported into the one configured org.
  */
 
 import { Prisma } from '@prisma/client';
@@ -144,16 +153,29 @@ export function createOcrBridgeDeps(organizationId: string): OcrBridgeDeps {
       if (!resolved) {
         resolved = (async () => {
           const suspenseId = await suspenseAccountId();
-          let expenseCategory = await prisma.expenseCategory.findFirst({
-            where: { name: { contains: category } },
+          // ExpenseCategory has no organization column, so tenancy is scoped
+          // THROUGH the mapped account: a name match is only usable when its
+          // accountId belongs to an Account of THIS organization. Unmapped
+          // (accountId null) and foreign-org mappings are ignored — an
+          // accountId from another org must never end up on our lines.
+          const candidates = await prisma.expenseCategory.findMany({
+            where: { name: { contains: category }, accountId: { not: null } },
+            select: { accountId: true },
           });
-          if (!expenseCategory) {
-            expenseCategory = await prisma.expenseCategory.create({
-              // Default to Suspense when no GL mapping exists yet.
-              data: { name: category, accountId: suspenseId },
+          const candidateIds = [...new Set(candidates.map((c) => c.accountId as string))];
+          if (candidateIds.length > 0) {
+            const orgAccount = await prisma.account.findFirst({
+              where: { id: { in: candidateIds }, organizationId },
+              select: { id: true },
             });
+            if (orgAccount) return orgAccount.id;
           }
-          return expenseCategory.accountId || suspenseId;
+          // No org-valid mapping — create the category bound to this org's
+          // Suspense account, so it is org-safe by construction.
+          const created = await prisma.expenseCategory.create({
+            data: { name: category, accountId: suspenseId },
+          });
+          return created.accountId ?? suspenseId;
         })();
         categoryAccountIds.set(category, resolved);
       }
@@ -174,18 +196,14 @@ export function createOcrBridgeDeps(organizationId: string): OcrBridgeDeps {
     },
 
     async postEntry(input: JournalEntryInput): Promise<{ entryId: string; created: boolean }> {
-      // Pre-check so a replayed key is reported as skipped_existing rather
-      // than silently absorbed by postEntry's idempotent fast path. postEntry
-      // itself runs each entry in its OWN transaction, giving the bridge
+      // postEntryWithOutcome reports the REAL outcome: `created` is false
+      // both when the key was already visible up front and when this call
+      // lost a concurrent race (P2002 recovery) — so replayed batches and
+      // race losers are counted as skipped_existing, never as posted.
+      // postEntry runs each entry in its OWN transaction, giving the bridge
       // per-row atomicity — one bad row never aborts the batch.
-      const existing = await prisma.journalEntry.findFirst({
-        where: { organizationId, idempotencyKey: input.idempotencyKey },
-        select: { id: true },
-      });
-      if (existing) return { entryId: existing.id, created: false };
-
-      const entry = await LedgerService.postEntry(input);
-      return { entryId: entry.id, created: true };
+      const { entry, created } = await LedgerService.postEntryWithOutcome(input);
+      return { entryId: entry.id, created };
     },
 
     countRemainingEligible: () => countRemainingEligible(organizationId),

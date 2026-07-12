@@ -316,6 +316,40 @@ describe('importOcrReceipts', () => {
     expect(summary.failed).toEqual([]);
   });
 
+  it('counts a concurrent-race loser as skipped_existing, not posted (TOCTOU)', async () => {
+    // Two imports race over the SAME staging rows. The shared "database"
+    // below models postEntryWithOutcome: the first writer of a key persists
+    // it (created: true); the race loser observes the existing row and gets
+    // created: false. Both runs must reconcile without double-counting.
+    const persisted = new Set<string>();
+    function racingDeps(): OcrBridgeDeps {
+      return makeDeps({
+        postEntry: vi.fn(async (input) => {
+          const key = input.idempotencyKey as string;
+          if (persisted.has(key)) return { entryId: `je-${key}`, created: false };
+          // Yield before the "write" so the two runs genuinely interleave.
+          await Promise.resolve();
+          if (persisted.has(key)) return { entryId: `je-${key}`, created: false };
+          persisted.add(key);
+          return { entryId: `je-${key}`, created: true };
+        }),
+      });
+    }
+    const rows = [makeRow(), makeRow(), makeRow()];
+    const [a, b] = await Promise.all([
+      importOcrReceipts(rows, racingDeps(), { organizationId: ORG }),
+      importOcrReceipts(rows, racingDeps(), { organizationId: ORG }),
+    ]);
+    // Each row is created exactly once across both runs; every other attempt
+    // is a skip. Nothing fails and nothing is double-posted.
+    expect(a.posted + b.posted).toBe(rows.length);
+    expect(a.skipped_existing + b.skipped_existing).toBe(rows.length);
+    expect(a.failed).toEqual([]);
+    expect(b.failed).toEqual([]);
+    expect(a.posted + a.skipped_existing).toBe(rows.length);
+    expect(b.posted + b.skipped_existing).toBe(rows.length);
+  });
+
   it('isolates per-row failures: one bad row does not abort the batch', async () => {
     let call = 0;
     const deps = makeDeps({

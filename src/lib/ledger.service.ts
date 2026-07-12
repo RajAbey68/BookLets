@@ -134,8 +134,26 @@ export class LedgerService {
    * a duplicate POST returns the already-persisted entry instead of creating a
    * second one — both on the fast path (key already visible) and after losing a
    * concurrent race (unique-constraint P2002).
+   *
+   * Callers that need to know WHICH of those happened (new row vs idempotent
+   * replay) should use {@link postEntryWithOutcome}; this method keeps the
+   * historical entry-only return shape for existing call sites.
    */
   static async postEntry(input: JournalEntryInput) {
+    return (await this.postEntryWithOutcome(input)).entry;
+  }
+
+  /**
+   * Same semantics as {@link postEntry}, but also reports the outcome:
+   * `created` is false when the idempotency key already had a persisted entry
+   * — whether that was caught by the fast-path pre-check or by recovering
+   * from a lost concurrent race (P2002) inside the transaction. This lets
+   * callers (e.g. the S1b OCR bridge) count idempotent replays and race
+   * losers as skips instead of misreporting them as newly posted.
+   */
+  static async postEntryWithOutcome(
+    input: JournalEntryInput,
+  ): Promise<{ entry: Prisma.JournalEntryGetPayload<{ include: { lines: true } }>; created: boolean }> {
     const {
       organizationId,
       date,
@@ -161,7 +179,7 @@ export class LedgerService {
         where: { organizationId, idempotencyKey },
         include: { lines: true },
       });
-      if (existing) return existing;
+      if (existing) return { entry: existing, created: false };
     }
 
     // 1. Strict Validation for POSTED entries
@@ -182,7 +200,7 @@ export class LedgerService {
 
     // 3. Atomic Transaction — entry + evidence row succeed or fail together.
     try {
-      return await prisma.$transaction(async (tx) => {
+      const entry = await prisma.$transaction(async (tx) => {
       const entry = await tx.journalEntry.create({
         data: {
           organizationId,
@@ -236,6 +254,7 @@ export class LedgerService {
 
       return entry;
       });
+      return { entry, created: true };
     } catch (err) {
       // Lost an idempotency race: a concurrent POST with the same key won and
       // tripped the unique constraint. The winner is now persisted — return it
@@ -245,7 +264,7 @@ export class LedgerService {
           where: { organizationId, idempotencyKey },
           include: { lines: true },
         });
-        if (existing) return existing;
+        if (existing) return { entry: existing, created: false };
       }
       throw err;
     }
