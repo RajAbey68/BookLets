@@ -1,6 +1,7 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Decimal } from 'decimal.js';
+import { getActiveOrgId } from './org-context';
 
 // Prisma 7 requires either a driver adapter or accelerateUrl on the
 // PrismaClient constructor — there is no engineType: "library" escape.
@@ -32,10 +33,76 @@ function buildExtendedClient() {
   });
 
   /**
+   * S3 (rls-lock) — RLS org-context extension.
+   *
+   * The migration prisma/migrations/20260712_rls_org_isolation adds
+   * row-level-security policies keyed off the transaction-local Postgres
+   * setting `app.current_org_id`. This extension injects that setting for
+   * every model operation while a runWithOrgContext() scope is active
+   * (see src/lib/org-context.ts), using the official Prisma RLS pattern:
+   * batch the op with `set_config(..., true)` in one implicit transaction
+   * so both statements share a connection and the setting dies at COMMIT.
+   *
+   * Why transaction-local (`set_config(..., TRUE)`) and not SET SESSION:
+   * Supabase's pooler (pgBouncer/Supavisor) in transaction mode hands the
+   * physical connection to a different client after every transaction. A
+   * session-level GUC would leak one request's org onto another request's
+   * connection. A transaction-local GUC set inside the same transaction as
+   * the query is pool-safe by construction.
+   *
+   * Defensive rules (fail closed, never widen):
+   *  - No active org context → pass through untouched. Under the RLS
+   *    policies that means tenant tables return zero rows / reject writes;
+   *    it never grants access.
+   *  - Already inside a transaction (interactive or batch) → pass through;
+   *    nesting $transaction would break atomicity. Interactive-transaction
+   *    openers set the GUC themselves via setRlsOrgContext(tx) below.
+   *
+   * This extension is applied FIRST (innermost) so that the `query`
+   * callback the SymbiOS extension below receives still resolves through
+   * it, and the `query(args)` promise this hook batches into $transaction
+   * is the genuine terminal operation — the shape the official Prisma
+   * row-level-security extension example relies on.
+   */
+  const rlsScoped = base.$extends({
+    name: 'rls-org-context',
+    query: {
+      $allModels: {
+        async $allOperations(params) {
+          const { args, query } = params;
+          const orgId = getActiveOrgId();
+          if (!orgId) {
+            return query(args);
+          }
+          const inTransaction = Boolean(
+            (params as unknown as { __internalParams?: { transaction?: unknown } })
+              .__internalParams?.transaction,
+          );
+          if (inTransaction) {
+            return query(args);
+          }
+          const [, result] = await base.$transaction([
+            base.$executeRaw`SELECT set_config('app.current_org_id', ${orgId}, TRUE)`,
+            query(args) as unknown as Prisma.PrismaPromise<unknown>,
+          ]);
+          return result;
+        },
+      },
+    },
+  });
+
+  /**
    * SymbiOS Financial Integrity Extension
    * Intercepts writes to the ledger to enforce double-entry rules.
+   *
+   * Pre-check reads go through `rlsScoped` (not `base`) so they carry the
+   * caller's org context once RLS is enforced; when an org context is
+   * active they are additionally org-filtered in the WHERE clause, which
+   * matches the DB trigger semantics (enforce_fiscal_period_lock is
+   * org-scoped) and keeps the checks meaningful under FORCE ROW LEVEL
+   * SECURITY. With no org context the behaviour is unchanged from before.
    */
-  return base.$extends({
+  return rlsScoped.$extends({
     query: {
       journalEntry: {
         async create({ args, query }: { args: Prisma.JournalEntryCreateArgs, query: (args: Prisma.JournalEntryCreateArgs) => Promise<unknown> }) {
@@ -44,11 +111,13 @@ function buildExtendedClient() {
           // 1. Fiscal Period Validation (Locking)
           if (data.date) {
               const entryDate = new Date(data.date as string | Date);
-              const closedPeriod = await base.fiscalPeriod.findFirst({
+              const activeOrgId = getActiveOrgId();
+              const closedPeriod = await rlsScoped.fiscalPeriod.findFirst({
                   where: {
                       startDate: { lte: entryDate },
                       endDate: { gte: entryDate },
                       isClosed: true,
+                      ...(activeOrgId ? { organizationId: activeOrgId } : {}),
                   },
               });
 
@@ -87,11 +156,13 @@ function buildExtendedClient() {
           // 1. Fiscal Period Validation (Locking)
           if (data.date) {
               const entryDate = new Date(data.date as string | Date);
-              const closedPeriod = await base.fiscalPeriod.findFirst({
+              const activeOrgId = getActiveOrgId();
+              const closedPeriod = await rlsScoped.fiscalPeriod.findFirst({
                   where: {
                       startDate: { lte: entryDate },
                       endDate: { gte: entryDate },
                       isClosed: true,
+                      ...(activeOrgId ? { organizationId: activeOrgId } : {}),
                   },
               });
 
@@ -105,7 +176,7 @@ function buildExtendedClient() {
 
         async delete({ args, query }: { args: Prisma.JournalEntryDeleteArgs, query: (args: Prisma.JournalEntryDeleteArgs) => Promise<unknown> }) {
           // 2. Immutable Audit Log: Prevent deletion of POSTED entries
-          const entry = await base.journalEntry.findUnique({
+          const entry = await rlsScoped.journalEntry.findUnique({
             where: args.where,
             select: { status: true },
           });
@@ -148,3 +219,40 @@ export const prisma = new Proxy({} as ExtendedPrisma, {
     return Reflect.get(getClient(), prop, receiver);
   },
 });
+
+/** Minimal structural view of a Prisma transaction client — just what the
+ * RLS context helper needs, so it accepts both interactive-transaction
+ * clients and the full client. */
+export interface RlsContextCapable {
+  $executeRaw(
+    query: TemplateStringsArray | Prisma.Sql,
+    ...values: unknown[]
+  ): Prisma.PrismaPromise<number>;
+}
+
+/**
+ * S3 (rls-lock) — sets the RLS org context inside an OPEN interactive
+ * transaction. The rls-org-context extension above deliberately does not
+ * wrap operations that already run inside a transaction (nesting
+ * $transaction would break atomicity), so every prisma.$transaction(async
+ * (tx) => { ... }) that touches tenant tables must call this first:
+ *
+ *   await prisma.$transaction(async (tx) => {
+ *     await setRlsOrgContext(tx);
+ *     ...tenant-table reads/writes...
+ *   });
+ *
+ * `set_config(..., TRUE)` is transaction-local: it lives exactly as long
+ * as the surrounding transaction, so it is safe under pgBouncer/Supavisor
+ * transaction-mode pooling (the setting can never leak onto a connection
+ * another client receives after COMMIT).
+ *
+ * Fail closed: with no active runWithOrgContext scope this is a no-op —
+ * the GUC stays unset and the RLS policies match zero rows on tenant
+ * tables. It never invents or widens access.
+ */
+export async function setRlsOrgContext(tx: RlsContextCapable): Promise<void> {
+  const orgId = getActiveOrgId();
+  if (!orgId) return;
+  await tx.$executeRaw`SELECT set_config('app.current_org_id', ${orgId}, TRUE)`;
+}

@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { prisma } from '@/lib/prisma';
+import { prisma, setRlsOrgContext } from '@/lib/prisma';
 import { resolveActiveContext } from '@/lib/auth-context';
 import { EvidenceLogService } from '@/lib/evidence-log.service';
 import { LedgerService } from '@/lib/ledger.service';
@@ -135,6 +135,8 @@ export async function decideActionIntent(
 
   try {
     await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+      await setRlsOrgContext(tx);
       // Guarded on the status we validated against: if another checker decided
       // this item between our read and this write, count === 0 and we abort.
       const updated = await tx.actionIntentQueue.updateMany({
@@ -239,6 +241,8 @@ export async function decideDraftJournalEntry(
 
   try {
     await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+      await setRlsOrgContext(tx);
       const updated = await tx.journalEntry.updateMany({
         where: { id: entryId, organizationId, status: 'DRAFT' },
         data: { status: nextStatus, updatedBy: userId },

@@ -1,4 +1,4 @@
-import { prisma } from './prisma';
+import { prisma, setRlsOrgContext } from './prisma';
 import { LedgerService } from './ledger.service';
 import { gateAutomatedJournalEntry } from './approval.service';
 import { fetchWithTimeout } from './http';
@@ -150,6 +150,8 @@ export class AutomationService {
 
     // 4. Record the Expense and Journal Entry
     return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+      await setRlsOrgContext(tx);
       // Create Expense Record
       const expense = await tx.expense.create({
         data: {

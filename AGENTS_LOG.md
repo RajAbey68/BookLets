@@ -179,6 +179,31 @@ joining this repo should read it before claiming scope here.
   states in Linear itself; RAJ-277/278/280/293 (no git evidence — left
   open).
 
+### fable5-builder-s3 (claude/s3-rls-lock) — RLS org-isolation policies + org-context plumbing
+- **Started:** 2026-07-12
+- **Agent:** agent=fable5-builder-s3 (FABLE5 autonomous run, service S3 "rls-lock" / M3)
+- **Goal:** Close Message.md follow-up #5 (RLS on, no policies) — org-isolation
+  RLS policies on every tenant table keyed off transaction-local
+  `app.current_org_id` (pgBouncer/Supavisor-transaction-pooling safe), plus the
+  app-side org-context plumbing. Migration is Phase 1 (safe); the app-role
+  lockdown (FORCE ROW LEVEL SECURITY) is staged for Hermes behind an explicit
+  gate in `docs/runs/reviews/S3-HERMES-APPLY.md` (checkpoint 3a).
+- **Touching:**
+  - `prisma/migrations/20260712_rls_org_isolation/migration.sql` (new)
+  - `src/lib/org-context.ts` (new — AsyncLocalStorage org context)
+  - `src/lib/prisma.ts` (rls-org-context extension, `setRlsOrgContext(tx)` helper;
+    SymbiOS layer preserved, its pre-checks now org-aware)
+  - `src/lib/ledger.service.ts`, `src/lib/automation.service.ts`,
+    `src/app/actions/approval.actions.ts` (set RLS context in interactive txns)
+  - `src/lib/trial-balance-report.ts` (runWithOrgContext exemplar)
+  - `tests/unit/rls-org-isolation.test.ts`, `tests/unit/org-context.test.ts` (new);
+    prisma-mock updates in 4 existing test files
+  - `docs/runs/reviews/S3-HERMES-APPLY.md` (new — apply/verify/rollback runbook)
+- **NOT touching:** `src/auth.ts`, seed, remaining server actions/pages
+  (runWithOrgContext adoption there is a Phase-2 prerequisite, listed in the runbook).
+- **Out of scope (followups):** wire `runWithOrgContext` into all actions/routes/
+  server components; seed-script GUC support; Phase 2 FORCE application (Hermes).
+
 ## Recently completed
 
 - **PR #8 (merged 2026-05-10, `main` @ bbcf03b)** — Carve-out from PR #2:

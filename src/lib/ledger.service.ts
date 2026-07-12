@@ -1,7 +1,7 @@
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Prisma } from '@prisma/client';
-import { prisma } from './prisma';
+import { prisma, setRlsOrgContext } from './prisma';
 import { EvidenceLogService } from './evidence-log.service';
 import {
   JournalEntryInput,
@@ -183,6 +183,8 @@ export class LedgerService {
     // 3. Atomic Transaction — entry + evidence row succeed or fail together.
     try {
       return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+      await setRlsOrgContext(tx);
       const entry = await tx.journalEntry.create({
         data: {
           organizationId,
@@ -291,6 +293,8 @@ export class LedgerService {
 
     // 2. Create the reversal entry
     return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+      await setRlsOrgContext(tx);
       const reversal = await tx.journalEntry.create({
         data: {
           organizationId: originalEntry.organizationId,
@@ -368,6 +372,8 @@ export class LedgerService {
       // updateMany (not update) is required because the version guard is a
       // non-unique filter; update({where:{id,version}}) does not compile.
       return await prisma.$transaction(async (tx) => {
+        // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
+        await setRlsOrgContext(tx);
         const result = await tx.journalEntry.updateMany({
           where: { id, organizationId, version: expectedVersion },
           data: { ...safeData, version: { increment: 1 } },
