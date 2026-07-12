@@ -20,10 +20,10 @@
 | 6 | **RAJ-282** | 🔴 | Fiscal Period DB Trigger — ✅ Done (`03ff97d`, #54) | 1d |
 
 **Gate** (statuses corrected 2026-07-12 to match issue states above):
-```
+```text
 ⬜ Vercel Pro + custom domain resolving          (RAJ-277 open — prod currently 500)
 ⬜ Supabase on Pro, connection verified          (RAJ-278 open)
-🟡 CI coverage: ratchet policy enforced, NOT ≥80% (thresholds 6/6/69/39 per RAJ-539; 80% is the target, not the gate)
+🟡 CI coverage: ratchet policy enforced, NOT ≥80% (thresholds 6/6/69/39 — ratchet values per RAJ-539, annotated RAJ-279 in vitest.config.ts; 80% is the target, not the gate)
 ⬜ No hardcoded values audit                     (RAJ-280 open)
 ✅ 6 partial indexes applied to Postgres         (RAJ-281, `de6121e`)
 ✅ DB trigger enforces closed-period blocking    (RAJ-282, `03ff97d`)
@@ -68,18 +68,18 @@
 |---|----|----------|-------|------------|------|
 | 20 | **RAJ-296** | 🔴 | Integration Tests for Journal Posting — ✅ Done (`62807c5`, #57) | 10 | 1d |
 
-**Exit Criteria** (⚠️ 2026-07-12: these are TARGETS, not verified facts — in particular "RLS verified" is NOT true yet: RLS has no policies, pending RAJ-278/S3):
-```
+**Exit Criteria** (⚠️ 2026-07-12: these are TARGETS — items below are marked by verification status, not aspiration):
+```text
 ✅ Can create a manual journal entry → appears in GL
 ✅ Manual booking appears in P&L (no more phantom revenue)
 ✅ Trial balance = €0.00
 ✅ P&L shows revenue/expenses with correct rollup
 ✅ Balance sheet: assets = liabilities + equity
 ✅ Dashboard metrics clickable → underlying entries shown
-✅ RLS verified: org A cannot see org B's data
+⬜ RLS verification PENDING: org A cannot see org B's data (RLS has NO policies yet — RAJ-278/S3)
 ✅ 4-eyes: approver != maker enforced
 ✅ Closed fiscal period rejected at DB level
-✅ All 20 tests pass
+⬜ All 20 tests pass (pending: RAJ-277/278/280/293 still open)
 ```
 
 ---
