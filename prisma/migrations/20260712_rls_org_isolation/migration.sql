@@ -19,7 +19,8 @@
 --           SELECT set_config('app.current_org_id', '<orgId>', TRUE);
 --         batched/executed inside the same transaction as the query
 --         (src/lib/prisma.ts `rls-org-context` extension, and
---         setRlsOrgContext(tx) inside interactive transactions).
+--         setRlsOrgContext(tx, organizationId) — explicit org id — inside
+--         interactive transactions).
 --         Transaction-local is mandatory: Supabase's pooler (pgBouncer /
 --         Supavisor) in transaction mode reassigns the physical connection
 --         after every transaction, so a session-level GUC would leak one

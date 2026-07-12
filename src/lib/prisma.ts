@@ -18,6 +18,61 @@ import { getActiveOrgId } from './org-context';
 // collect configuration; eager construction here previously threw on
 // missing DATABASE_URL even for routes marked `dynamic = 'force-dynamic'`.
 
+/**
+ * S3 (rls-lock) review finding #4 — transaction detection for the
+ * rls-org-context extension, isolated so it can be unit-tested and pinned.
+ *
+ * CONSTRAINT (documented, not silently relied upon): Prisma 7 exposes no
+ * supported signal telling a query extension whether the operation is
+ * already running inside a transaction. The only signal is the PRIVATE
+ * `__internalParams.transaction` field on the extension params. Because it
+ * is private it can vanish in a minor Prisma upgrade, so detection is
+ * validated explicitly and fails SAFE:
+ *
+ *  - 'wrap'                        → `__internalParams` is present and shows
+ *    no transaction: batch the op with set_config in base.$transaction.
+ *  - 'passthrough-in-transaction'  → a transaction marker is present: never
+ *    nest $transaction (that would break the caller's atomicity); the
+ *    interactive-transaction opener is responsible for setRlsOrgContext.
+ *  - 'passthrough-undetectable'    → `__internalParams` is missing/not an
+ *    object (private API changed): we CANNOT tell. Do NOT wrap blindly —
+ *    wrapping an op that is secretly inside a transaction corrupts
+ *    atomicity, whereas passing through unwrapped merely leaves the GUC
+ *    unset for that op, which under FORCE RLS fails CLOSED (zero rows /
+ *    rejected writes) and never leaks cross-tenant data. A loud warning is
+ *    emitted (once) so the breakage is observable and fixable.
+ */
+export type RlsWrapMode =
+  | 'wrap'
+  | 'passthrough-in-transaction'
+  | 'passthrough-undetectable';
+
+export function resolveRlsWrapMode(params: unknown): RlsWrapMode {
+  const internal = (
+    params as { __internalParams?: unknown } | null | undefined
+  )?.__internalParams;
+  if (internal === undefined || internal === null || typeof internal !== 'object') {
+    // Private field gone — Prisma internals changed under us. Fail safe.
+    return 'passthrough-undetectable';
+  }
+  return (internal as { transaction?: unknown }).transaction
+    ? 'passthrough-in-transaction'
+    : 'wrap';
+}
+
+let warnedRlsDetectionUndetectable = false;
+function warnRlsDetectionUndetectableOnce(): void {
+  if (warnedRlsDetectionUndetectable) return;
+  warnedRlsDetectionUndetectable = true;
+  console.error(
+    '[rls-org-context] Prisma private __internalParams is no longer exposed to ' +
+      'query extensions — transaction detection is broken (likely a Prisma ' +
+      'upgrade). Operations are passed through WITHOUT the app.current_org_id ' +
+      'GUC: under FORCE RLS they fail closed (zero rows / rejected writes). ' +
+      'Fix resolveRlsWrapMode in src/lib/prisma.ts for the new Prisma version.',
+  );
+}
+
 function buildExtendedClient() {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
@@ -74,11 +129,11 @@ function buildExtendedClient() {
           if (!orgId) {
             return query(args);
           }
-          const inTransaction = Boolean(
-            (params as unknown as { __internalParams?: { transaction?: unknown } })
-              .__internalParams?.transaction,
-          );
-          if (inTransaction) {
+          const mode = resolveRlsWrapMode(params);
+          if (mode !== 'wrap') {
+            if (mode === 'passthrough-undetectable') {
+              warnRlsDetectionUndetectableOnce();
+            }
             return query(args);
           }
           const [, result] = await base.$transaction([
@@ -238,21 +293,34 @@ export interface RlsContextCapable {
  * (tx) => { ... }) that touches tenant tables must call this first:
  *
  *   await prisma.$transaction(async (tx) => {
- *     await setRlsOrgContext(tx);
+ *     await setRlsOrgContext(tx, organizationId);
  *     ...tenant-table reads/writes...
  *   });
+ *
+ * Pass the resolved `organizationId` EXPLICITLY (review finding: every
+ * interactive-transaction opener already has it in hand). The ambient
+ * AsyncLocalStorage scope (runWithOrgContext) is only a FALLBACK for
+ * callers that genuinely run inside a request-scoped context — most server
+ * actions do not open one, and relying on it made this call a silent no-op
+ * that fails closed under FORCE RLS.
  *
  * `set_config(..., TRUE)` is transaction-local: it lives exactly as long
  * as the surrounding transaction, so it is safe under pgBouncer/Supavisor
  * transaction-mode pooling (the setting can never leak onto a connection
  * another client receives after COMMIT).
  *
- * Fail closed: with no active runWithOrgContext scope this is a no-op —
- * the GUC stays unset and the RLS policies match zero rows on tenant
- * tables. It never invents or widens access.
+ * Fail closed: with neither an explicit organizationId nor an active
+ * runWithOrgContext scope this is a no-op — the GUC stays unset and the
+ * RLS policies match zero rows on tenant tables. It never invents or
+ * widens access.
  */
-export async function setRlsOrgContext(tx: RlsContextCapable): Promise<void> {
-  const orgId = getActiveOrgId();
+export async function setRlsOrgContext(
+  tx: RlsContextCapable,
+  organizationId?: string,
+): Promise<void> {
+  // `||` (not `??`): an EMPTY explicit id means "not resolved" — fall back to
+  // the ambient scope, and with neither present the guard below fails closed.
+  const orgId = organizationId || getActiveOrgId();
   if (!orgId) return;
   await tx.$executeRaw`SELECT set_config('app.current_org_id', ${orgId}, TRUE)`;
 }

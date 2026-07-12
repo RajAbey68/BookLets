@@ -148,10 +148,13 @@ export class AutomationService {
       (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
     const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
 
-    // 4. Record the Expense and Journal Entry
+    // 4. Record the Expense and Journal Entry — ONE transaction: the expense
+    // row and the journal entry commit or roll back together (postEntry is
+    // handed this tx below instead of opening its own).
     return await prisma.$transaction(async (tx) => {
-      // S3 (rls-lock): transaction-local RLS org context (no-op without a scope).
-      await setRlsOrgContext(tx);
+      // S3 (rls-lock): transaction-local RLS org context — explicit org id
+      // (review finding #1: never rely on an ambient scope being open).
+      await setRlsOrgContext(tx, organizationId);
       // Create Expense Record
       const expense = await tx.expense.create({
         data: {
@@ -168,6 +171,9 @@ export class AutomationService {
       // Create Ledger Entry — ALWAYS DRAFT for automated extraction (D3).
       // The confidence score is recorded for the audit trail but never
       // decides the status; see gateAutomatedJournalEntry.
+      // The open transaction client is passed through (review finding #2):
+      // postEntry writes inside THIS transaction, making expense + journal
+      // entry atomic and reusing the RLS org context set above.
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
@@ -181,7 +187,7 @@ export class AutomationService {
           { accountId: expenseAccountId, amount: totalAmount, isDebit: true },
           { accountId: bankAccountId, amount: totalAmount, isDebit: false },
         ]
-      });
+      }, tx);
 
       return {
         expenseId: expense.id,

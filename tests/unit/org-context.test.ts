@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { runWithOrgContext, getActiveOrgId } from '@/lib/org-context';
-import { setRlsOrgContext, type RlsContextCapable } from '@/lib/prisma';
+import { setRlsOrgContext, resolveRlsWrapMode, type RlsContextCapable } from '@/lib/prisma';
 
 describe('runWithOrgContext / getActiveOrgId', () => {
   it('returns undefined outside any scope (fail closed)', () => {
@@ -108,5 +108,70 @@ describe('setRlsOrgContext (interactive-transaction injection)', () => {
     expect(sql).toMatch(/set_config\('app\.current_org_id',\s*\$\s*,\s*TRUE\)/i);
     // The org id travels as a bind parameter, never interpolated into SQL.
     expect(calls[0].values).toEqual(['org_a']);
+  });
+
+  // S3 review finding #1 — the ambient AsyncLocalStorage scope is usually NOT
+  // open in server actions, so callers must pass the resolved org id
+  // explicitly. These tests pin the explicit-id contract.
+  it('sets the GUC from an EXPLICIT organizationId with no ambient scope open', async () => {
+    const { tx, calls } = fakeTx();
+    expect(getActiveOrgId()).toBeUndefined(); // no scope — the old code path was a no-op here
+    await setRlsOrgContext(tx, 'org_explicit');
+    expect(calls).toHaveLength(1);
+    const sql = calls[0].strings.join('$');
+    expect(sql).toMatch(/set_config\('app\.current_org_id',\s*\$\s*,\s*TRUE\)/i);
+    expect(calls[0].values).toEqual(['org_explicit']);
+  });
+
+  it('an explicit organizationId wins over the ambient scope (explicit > fallback)', async () => {
+    const { tx, calls } = fakeTx();
+    await runWithOrgContext('org_ambient', () => setRlsOrgContext(tx, 'org_explicit'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].values).toEqual(['org_explicit']);
+  });
+
+  it('an empty explicit organizationId falls back to the ambient scope, then to no-op', async () => {
+    const { tx, calls } = fakeTx();
+    await runWithOrgContext('org_ambient', () => setRlsOrgContext(tx, ''));
+    expect(calls).toHaveLength(1);
+    expect(calls[0].values).toEqual(['org_ambient']);
+
+    const empty = fakeTx();
+    await setRlsOrgContext(empty.tx, ''); // no scope either → fail closed
+    expect(empty.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * S3 review finding #4 — transaction detection in the rls-org-context
+ * extension relies on Prisma's PRIVATE `__internalParams.transaction`. These
+ * tests pin the fail-safe contract: when the private field disappears
+ * (a Prisma upgrade), the extension must NOT blindly batch the operation
+ * into base.$transaction — it passes through unwrapped (fails closed under
+ * FORCE RLS, never corrupts a caller's open transaction).
+ */
+describe('resolveRlsWrapMode (rls-org-context transaction detection)', () => {
+  it('wraps when __internalParams is present and shows no transaction', () => {
+    expect(resolveRlsWrapMode({ __internalParams: {} })).toBe('wrap');
+    expect(resolveRlsWrapMode({ __internalParams: { transaction: undefined } })).toBe('wrap');
+  });
+
+  it('passes through when a transaction marker is present (never nest $transaction)', () => {
+    expect(
+      resolveRlsWrapMode({ __internalParams: { transaction: { kind: 'itx', id: 't1' } } }),
+    ).toBe('passthrough-in-transaction');
+    expect(
+      resolveRlsWrapMode({ __internalParams: { transaction: { kind: 'batch' } } }),
+    ).toBe('passthrough-in-transaction');
+  });
+
+  it('fails SAFE when the private field is absent or malformed: passthrough, never wrap', () => {
+    // Prisma upgrade removed __internalParams entirely:
+    expect(resolveRlsWrapMode({ args: {}, query: () => {} })).toBe('passthrough-undetectable');
+    // Degenerate shapes must not crash or wrap either:
+    expect(resolveRlsWrapMode({ __internalParams: null })).toBe('passthrough-undetectable');
+    expect(resolveRlsWrapMode({ __internalParams: 'not-an-object' })).toBe('passthrough-undetectable');
+    expect(resolveRlsWrapMode(undefined)).toBe('passthrough-undetectable');
+    expect(resolveRlsWrapMode(null)).toBe('passthrough-undetectable');
   });
 });

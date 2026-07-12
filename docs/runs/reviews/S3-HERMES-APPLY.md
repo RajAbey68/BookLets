@@ -12,7 +12,32 @@ Target: Supabase project `BookLets` (`euqdfxekrxnoibeahogq`, eu-west-1). Tables 
 | 1 | Org-isolation policies on all 16 tenant tables + `booklets_current_org_id()` helper (the migration file) | Non-owner roles only (anon/authenticated/PostgREST). The app's owner connection still bypasses. | Near zero — non-owner roles were already fully locked out (RLS on, no policies). Policies only *permit* scoped access where there was none. |
 | 2 | `FORCE ROW LEVEL SECURITY` on 15 tenant tables (SQL below; also commented at the bottom of the migration file) | **The app itself.** Owner bypass ends; every app query on a forced table needs `app.current_org_id` set in-transaction. | High if sequencing is wrong — see gate below. |
 
-**Phase 2 gate (do not skip):** the Vercel deployment must be running the build from `claude/s3-rls-lock` (or later) **and** the app's read paths must have adopted `runWithOrgContext(...)`. As of this branch, the plumbing exists (`src/lib/org-context.ts`, the `rls-org-context` Prisma extension, `setRlsOrgContext(tx)` in all six interactive transactions) but only `trial-balance-report.ts` is wired as the exemplar. **Applying Phase 2 before the remaining server actions / pages are wired will blank every tenant page (fail closed to 0 rows), not leak data.** Phase 1 is safe to apply immediately.
+**Phase 2 gate (do not skip):** the Vercel deployment must be running the build from `claude/s3-rls-lock` (or later) **and** the app's read paths must have adopted `runWithOrgContext(...)`. As of this branch, WRITE paths are covered without any ambient scope: all six interactive transactions call `setRlsOrgContext(tx, organizationId)` with the org id passed **explicitly** (post-review change — the earlier build relied on an AsyncLocalStorage scope that most server actions never opened, making the call a no-op). READ paths still require `runWithOrgContext(...)` and only `trial-balance-report.ts` is wired as the exemplar. **Applying Phase 2 before the remaining server actions / pages are wired will blank every tenant page (fail closed to 0 rows), not leak data — and per the Phase 2 verification below, a blanked page is a HARD ABORT, not acceptable follow-up.** Phase 1 is safe to apply immediately.
+
+### Phase 2 prerequisites (ALL must hold before any FORCE statement)
+
+1. **Deployed build** is `claude/s3-rls-lock` or later (explicit-orgId `setRlsOrgContext`).
+2. **Every read path is wired** with `runWithOrgContext(...)` — the full list is in "Open risks" item 1. If any page in the smoke test fails closed, Phase 2 must be rolled back immediately (see verification section).
+3. **First-Organization creation:** the `Organization` policy's WITH CHECK requires `app.current_org_id` to EQUAL the new row's `id` at INSERT time. **No org-signup flow exists in the codebase today** (verified: no `organization.create` call anywhere in `src/`; orgs were seeded manually). Under FORCE, any operator or future signup code creating an organization MUST pre-generate the id (cuid — client-generatable) and set the GUC to that id inside the same transaction:
+   ```sql
+   BEGIN;
+   SELECT set_config('app.current_org_id', '<pre-generated-new-org-id>', TRUE);
+   INSERT INTO :"tenant_schema"."Organization" (id, name, slug, "createdAt", "updatedAt")
+   VALUES ('<pre-generated-new-org-id>', '...', '...', now(), now());
+   COMMIT;
+   ```
+   When a signup flow is built, it must pre-generate the id in application code and pass it through `setRlsOrgContext(tx, newOrgId)` before the INSERT — wire this requirement into that PR.
+4. **Seeding is complete** — `prisma/seed.ts` sets no GUC and will fail closed after FORCE (risk 3).
+
+### SQL convention — schema-qualify everything
+
+The migration self-detects the hosting schema and reports it (`NOTICE: rls_org_isolation: applying policies in schema <name>`; expected `public`). Nothing below hardcodes a schema: every block uses the psql variable `tenant_schema`. Make this the FIRST statement of every psql session while working this runbook, using the schema the NOTICE named:
+
+```sql
+\set tenant_schema public
+```
+
+Identifier positions interpolate as `:"tenant_schema"` (e.g. `:"tenant_schema"."Property"`); string positions as `:'tenant_schema'`. If a block is run through the Supabase SQL editor instead of psql (no variable support), textually replace `:"tenant_schema"` with the quoted schema (e.g. `public`) and `:'tenant_schema'` with the quoted literal (e.g. `'public'`) first — never run a block with the placeholders unreplaced, and never "simplify" by dropping the qualification.
 
 ## Session-variable pattern (why it survives pgBouncer/Supavisor)
 
@@ -51,9 +76,10 @@ Expected output includes: `NOTICE: rls_org_isolation: applying policies in schem
 ### 1. Enumerate pg_policies per table (expect 16 rows, all named `org_isolation`)
 
 ```sql
+\set tenant_schema public
 SELECT schemaname, tablename, policyname, cmd, qual, with_check
 FROM pg_policies
-WHERE schemaname = 'public'
+WHERE schemaname = :'tenant_schema'
 ORDER BY tablename;
 ```
 
@@ -64,9 +90,10 @@ Expect NO policies on `User, Channel, ExpenseCategory, Vendor` (global tables �
 ### 2. RLS enabled everywhere / forced nowhere yet
 
 ```sql
+\set tenant_schema public
 SELECT c.relname, c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = 'public' AND c.relkind = 'r'
+WHERE n.nspname = :'tenant_schema' AND c.relkind = 'r'
 ORDER BY c.relname;
 ```
 
@@ -78,39 +105,41 @@ There is currently one organization (`primary_org`). Create a throwaway second o
 
 ```sql
 -- setup (as postgres)
-INSERT INTO "Organization" (id, name, slug, "createdAt", "updatedAt")
+\set tenant_schema public
+INSERT INTO :"tenant_schema"."Organization" (id, name, slug, "createdAt", "updatedAt")
 VALUES ('org_rls_probe', 'RLS Probe Org', 'rls-probe', now(), now());
-INSERT INTO "Property" (id, "organizationId", name, address, type, status, "createdAt", "updatedAt")
+INSERT INTO :"tenant_schema"."Property" (id, "organizationId", name, address, type, status, "createdAt", "updatedAt")
 VALUES ('prop_rls_probe', 'org_rls_probe', 'Probe House', 'nowhere 1', 'APARTMENT', 'ACTIVE', now(), now());
 
 CREATE ROLE rls_probe LOGIN PASSWORD '<probe-password>' NOSUPERUSER NOBYPASSRLS;
-GRANT USAGE ON SCHEMA public TO rls_probe;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO rls_probe;
+GRANT USAGE ON SCHEMA :"tenant_schema" TO rls_probe;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA :"tenant_schema" TO rls_probe;
 ```
 
 ```sql
 -- as rls_probe (psql 'postgresql://rls_probe:<probe-password>@db...:5432/postgres')
+\set tenant_schema public
 -- First fetch the primary org id AS POSTGRES (a probe-role subselect would
--- itself be RLS-filtered): SELECT id FROM "Organization" WHERE slug='primary_org';
+-- itself be RLS-filtered): SELECT id FROM :"tenant_schema"."Organization" WHERE slug='primary_org';
 BEGIN;
 SELECT set_config('app.current_org_id', '<PRIMARY_ORG_ID>', TRUE);
-SELECT count(*) FROM "Property" WHERE "organizationId" = 'org_rls_probe';  -- MUST be 0
-SELECT count(*) FROM "Property";                                            -- only primary_org's 3 properties
-SELECT count(*) FROM "JournalEntry";                                        -- only primary_org's entries (10)
+SELECT count(*) FROM :"tenant_schema"."Property" WHERE "organizationId" = 'org_rls_probe';  -- MUST be 0
+SELECT count(*) FROM :"tenant_schema"."Property";      -- only primary_org's 3 properties
+SELECT count(*) FROM :"tenant_schema"."JournalEntry";  -- only primary_org's entries (10)
 COMMIT;
 
 BEGIN;
 SELECT set_config('app.current_org_id', 'org_rls_probe', TRUE);
-SELECT count(*) FROM "Property";           -- MUST be 1 (only Probe House)
-SELECT count(*) FROM "JournalEntry";       -- MUST be 0
+SELECT count(*) FROM :"tenant_schema"."Property";      -- MUST be 1 (only Probe House)
+SELECT count(*) FROM :"tenant_schema"."JournalEntry";  -- MUST be 0
 -- write fence: inserting into the OTHER org must fail with RLS violation:
-INSERT INTO "GuestPayout" (id, "organizationId", date, amount, status, "createdAt", "updatedAt")
+INSERT INTO :"tenant_schema"."GuestPayout" (id, "organizationId", date, amount, status, "createdAt", "updatedAt")
 VALUES ('gp_probe_x', '<PRIMARY_ORG_ID>', now(), 1, 'PENDING', now(), now());
 -- expect: ERROR: new row violates row-level security policy
 ROLLBACK;
 
 BEGIN;   -- no GUC set at all → fail closed
-SELECT count(*) FROM "Property";           -- MUST be 0
+SELECT count(*) FROM :"tenant_schema"."Property";      -- MUST be 0
 COMMIT;
 ```
 
@@ -122,24 +151,25 @@ SELECT current_setting('app.current_org_id', true);
 ```
 Must be NULL/empty both times, including immediately after a probe transaction that set it (transaction-local scope proof).
 
-## Phase 2 — FORCE (app-role lockdown) — only after the gate above
+## Phase 2 — FORCE (app-role lockdown) — only after ALL prerequisites above hold
 
 ```sql
-ALTER TABLE "Organization"      FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Property"          FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Owner"             FORCE ROW LEVEL SECURITY;
-ALTER TABLE "PropertyOwnership" FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Account"           FORCE ROW LEVEL SECURITY;
-ALTER TABLE "JournalEntry"      FORCE ROW LEVEL SECURITY;
-ALTER TABLE "JournalLine"       FORCE ROW LEVEL SECURITY;
-ALTER TABLE "FiscalPeriod"      FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Booking"           FORCE ROW LEVEL SECURITY;
-ALTER TABLE "BookingCharge"     FORCE ROW LEVEL SECURITY;
-ALTER TABLE "GuestPayout"       FORCE ROW LEVEL SECURITY;
-ALTER TABLE "OwnerStatement"    FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Expense"           FORCE ROW LEVEL SECURITY;
-ALTER TABLE "EvidenceLog"       FORCE ROW LEVEL SECURITY;
-ALTER TABLE "ActionIntentQueue" FORCE ROW LEVEL SECURITY;
+\set tenant_schema public
+ALTER TABLE :"tenant_schema"."Organization"      FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Property"          FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Owner"             FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."PropertyOwnership" FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Account"           FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."JournalEntry"      FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."JournalLine"       FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."FiscalPeriod"      FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Booking"           FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."BookingCharge"     FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."GuestPayout"       FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."OwnerStatement"    FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Expense"           FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."EvidenceLog"       FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."ActionIntentQueue" FORCE ROW LEVEL SECURITY;
 -- Deliberately NOT forced: "User", "Membership" (sign-in upsert and
 -- Membership→org resolution run BEFORE any org context can exist),
 -- "Channel", "ExpenseCategory", "Vendor" (global reference data, no org path).
@@ -151,24 +181,35 @@ The app connects as the table owner (`postgres` on Supabase, which has **no** BY
 
 ```sql
 -- as postgres (the app role), direct connection:
+\set tenant_schema public
 BEGIN;  -- no GUC
-SELECT count(*) FROM "JournalEntry";   -- MUST be 0 (was 10 before FORCE)
-SELECT count(*) FROM "Property";       -- MUST be 0
+SELECT count(*) FROM :"tenant_schema"."JournalEntry";   -- MUST be 0 (was 10 before FORCE)
+SELECT count(*) FROM :"tenant_schema"."Property";       -- MUST be 0
 COMMIT;
 
 BEGIN;
 SELECT set_config('app.current_org_id', '<PRIMARY_ORG_ID>', TRUE);
-SELECT count(*) FROM "JournalEntry";   -- MUST be 10 again
+SELECT count(*) FROM :"tenant_schema"."JournalEntry";   -- MUST be 10 again
 COMMIT;
 ```
 
-Then smoke-test the deployed app: sign in, open /reports/trial-balance (the wired exemplar) — must render data; open the other pages and note which fail closed (expected until their actions adopt `runWithOrgContext`; that is follow-up work, listed under risks).
+### Phase 2 smoke test — pass/fail gate, NOT an observation exercise
+
+Sign in to the deployed app and open **every** tenant-data page (dashboard, properties, bookings, ledger, approvals, reports/trial-balance, exports). Per the Phase 2 prerequisites, ALL read paths must already be wired with `runWithOrgContext` — so **every page must render its data**.
+
+**Any page that renders empty/broken is a HARD ABORT of Phase 2.** Do not record it as "expected follow-up" and move on — a blanked page under FORCE means prerequisite 2 was not actually satisfied. Immediately run the Phase 2 rollback (the `NO FORCE` block below, which restores the owner bypass without weakening the Phase 1 policies), report which page failed, and only re-attempt FORCE after that path is wired and deployed.
 
 ### Cleanup of probe artifacts
 
+The probe rows belong to `org_rls_probe`, so after FORCE even the owner connection needs the GUC set to delete them — wrap the deletes in a transaction that sets the org context first (this also works fine before FORCE):
+
 ```sql
-DELETE FROM "Property" WHERE id = 'prop_rls_probe';
-DELETE FROM "Organization" WHERE id = 'org_rls_probe';
+\set tenant_schema public
+BEGIN;
+SELECT set_config('app.current_org_id', 'org_rls_probe', TRUE);
+DELETE FROM :"tenant_schema"."Property" WHERE id = 'prop_rls_probe';
+DELETE FROM :"tenant_schema"."Organization" WHERE id = 'org_rls_probe';
+COMMIT;
 REASSIGN OWNED BY rls_probe TO postgres; DROP OWNED BY rls_probe; DROP ROLE rls_probe;
 ```
 
@@ -177,43 +218,45 @@ REASSIGN OWNED BY rls_probe TO postgres; DROP OWNED BY rls_probe; DROP ROLE rls_
 Phase 2 only (returns the app's owner bypass, keeps anon locked out):
 
 ```sql
-ALTER TABLE "Organization"      NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Property"          NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Owner"             NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "PropertyOwnership" NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Account"           NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "JournalEntry"      NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "JournalLine"       NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "FiscalPeriod"      NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Booking"           NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "BookingCharge"     NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "GuestPayout"       NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "OwnerStatement"    NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "Expense"           NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "EvidenceLog"       NO FORCE ROW LEVEL SECURITY;
-ALTER TABLE "ActionIntentQueue" NO FORCE ROW LEVEL SECURITY;
+\set tenant_schema public
+ALTER TABLE :"tenant_schema"."Organization"      NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Property"          NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Owner"             NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."PropertyOwnership" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Account"           NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."JournalEntry"      NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."JournalLine"       NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."FiscalPeriod"      NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Booking"           NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."BookingCharge"     NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."GuestPayout"       NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."OwnerStatement"    NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."Expense"           NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."EvidenceLog"       NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE :"tenant_schema"."ActionIntentQueue" NO FORCE ROW LEVEL SECURITY;
 ```
 
 Full Phase 1 rollback (restores the exact pre-migration state: RLS enabled, zero policies):
 
 ```sql
-DROP POLICY IF EXISTS org_isolation ON "Organization";
-DROP POLICY IF EXISTS org_isolation ON "Membership";
-DROP POLICY IF EXISTS org_isolation ON "Property";
-DROP POLICY IF EXISTS org_isolation ON "Owner";
-DROP POLICY IF EXISTS org_isolation ON "PropertyOwnership";
-DROP POLICY IF EXISTS org_isolation ON "Account";
-DROP POLICY IF EXISTS org_isolation ON "JournalEntry";
-DROP POLICY IF EXISTS org_isolation ON "JournalLine";
-DROP POLICY IF EXISTS org_isolation ON "FiscalPeriod";
-DROP POLICY IF EXISTS org_isolation ON "Booking";
-DROP POLICY IF EXISTS org_isolation ON "BookingCharge";
-DROP POLICY IF EXISTS org_isolation ON "GuestPayout";
-DROP POLICY IF EXISTS org_isolation ON "OwnerStatement";
-DROP POLICY IF EXISTS org_isolation ON "Expense";
-DROP POLICY IF EXISTS org_isolation ON "EvidenceLog";
-DROP POLICY IF EXISTS org_isolation ON "ActionIntentQueue";
-DROP FUNCTION IF EXISTS booklets_current_org_id();
+\set tenant_schema public
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Organization";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Membership";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Property";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Owner";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."PropertyOwnership";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Account";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."JournalEntry";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."JournalLine";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."FiscalPeriod";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Booking";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."BookingCharge";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."GuestPayout";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."OwnerStatement";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Expense";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."EvidenceLog";
+DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."ActionIntentQueue";
+DROP FUNCTION IF EXISTS :"tenant_schema".booklets_current_org_id();
 -- do NOT disable RLS: enabled-without-policies was the pre-existing state
 -- (Supabase migration enable_rls_on_all_tables, 2026-05-16).
 -- If rolled back via psql, also: npx prisma migrate resolve --rolled-back 20260712_rls_org_isolation
@@ -221,10 +264,10 @@ DROP FUNCTION IF EXISTS booklets_current_org_id();
 
 ## Open risks / follow-ups for Hermes & the next builder
 
-1. **Phase 2 blast radius**: only `trial-balance-report.ts` and the six interactive transactions are org-context-wired. Before FORCE, wire `runWithOrgContext` into: `src/app/actions/{portfolio,property,bookings,ledger,receipt,approval,context,sync}.actions.ts`, `src/app/api/export/ledger/route.ts`, `src/lib/{pl-statement-report,balance-sheet-report}.ts`, and any server components querying prisma directly. Everything unwired fails closed (blank pages), not open.
+1. **Phase 2 blast radius**: the six interactive transactions now pass their org id to `setRlsOrgContext(tx, organizationId)` explicitly (write paths safe), but on the READ side only `trial-balance-report.ts` is wired. Before FORCE, wire `runWithOrgContext` into: `src/app/actions/{portfolio,property,bookings,ledger,receipt,approval,context,sync}.actions.ts`, `src/app/api/export/ledger/route.ts`, `src/lib/{pl-statement-report,balance-sheet-report}.ts`, and any server components querying prisma directly. Everything unwired fails closed (blank pages), not open — and a blank page in the Phase 2 smoke test is a HARD ABORT (see prerequisite 2 and the smoke-test gate), not tolerable follow-up.
 2. **SymbiOS pre-checks under FORCE without context**: the fiscal-period/POSTED-delete pre-checks in `src/lib/prisma.ts` read via the RLS-scoped client; with no org context under FORCE they see 0 rows and pass — the DB triggers (`BL282`/`BL295`) and the RLS write policies remain the enforcing layer. Intended defence-in-depth ordering, but verify trigger behaviour under FORCE in Phase 2 smoke tests (attempt an INSERT into a closed period WITH the GUC set: expect `BL282`).
 3. **Seed script** (`prisma/seed.ts`) connects as owner and sets no GUC — it will fail closed after Phase 2. Only relevant for fresh environments; run seeds before FORCE, or wrap seed writes in `set_config` transactions (follow-up).
-4. **Org creation under FORCE**: `Organization`'s WITH CHECK requires the GUC to equal the new row's id. cuid ids are client-generated so this is possible, but no code creates orgs today; operator INSERTs must set the GUC to the new id first.
+4. **Org creation under FORCE**: `Organization`'s WITH CHECK requires the GUC to equal the new row's id — see **Phase 2 prerequisite 3** for the exact transaction pattern. No code path creates organizations today (verified); any future signup flow must pre-generate the cuid and call `setRlsOrgContext(tx, newOrgId)` before the INSERT.
 5. **Schema mismatch** (Message.md follow-up #4): migration aborts on ambiguity instead of guessing. If the `booklets` schema is ever created and tables moved, re-run the migration (idempotent) so policies land in the right schema, and re-verify `pg_policies.schemaname`.
 6. **Global tables** (`Channel`, `ExpenseCategory`, `Vendor`) are shared across orgs by schema design — cross-org reads of reference data remain possible for the app. If they become org-private, add `organizationId` + policy (schema change, new migration).
 7. **Optional hardening** (not applied here): `REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated;` — PostgREST is unused by BookLets; policies now grant scoped access where a caller can set the GUC, and while PostgREST offers no way to set `app.*` GUCs, revoking the grants removes the question entirely.

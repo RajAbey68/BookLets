@@ -203,6 +203,23 @@ joining this repo should read it before claiming scope here.
   (runWithOrgContext adoption there is a Phase-2 prerequisite, listed in the runbook).
 - **Out of scope (followups):** wire `runWithOrgContext` into all actions/routes/
   server components; seed-script GUC support; Phase 2 FORCE application (Hermes).
+- **Update 2026-07-12 (external review, CodeRabbit on PR #76):** all 7 findings
+  addressed. (1+3+5) `setRlsOrgContext(tx, organizationId)` now takes the
+  resolved org id EXPLICITLY at all six interactive transactions (ledger
+  postEntry/reverseEntry/updateEntryWithVersion, automation, both approval
+  actions) — the ambient AsyncLocalStorage scope is fallback only, fixing the
+  silent no-op → fail-closed trap under FORCE. (2) `LedgerService.postEntry`
+  accepts an optional `LedgerTransactionClient`; AutomationService forwards its
+  open tx so expense + journal entry are atomic (P2002 race recovery is
+  owned-transaction-mode only — documented). (4) transaction detection in the
+  rls-org-context extension extracted to `resolveRlsWrapMode()` — fails SAFE
+  (passthrough + one-time loud warning) if Prisma's private `__internalParams`
+  vanishes; behavior pinned by unit tests. (6) runbook: all SQL schema-qualified
+  via psql `\set tenant_schema`, Phase 2 smoke-test failure is now a HARD ABORT,
+  probe cleanup wrapped in a GUC-setting transaction. (7) first-Organization-
+  under-FORCE requirement documented as Phase 2 prerequisite 3 (no signup flow
+  exists — verified; code change deferred until one does). Tests 304 → 318
+  (new `tests/unit/ledger-postentry-tx-reuse.test.ts`, extended org-context.test.ts).
 
 ## Recently completed
 
