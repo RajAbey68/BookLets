@@ -246,3 +246,18 @@ Fable status: 3 builder agents in flight (rebase #74, rebase #75, S1b build) —
 **In flight (2 builders):** S6 review/approval UI (`claude/s6-review-ui`) — approve→POSTED / void→VOIDED with assertNotSelfApproval; E5 session-identity + P1.4 SoD gate re-enable (`claude/e5-maker-identity`).
 
 **Gates unchanged:** HR-5 executing (Hermes, authorized); HR-6 grant pending; S7/S8 need sample CF3/Wise files from Raj; go-live = Raj at Z.
+
+---
+
+## 2026-07-12 — REVIEW-CYCLE SWEEP COMPLETE: ALL CODERABBIT FINDINGS ACROSS 5 PRs FIXED
+
+External (CodeRabbit) review results and fixes, all verified green before push:
+- **#74** (deploy-fix, rebased): no actionable comments. MERGE-READY.
+- **#75** (zip-ingest, rebased): 1 Major — declared-size cap counted skipped .opus/.mp4 attachments (real WhatsApp exports would 422). Fixed @ 1a67000 (cap counts allowlisted entries only; traversal guard still covers all; mixed-archive + byte-patched traversal tests). Re-review: clean. MERGE-READY.
+- **#79** (S1b bridge): 6 findings (2 Critical). All fixed @ 5b0615e — OWNER/ADMIN role gate (403), fail-closed OCR_BRIDGE_ORG_ID binding (503 unset / 403 mismatch — tenancy model for the org-less staging schema, documented), category mapping tenant-scoped through Account, new `postEntryWithOutcome` propagates created-vs-replayed so race losers count as skipped_existing (postEntry return shape untouched), non-object body → 400, +34 tests (suite 324). Re-review triggered.
+- **#80** (S6 review UI): 2 Minors — shared fetcher cap would hide older drafts on /approvals (fixed @ ae6aeaa: cap is a /review-only option) + id tiebreaker for deterministic ordering (fixed @ 28a40e1). First fix confirmed addressed; re-review triggered for second.
+- **#81** (E5 identity/SoD): 1 Trivial — grep-only P1.4 gate spoofable. Fixed @ e48d251 (behavioral suites primary, greps secondary). Re-review: clean. MERGE-READY.
+
+**Merge queue (pending HermesBot checks + approval, sequenced AFTER HR-5 lands):** #74 → #75 → #81 → #80 → #79 (79 also needs HR-6 grant + OCR_BRIDGE_ORG_ID env before it can RUN in prod, though merging is safe). #76 (RLS) still held for re-review + Hermes-gated apply. #77 (test fence) needs a rebase — next housekeeping item.
+
+Awaiting: Hermes HR-5 backup/apply/resolve/verify outputs (authorized 20:2x UTC).
