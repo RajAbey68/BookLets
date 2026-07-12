@@ -83,7 +83,7 @@ joining this repo should read it before claiming scope here.
 - **NOT touching:** auth semantics for valid sessions, `src/auth.ts`,
   Prisma client/schema, Vercel/Supabase config (Hermes owns live-env
   verification).
-- **Out of scope (followups):** Hermes to confirm the live Vercel env
+- **Out of scope (follow-ups):** Hermes to confirm the live Vercel env
   values (AUTH_URL/NEXTAUTH_URL/AUTH_SECRET/DATABASE_URL) and runtime
   logs; PgBouncer `options` startup-parameter support for the
   `search_path` (only verifiable against the live pooler).
@@ -108,7 +108,7 @@ joining this repo should read it before claiming scope here.
   - `src/lib/*` services — service refactor is the next PR
   - `src/app/actions/*` — same
   - schema beyond the two new models + back-ref
-- **Out of scope (followups):**
+- **Out of scope (follow-ups):**
   - Replace `prisma.organization.findFirst()` in `sync.actions.ts`,
     `automation.service.ts`, etc. with session-derived org via
     `Membership`.

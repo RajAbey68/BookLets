@@ -77,6 +77,12 @@ const authGate = auth((req) => {
   const { pathname, search } = req.nextUrl;
 
   if (!req.auth?.user) {
+    // API clients (e.g. fetch against /api/export/*) need a structured 401,
+    // not a 307 to an HTML login page. Public API paths never reach here
+    // (isPublic short-circuits /api/auth/* and /api/health).
+    if (pathname.startsWith("/api")) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
     const loginUrl = new URL("/login", req.nextUrl.origin);
     loginUrl.searchParams.set("callbackUrl", pathname + search);
     return NextResponse.redirect(loginUrl);
