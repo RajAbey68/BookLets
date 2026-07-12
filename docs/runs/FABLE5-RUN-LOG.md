@@ -261,3 +261,16 @@ External (CodeRabbit) review results and fixes, all verified green before push:
 **Merge queue (pending HermesBot checks + approval, sequenced AFTER HR-5 lands):** #74 → #75 → #81 → #80 → #79 (79 also needs HR-6 grant + OCR_BRIDGE_ORG_ID env before it can RUN in prod, though merging is safe). #76 (RLS) still held for re-review + Hermes-gated apply. #77 (test fence) needs a rebase — next housekeeping item.
 
 Awaiting: Hermes HR-5 backup/apply/resolve/verify outputs (authorized 20:2x UTC).
+
+---
+
+## 2026-07-12 — REPO-SIDE COMPLETE: ALL 7 FABLE5 PRs REBASED, GREEN, EXTERNALLY REVIEWED
+
+Loop iteration results:
+- **#79** final nitpick fixed (batchSize boundary tests, suite 331) @ 0fa13e5. All 6 review findings confirmed addressed by CodeRabbit.
+- **#77** rebased @ e3a7155 (284/284). CodeRabbit re-review: NO actionable comments, 5/5 pre-merge checks.
+- **#76** semantically reconciled with main @ 4d7af4f: naive rebase failed 13 tests; diagnosis — auto-merged production code was CORRECT (D3 gate ordering, S6 batch semantics, RLS context-first all intact); 12 failures were main-side test mocks missing the branch's setRlsOrgContext export, 1 was the branch's own pre-D3 'SUCCESS' assertion (now HIL_REQUIRED per main's type contract). 347/347 green.
+
+**Merge-ready set (all on current main, all reviews clean): #74, #75, #76, #77, #79, #80, #81.** Recommended order: #74 → #81 → #76 → #80 → #75 → #77 → #79, with one known trivial cross-PR conflict: #76's automation.service keeps the service-identity literal that #81 replaces with AUTOMATION_MAKER_IDENTITY — whichever merges second needs a 1-line rebase (P1.4 gate will catch it if forgotten).
+
+**Prod status check (this iteration): health = 500 — HR-5 NOT yet applied; no Hermes report received since authorization (~20:25 UTC).** The read-only Supabase connector is currently erroring on permission streams; monitoring via the health endpoint instead. THE critical path is unchanged and entirely Hermes-side: HR-5 apply → health 200 → merges → HR-6 grant + OCR_BRIDGE_ORG_ID env → run bridge → 179 receipts in ledger → S6 review queue live.
