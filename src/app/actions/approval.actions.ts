@@ -276,6 +276,7 @@ export async function decideDraftJournalEntry(
   }
 
   revalidatePath('/approvals');
+  revalidatePath('/review');
   revalidatePath('/ledger');
   return { success: true };
 }
@@ -385,6 +386,30 @@ export interface DraftReviewItem {
   isOwnDraft: boolean;
 }
 
+/**
+ * Bounded review page: a checker works through the newest 100 drafts at a
+ * time; deciding them surfaces the older remainder on the next load.
+ */
+const REVIEW_QUEUE_CAP = 100;
+
+/**
+ * S6 — DRAFT count for the sidebar "Review" badge. Degrades to 0 instead of
+ * throwing: a badge must never take down the app shell it renders in.
+ */
+export async function fetchDraftReviewCount(): Promise<number> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return 0;
+
+  const { organizationId } = resolved.context;
+
+  try {
+    return await prisma.journalEntry.count({ where: { organizationId, status: 'DRAFT' } });
+  } catch (error) {
+    console.error('[approval.actions] fetchDraftReviewCount failed:', error);
+    return 0;
+  }
+}
+
 /** Same calendar day in UTC — extraction dates carry no meaningful time. */
 function sameUtcDay(a: Date, b: Date): boolean {
   return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
@@ -415,7 +440,10 @@ export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[
     drafts = await prisma.journalEntry.findMany({
       where: { organizationId, status: 'DRAFT' },
       include: { lines: { include: { account: true } } },
-      orderBy: { date: 'desc' },
+      // Newest first, createdAt as the same-day tiebreaker so the order is
+      // stable; capped so the page stays bounded however large the backlog.
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }],
+      take: REVIEW_QUEUE_CAP,
     });
   } catch (error) {
     console.error('[approval.actions] fetchDraftReviewQueue: draft load failed:', error);
