@@ -57,6 +57,31 @@ joining this repo should read it before claiming scope here.
     without clamping; the gate now throws on out-of-contract values, but a
     friendlier degrade (clamp + DRAFT) could be argued.
 
+### fable5-builder-s10 (claude/s10-phantom-fix) — D4 phantom-revenue verification + regression fence
+- **Started:** 2026-07-12
+- **Goal:** Investigate alleged defect D4 (manual booking creates phantom
+  revenue). VERDICT: already fixed by RAJ-287 (merge `e8df4a2`,
+  `feat/booking-ledger-posting`) — `createBooking` posts DR Operating Cash /
+  CR Guest Pre-payments via `RevenueService.recordBookingPrepayment`; revenue
+  is only recognized at checkout. Added regression-fence tests pinning: post
+  at payment time for CONFIRMED/COMPLETED only, compensating rollback on
+  ledger failure, no revenue account touched at pre-payment, idempotency
+  parity (source/sourceId/operation) between manual and Hostaway-sync paths,
+  and re-sync no-double-post via `deferredPosted`.
+- **Touching:**
+  - `tests/unit/booking-phantom-revenue-fence.test.ts` (new — fence only)
+- **NOT touching:**
+  - `src/**` — no production code change needed; defect not reproducible
+- **Out of scope (followups):**
+  - A manual booking created directly as COMPLETED posts its pre-payment but
+    is never picked up by `recognizeRevenue` (query filters `status:
+    "CONFIRMED"`), so its liability never converts to Rental Income —
+    understated revenue, not phantom revenue; separate ticket suggested.
+  - Residual double-count risk: a human manually keying a booking that ALSO
+    exists in Hostaway creates two Booking rows (manual row has
+    `hostawayId: null`, sync upserts by `hostawayId`) → two liability
+    entries. Needs entity-level matching, not ledger idempotency.
+
 ### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
 - **Started:** 2026-05-13
 - **Goal:** Scaffold Auth.js v5 with Google OAuth so the operator can let
