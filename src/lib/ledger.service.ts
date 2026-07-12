@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Prisma } from '@prisma/client';
 import { prisma, setRlsOrgContext } from './prisma';
+import { runWithOrgContext } from './org-context';
 import { EvidenceLogService } from './evidence-log.service';
 import {
   JournalEntryInput,
@@ -169,6 +170,14 @@ export class LedgerService {
    * its own transaction boundary.
    */
   static async postEntry(input: JournalEntryInput, tx?: LedgerTransactionClient) {
+    // S3 (rls-lock): open the org scope for the WHOLE call so the preflight
+    // reads below (idempotency fast path, fiscal-period check) that may run
+    // on the bare client are RLS-scoped too — without this they would fail
+    // closed once Phase-2 FORCE RLS binds the app role.
+    return runWithOrgContext(input.organizationId, () => this.postEntryScoped(input, tx));
+  }
+
+  private static async postEntryScoped(input: JournalEntryInput, tx?: LedgerTransactionClient) {
     const {
       organizationId,
       date,
@@ -321,6 +330,18 @@ export class LedgerService {
     reason: string,
     makerIdentity?: string,
   ): Promise<{ id: string }> {
+    // S3 (rls-lock): org scope covers the preflight lookup below, which runs
+    // on the bare client before the transaction sets the RLS context.
+    return runWithOrgContext(organizationId, () =>
+      this.reverseEntryScoped(organizationId, entryId, reason, makerIdentity));
+  }
+
+  private static async reverseEntryScoped(
+    organizationId: string,
+    entryId: string,
+    reason: string,
+    makerIdentity?: string,
+  ): Promise<{ id: string }> {
     const originalEntry = await prisma.journalEntry.findFirst({
       where: { id: entryId, organizationId },
       include: { lines: true }
@@ -408,6 +429,18 @@ export class LedgerService {
    * back along with everything else.
    */
   static async updateEntryWithVersion(
+    id: string,
+    organizationId: string,
+    expectedVersion: number,
+    data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
+  ) {
+    // S3 (rls-lock): org scope covers the stale-write evidence insert in the
+    // catch block, which runs on the bare client outside the transaction.
+    return runWithOrgContext(organizationId, () =>
+      this.updateEntryWithVersionScoped(id, organizationId, expectedVersion, data));
+  }
+
+  private static async updateEntryWithVersionScoped(
     id: string,
     organizationId: string,
     expectedVersion: number,

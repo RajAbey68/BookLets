@@ -98,6 +98,17 @@ describe('S3 rls-lock — migration file', () => {
     expect(fs.existsSync(migrationPath)).toBe(true);
   });
 
+  it('ALL_TABLES matches the model set declared in prisma/schema.prisma', () => {
+    // Schema-driven guard: a 21st model added to the schema without an RLS
+    // classification here fails this test instead of silently regressing.
+    const schema = fs.readFileSync(
+      path.resolve(__dirname, '../../prisma/schema.prisma'),
+      'utf-8',
+    );
+    const models = [...schema.matchAll(/^model\s+(\w+)\s/gm)].map((m) => m[1]).sort();
+    expect(models).toEqual([...ALL_TABLES].sort());
+  });
+
   it('covers every Prisma model exactly once in the classification sets', () => {
     const classified = [
       ...Object.keys(DIRECT_ORG_TABLES),
@@ -224,14 +235,12 @@ describe('S3 rls-lock — FORCE ROW LEVEL SECURITY is staged, not auto-applied',
 
   it('documents the canonical Phase 2 FORCE list for Hermes', () => {
     const sql = readMigration();
+    // Every tenant table except Membership (bootstrap: org resolution runs
+    // before any org context exists) must appear in the commented FORCE list.
     for (const table of [
-      'Organization',
-      'Property',
-      'JournalEntry',
-      'JournalLine',
-      'EvidenceLog',
-      'ActionIntentQueue',
-    ]) {
+      ...Object.keys(DIRECT_ORG_TABLES),
+      ...Object.keys(JOIN_PATH_TABLES),
+    ].filter((t) => t !== 'Membership')) {
       expect(sql).toMatch(
         new RegExp(`--\\s*ALTER TABLE\\s+"${table}"\\s+FORCE ROW LEVEL SECURITY`, 'i')
       );

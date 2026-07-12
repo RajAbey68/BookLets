@@ -155,6 +155,9 @@ Must be NULL/empty both times, including immediately after a probe transaction t
 
 ```sql
 \set tenant_schema public
+-- Transactional DDL: any mid-step failure rolls the whole sequence back
+-- instead of leaving FORCE half-applied across tables.
+BEGIN;
 ALTER TABLE :"tenant_schema"."Organization"      FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Property"          FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Owner"             FORCE ROW LEVEL SECURITY;
@@ -170,6 +173,7 @@ ALTER TABLE :"tenant_schema"."OwnerStatement"    FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Expense"           FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."EvidenceLog"       FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."ActionIntentQueue" FORCE ROW LEVEL SECURITY;
+COMMIT;
 -- Deliberately NOT forced: "User", "Membership" (sign-in upsert and
 -- Membership→org resolution run BEFORE any org context can exist),
 -- "Channel", "ExpenseCategory", "Vendor" (global reference data, no org path).
@@ -219,6 +223,7 @@ Phase 2 only (returns the app's owner bypass, keeps anon locked out):
 
 ```sql
 \set tenant_schema public
+BEGIN;  -- transactional: all-or-nothing rollback of FORCE
 ALTER TABLE :"tenant_schema"."Organization"      NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Property"          NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Owner"             NO FORCE ROW LEVEL SECURITY;
@@ -234,12 +239,14 @@ ALTER TABLE :"tenant_schema"."OwnerStatement"    NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."Expense"           NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."EvidenceLog"       NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE :"tenant_schema"."ActionIntentQueue" NO FORCE ROW LEVEL SECURITY;
+COMMIT;
 ```
 
 Full Phase 1 rollback (restores the exact pre-migration state: RLS enabled, zero policies):
 
 ```sql
 \set tenant_schema public
+BEGIN;  -- transactional: policies + helper function drop atomically
 DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Organization";
 DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Membership";
 DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Property";
@@ -257,6 +264,7 @@ DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."Expense";
 DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."EvidenceLog";
 DROP POLICY IF EXISTS org_isolation ON :"tenant_schema"."ActionIntentQueue";
 DROP FUNCTION IF EXISTS :"tenant_schema".booklets_current_org_id();
+COMMIT;
 -- do NOT disable RLS: enabled-without-policies was the pre-existing state
 -- (Supabase migration enable_rls_on_all_tables, 2026-05-16).
 -- If rolled back via psql, also: npx prisma migrate resolve --rolled-back 20260712_rls_org_isolation

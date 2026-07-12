@@ -218,7 +218,7 @@ joining this repo should read it before claiming scope here.
   via psql `\set tenant_schema`, Phase 2 smoke-test failure is now a HARD ABORT,
   probe cleanup wrapped in a GUC-setting transaction. (7) first-Organization-
   under-FORCE requirement documented as Phase 2 prerequisite 3 (no signup flow
-  exists — verified; code change deferred until one does). Tests 304 → 318
+  exists — verified; code change deferred until one does). Tests: 304 (pre-S3 baseline) → 318 (current total after this change)
   (new `tests/unit/ledger-postentry-tx-reuse.test.ts`, extended org-context.test.ts).
 
 ## Recently completed
