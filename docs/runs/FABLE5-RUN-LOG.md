@@ -45,6 +45,8 @@
 2026-07-12 15:45 | fable | 🛑 CHECKPOINTS EMITTED to chat + bus: PRE-W0 (doc-drift), 🛑9 (S4), 🛑2-partial (S2 repo-side). Awaiting Layer-1/Layer-2 (Hermes via Raj) verdicts. S1 blocked on HR-1. Fable HOLDS wave advance until verdicts + Raj.
 2026-07-12 15:45 | fable | TOKEN ESTIMATE @ Wave-0 boundary: ~450k output tokens total (recon 128k + builders 274k + orchestration). Ceiling 12M. Within budget: yes (3.8%).
 
+2026-07-12 17:15 | fable | RAJ DIRECTIVE: third-party adversarial review by Qwen and Grok 4.5. Per E3 Fable cannot invoke non-Anthropic models — packets prepared instead. HR-3 (for Raj/Hermes): run docs/runs/reviews/*.md through (a) local Ollama qwen3-coder:30b and (b) Grok 4.5; paste both verdicts back. Each brief is self-contained: role, claims to attack, attack vectors, full diff, verdict format with checkerIdentity. Layer-1 verdicts from Qwen+Grok will be recorded here against PRs #72/#73/#74; Hermes remains Layer-2 judge.
+
 ## CHECKPOINT REPORTS (§7)
 
 ### CHECKPOINT PRE-W0 — doc-drift reconciliation (E5)
