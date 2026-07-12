@@ -233,3 +233,16 @@ Raj: "HR-5 authorized." Hermes executing with backup-first discipline per the ar
 6. STOP conditions: any SQL error (ROLLBACK + bus report), any statement targeting raj_fin_track (none exist in the script), backup failure.
 
 Fable status: 3 builder agents in flight (rebase #74, rebase #75, S1b build) — no repo files Hermes needs are being mutated; the DDL artifact is frozen at the sha above.
+
+---
+
+## 2026-07-12 — BACKLOG WAVE (Raj: "Proceed on the backlog. This is imperative.")
+
+**Completed this wave:**
+- **#74 rebased onto main** @ 2002be6 — 1 conflict (AGENTS_LOG, kept both), 276/276 tests, build shows proxy convention + public health/login + fail-closed gate. CodeRabbit re-review: NO actionable comments. Merge-ready.
+- **#75 rebased onto main** @ a89bdf7 — 1 conflict (AGENTS_LOG, kept both), 310/310 tests, all security guards verified intact post-rebase. Merge-ready. Follow-up logged: unify DRAFT enforcement through gateAutomatedJournalEntry (currently its own constant — behaviour correct, authority duplicated).
+- **S1b BUILT → PR #79 (draft)** — `claude/s1b-bridge-import` @ 9ffe05c. 37 new TDD tests, 313/313 suite, ƒ /api/ingest/ocr-bridge in manifest. Contract honoured: DRAFT-only, parking with reason codes, idempotent, per-row failure isolation, batch-starvation fix (eligible-first ordering; `remaining` counts eligible only). Prod-blocked on HR-5 + HR-6 by design.
+
+**In flight (2 builders):** S6 review/approval UI (`claude/s6-review-ui`) — approve→POSTED / void→VOIDED with assertNotSelfApproval; E5 session-identity + P1.4 SoD gate re-enable (`claude/e5-maker-identity`).
+
+**Gates unchanged:** HR-5 executing (Hermes, authorized); HR-6 grant pending; S7/S8 need sample CF3/Wise files from Raj; go-live = Raj at Z.
