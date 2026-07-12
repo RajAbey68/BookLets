@@ -203,6 +203,9 @@ export class LedgerService {
               accountId: line.accountId,
               amount: new Decimal(line.amount.toString()), // keep as Decimal — do NOT call .toNumber() (loses precision)
               isDebit: line.isDebit,
+              // Optional per-line currency (S1b posts LKR); undefined keeps
+              // the schema default.
+              currency: line.currency,
             }))
           }
         },
