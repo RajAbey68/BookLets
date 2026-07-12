@@ -47,6 +47,13 @@
 
 2026-07-12 17:15 | fable | RAJ DIRECTIVE: third-party adversarial review by Qwen and Grok 4.5. Per E3 Fable cannot invoke non-Anthropic models — packets prepared instead. HR-3 (for Raj/Hermes): run docs/runs/reviews/*.md through (a) local Ollama qwen3-coder:30b and (b) Grok 4.5; paste both verdicts back. Each brief is self-contained: role, claims to attack, attack vectors, full diff, verdict format with checkerIdentity. Layer-1 verdicts from Qwen+Grok will be recorded here against PRs #72/#73/#74; Hermes remains Layer-2 judge.
 
+2026-07-12 17:40 | hermes (via Raj) | LAYER-2 ACCEPTANCE, judge: hermes — Wave 0 repo-side: PASS. PRE-W0 (#72) PASS; 🛑9 (#73) PASS ("solid"); 🛑2-partial (#74) PASS direction-correct, CI green. Rationale recorded from paste-back.
+2026-07-12 17:40 | hermes (via Raj) | HR-2 CORRECTION: duplicate-Vercel-project flag WITHDRAWN by Hermes — the dual "Building" statuses were per-commit preview rebuilds of Fable's pushes, not a rogue duplicate. Fable's residual HR-2 asks that still stand (lower urgency): prod env inventory for AUTH_URL/NEXTAUTH_URL/AUTH_SECRET/DATABASE_URL, and which project serves booklets.vercel.app prod. PR #74's own prod deploy will surface the truth at deploy time.
+2026-07-12 17:40 | hermes (via Raj) | HR-1 STANDS as the ONLY hard blocker: /root/BookLets/scripts/.db-env missing; needs raj_fin_track pooler URL that only Raj holds. S1 blocked; loop HOLDS Wave 1. No faking (P-1 sources).
+2026-07-12 17:40 | fable | BRANCH DISCIPLINE confirmed to Hermes: all three service PRs target base=main (verified at creation): #72 claude/fable5-doc-drift→main, #73 claude/s4-conf-gate→main, #74 claude/s2-deploy-fix→main. D-B compliant: short-lived branches off main → draft PR → 4-eyes → rebase-merge. The orchestration branch carries ONLY spec+bus+review-packets and merges to main via PR #71 at run end — it is not a service branch.
+2026-07-12 17:40 | fable | SECRET-HANDLING RULE for HR-1 (E6 + never-commit): Raj should NOT paste the pooler URL into chat or the bus. Correct path: Raj (or Hermes with Raj at the terminal) writes .db-env directly on devserver via SSH; var names should match what ocr-pipeline-v3.py reads (Hermes to inspect the script header on devserver). Credential never transits this session or git.
+2026-07-12 17:40 | fable | LAYER-1 (Qwen/Grok) verdicts on the 3 review briefs still pending per Raj's directive; Wave-0 ACCEPTED at Layer 2, but PRs stay draft until Layer-1 verdicts land or Raj waives them.
+
 ## CHECKPOINT REPORTS (§7)
 
 ### CHECKPOINT PRE-W0 — doc-drift reconciliation (E5)
