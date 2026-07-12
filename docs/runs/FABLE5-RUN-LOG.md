@@ -274,3 +274,13 @@ Loop iteration results:
 **Merge-ready set (all on current main, all reviews clean): #74, #75, #76, #77, #79, #80, #81.** Recommended order: #74 → #81 → #76 → #80 → #75 → #77 → #79, with one known trivial cross-PR conflict: #76's automation.service keeps the service-identity literal that #81 replaces with AUTOMATION_MAKER_IDENTITY — whichever merges second needs a 1-line rebase (P1.4 gate will catch it if forgotten).
 
 **Prod status check (this iteration): health = 500 — HR-5 NOT yet applied; no Hermes report received since authorization (~20:25 UTC).** The read-only Supabase connector is currently erroring on permission streams; monitoring via the health endpoint instead. THE critical path is unchanged and entirely Hermes-side: HR-5 apply → health 200 → merges → HR-6 grant + OCR_BRIDGE_ORG_ID env → run bridge → 179 receipts in ledger → S6 review queue live.
+
+---
+
+## 2026-07-12 — 🏁 REVIEW CYCLE CLOSED: #76 ROUND 2 CLEAN — ALL 7 PRs MERGE-READY
+
+#76 round-2 findings (1 Major code: org scope on ledger entrypoints so preflight reads survive Phase-2 FORCE; 1 Major doc: BEGIN/COMMIT on runbook DDL; 3 minor test/doc) fixed @ 49377f8, 348/348 tests, CodeRabbit re-review: NO actionable comments.
+
+**FINAL REPO-SIDE STATE — nothing left for Fable to build in this wave.** Merge queue ready for HermesBot checks + approvals (post HR-5): #74 → #81 → #76 → #80 → #75 → #77 → #79. Known 1-line cross-PR rebase between #81/#76 (service-identity constant), P1.4 gate enforces it.
+
+**Blocking on humans, in order:** (1) Hermes: HR-5 execute + report (authorized ~20:25 UTC; health still 500 at last probe); (2) Raj/Hermes: merges; (3) Hermes: HR-6 grant + OCR_BRIDGE_ORG_ID env in Vercel; (4) Raj: Grok/GLM verdicts on review packet 2 (optional pre-HR-5 check, packet in docs/runs/reviews/); (5) Raj: CF3 + Wise sample files (unblocks S7/S8); (6) rotate the exposed sbp_ token (standing item). Loop continues monitoring health + PR events.
