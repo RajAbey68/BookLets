@@ -41,6 +41,10 @@ jobs:
       # approval actions enforce maker !== checker via assertNotSelfApproval.
       - name: "✅ P1.4: Segregation of Duties (maker ≠ checker)"
         run: |
+          # Primary signal: the behavioral suites that prove the invariant
+          # (session-derived maker/checker, self-approval rejected, automation
+          # identity constant). Greps below stay as a cheap secondary guard.
+          npx vitest run tests/unit/maker-identity.test.ts tests/unit/batch-approval-actions.test.ts || (echo "FAIL: SoD behavioral suites failing" && exit 1)
           grep -q 'export function assertNotSelfApproval' src/lib/approval.service.ts || (echo "FAIL: SoD rule (assertNotSelfApproval) missing" && exit 1)
           grep -q 'assertNotSelfApproval(' src/app/actions/approval.actions.ts || (echo "FAIL: approval actions do not enforce SoD" && exit 1)
           grep -q 'checkerIdentity: userId' src/app/actions/approval.actions.ts || (echo "FAIL: checker identity must come from the session user" && exit 1)
