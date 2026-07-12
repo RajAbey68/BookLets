@@ -84,8 +84,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ report });
   } catch (err) {
     if (err instanceof ZipIngestError) {
+      // CodeQL js/log-injection: interpolated values could carry
+      // attacker-influenced bytes; strip control chars so a crafted value
+      // cannot forge additional log lines.
+      const safe = (v: string) => String(v).replace(/[\r\n\u2028\u2029]/g, ' ').slice(0, 200);
       console.warn(
-        `[ingest/zip] rejected: ${err.code} org=${organizationId} bytes=${zipBuffer.length}`,
+        `[ingest/zip] rejected: ${safe(err.code)} org=${safe(organizationId)} bytes=${zipBuffer.length}`,
       );
       return NextResponse.json(
         { error: err.message, code: err.code },
