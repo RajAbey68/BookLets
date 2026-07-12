@@ -34,13 +34,17 @@ const EXTRACTION_BASE = {
   categorySuggestion: 'Groceries',
 };
 
-function mockDeps(confidence: number) {
+function mockDeps(
+  confidence: number,
+  opts: { extraction?: Partial<typeof EXTRACTION_BASE>; existingVendor?: boolean } = {},
+) {
   const postEntry = vi.fn().mockResolvedValue({ id: 'je-1' });
   const expenseCreate = vi.fn().mockResolvedValue({ id: 'exp-1' });
+  const vendorCreate = vi.fn().mockResolvedValue({ id: 'ven-new' });
 
   vi.doMock('../../src/lib/gemini-ocr', () => ({
     extractReceipt: vi.fn().mockResolvedValue({
-      extraction: { ...EXTRACTION_BASE, confidence },
+      extraction: { ...EXTRACTION_BASE, ...opts.extraction, confidence },
     }),
   }));
 
@@ -48,8 +52,12 @@ function mockDeps(confidence: number) {
     prisma: {
       property: { findFirst: vi.fn().mockResolvedValue({ id: 'prop-1' }) },
       vendor: {
-        findFirst: vi.fn().mockResolvedValue({ id: 'ven-1', name: 'Keells Super' }),
-        create: vi.fn(),
+        findFirst: vi
+          .fn()
+          .mockResolvedValue(
+            opts.existingVendor === false ? null : { id: 'ven-1', name: 'Keells Super' },
+          ),
+        create: vendorCreate,
       },
       account: {
         // Call order inside processReceipt: Suspense (9999) first, Bank (1000) second.
@@ -71,7 +79,7 @@ function mockDeps(confidence: number) {
   vi.doMock('../../src/lib/ledger.service', () => ({ LedgerService: { postEntry } }));
   vi.doMock('../../src/lib/http', () => ({ fetchWithTimeout: vi.fn() }));
 
-  return { postEntry, expenseCreate };
+  return { postEntry, expenseCreate, vendorCreate };
 }
 
 async function processReceiptWithConfidence(confidence: number) {
@@ -179,5 +187,52 @@ describe('AutomationService.processReceipt — OCR confidence gate (D3)', () => 
     const { entryInput, result } = await processReceiptWithConfidence(0.97);
     expect(entryInput.agentConfidence).toBe(0.97);
     expect(result.confidence).toBe(0.97);
+  });
+});
+
+// ─── Extraction sanity gates run BEFORE any persistent writes ────────────────
+// Vendor/category resolution happens outside the final $transaction, so a
+// failure after them would strand orphan rows. Both the confidence gate and
+// the amount check must therefore reject before the first create.
+
+describe('extraction sanity gates precede all side-effecting writes', () => {
+  beforeEach(() => vi.resetModules());
+
+  it('rejects a zero totalAmount (unparseable-amount normalisation) before any rows are created', async () => {
+    const { postEntry, expenseCreate, vendorCreate } = mockDeps(0.97, {
+      extraction: { totalAmount: 0 },
+      existingVendor: false,
+    });
+    const { AutomationService } = await import('../../src/lib/automation.service');
+    await expect(
+      AutomationService.processReceipt('org-1', 'prop-1', 'aW1hZ2U='),
+    ).rejects.toThrow(/non-positive total/);
+    expect(vendorCreate).not.toHaveBeenCalled();
+    expect(expenseCreate).not.toHaveBeenCalled();
+    expect(postEntry).not.toHaveBeenCalled();
+  });
+
+  it('rejects a negative totalAmount before any rows are created', async () => {
+    const { postEntry, vendorCreate } = mockDeps(0.97, {
+      extraction: { totalAmount: -125 },
+      existingVendor: false,
+    });
+    const { AutomationService } = await import('../../src/lib/automation.service');
+    await expect(
+      AutomationService.processReceipt('org-1', 'prop-1', 'aW1hZ2U='),
+    ).rejects.toThrow(/non-positive total/);
+    expect(vendorCreate).not.toHaveBeenCalled();
+    expect(postEntry).not.toHaveBeenCalled();
+  });
+
+  it('rejects an out-of-contract confidence before vendor/category writes (gate precedes side effects)', async () => {
+    const { postEntry, expenseCreate, vendorCreate } = mockDeps(1.5, { existingVendor: false });
+    const { AutomationService } = await import('../../src/lib/automation.service');
+    await expect(
+      AutomationService.processReceipt('org-1', 'prop-1', 'aW1hZ2U='),
+    ).rejects.toThrow(RangeError);
+    expect(vendorCreate).not.toHaveBeenCalled();
+    expect(expenseCreate).not.toHaveBeenCalled();
+    expect(postEntry).not.toHaveBeenCalled();
   });
 });

@@ -8,7 +8,9 @@ export interface AutomationResult {
   expenseId: string;
   journalEntryId: string;
   confidence: number;
-  status: 'SUCCESS' | 'HIL_REQUIRED';
+  // Automated extraction is always human-in-the-loop (D3): no SUCCESS
+  // status exists — DRAFT→POSTED happens only via 4-eyes sign-off.
+  status: 'HIL_REQUIRED';
 }
 
 export class AutomationService {
@@ -84,6 +86,25 @@ export class AutomationService {
       console.log(`[Middleware Agent] SymbiOS fallback succeeded — vendor="${vendorName}" confidence=${confidence}`);
     }
 
+    // D3 conf-gate: machine-extracted entries ALWAYS land as DRAFT — no
+    // confidence score (including exactly 1.0) authorises auto-posting.
+    // DRAFT→POSTED happens only via human 4-eyes sign-off in
+    // decideDraftJournalEntry. Runs BEFORE any writes: vendor/category
+    // resolution below can create persistent rows outside the transaction,
+    // so an out-of-contract confidence (NaN / outside [0, 1]) must fail here.
+    const gate = gateAutomatedJournalEntry(confidence);
+
+    // A missing/unparseable amount is normalised to 0 by extraction. The
+    // zero-amount-line check in LedgerService only guards POSTED entries,
+    // so a zero-value DRAFT could later be approved into the ledger.
+    // Reject it up front — the receipt needs re-scanning or manual entry.
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+      throw new Error(
+        `Extraction returned a non-positive total (${totalAmount}) for vendor "${vendorName}" — ` +
+        'cannot create a journal draft without a real amount. Re-scan the receipt or enter it manually.'
+      );
+    }
+
     // 2. Resolve/Create Vendor
     let vendor = await prisma.vendor.findFirst({
       where: { name: { contains: vendorName } }
@@ -126,13 +147,6 @@ export class AutomationService {
       (await prisma.account.findFirst({ where: { organizationId, code: '1000' } })) ??
       (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
     const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
-
-    // D3 conf-gate: machine-extracted entries ALWAYS land as DRAFT — no
-    // confidence score (including exactly 1.0) authorises auto-posting.
-    // DRAFT→POSTED happens only via human 4-eyes sign-off in
-    // decideDraftJournalEntry. Also fails loudly on an out-of-contract
-    // confidence (NaN / outside [0, 1]) before any rows are created.
-    const gate = gateAutomatedJournalEntry(confidence);
 
     // 4. Record the Expense and Journal Entry
     return await prisma.$transaction(async (tx) => {
