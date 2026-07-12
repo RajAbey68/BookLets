@@ -91,6 +91,23 @@ joining this repo should read it before claiming scope here.
 - See PR #5 description. Draft. Rebased on `main` after PR #3 + PR #8
   landed. No further conflicts expected.
 
+### fable5-builder-doc-drift (claude/fable5-doc-drift) — doc-drift reconciliation
+- **Started:** 2026-07-12
+- **Goal:** Conservative, factual doc corrections only (FABLE5 pre-Wave-0
+  E5): fix the false "no automated tests" claim in
+  `docs/BRIEFING_FOR_OTHER_SERVICES.md` (24 Vitest suites exist), annotate
+  the stale `bbcf03b` baseline / PR #2 / PR #5 references, and mark
+  RAJ-277…296 roadmap issues done in `ROADMAP.md` where git history proves
+  a merge to `main`.
+- **Touching:**
+  - `docs/BRIEFING_FOR_OTHER_SERVICES.md`
+  - `ROADMAP.md`
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:** all source code, schema, CI workflows, tests.
+- **Out of scope:** restructuring either doc; verifying Linear issue
+  states in Linear itself; RAJ-277/278/280/293 (no git evidence — left
+  open).
+
 ## Recently completed
 
 - **PR #8 (merged 2026-05-10, `main` @ bbcf03b)** — Carve-out from PR #2:
