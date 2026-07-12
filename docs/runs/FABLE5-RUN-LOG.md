@@ -206,3 +206,9 @@ Hermes (restarted session, now bus-synced) proposed: (1) execute HR-5 on Raj's e
    - **idempotencyKey:** `'ocr-receipt:'+source_file` (namespaced against zip-ingest's content-addressed keys), not bare source_file.
    - **Sizing:** postable-now = 179, not "all success rows" (357) — buckets in contract §2. Hermes's dup-source concern verified clean: distinct source_file == success rows.
    - New Hermes data noted: raj_fin_track.expenses=0, financial_events=9, entities=1 — bridge reads ocr_receipts only; those tables stay out of scope for S1b v1.
+
+---
+
+## 2026-07-12 — EXTERNAL REVIEW PACKET №2 ISSUED (Grok 4.5 + GLM 5.2, Raj-mediated)
+
+Raj requested third-party adversarial review before HR-5 executes. Fable cannot invoke non-Anthropic models (E3); packet method as before. `docs/runs/reviews/EXTERNAL-REVIEW-PACKET-2-hr5-s1b.md` is self-contained: verified context, the verbatim HR-5 DDL, the S1b contract summary, the sequencing claim, nine specific attack vectors (E1–E9: enum-cast concurrency, NULL-uniqueness semantics, baseline/reality divergence, date-fabrication ethics, stale-idempotency on OCR correction runs, index locking, ordering), and a required verdict format. Raj pastes to both models; verdicts paste back to the bus as Layer-1 external review. HR-5 execution remains gated on Raj's explicit GO — the packet review can run in parallel with his decision or inform it, his call.
