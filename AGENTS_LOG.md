@@ -87,6 +87,44 @@ joining this repo should read it before claiming scope here.
   values (AUTH_URL/NEXTAUTH_URL/AUTH_SECRET/DATABASE_URL) and runtime
   logs; PgBouncer `options` startup-parameter support for the
   `search_path` (only verifiable against the live pooler).
+### fable5-builder-s5 (claude/s5-zip-ingest) — S5/M4 WhatsApp export zip ingestion
+- **Started:** 2026-07-12
+- **Goal:** POST `/api/ingest/zip` — auth-gated (session org via
+  `resolveActiveContext`, never client input) ingestion of WhatsApp
+  finance/petty-cash export zips (~517 files: chat text + receipt
+  images). Security guards run before any OCR spend: 1000-entry cap,
+  200 MB uncompressed cap (declared AND actual inflated bytes), path
+  traversal (`../`, absolute, backslash, drive-letter), per-entry
+  zip-bomb ratio guard (100x above a 64 KB floor), extension allowlist
+  (jpg/jpeg/png/webp/heic + .txt) with per-entry skip reasons, plus
+  magic-byte re-validation reusing `upload-guard`. OCR fan-out capped
+  at 5 concurrent via the existing `gemini-ocr` module. Every journal
+  entry is created DRAFT via `LedgerService.postEntry` —
+  `gateAutomatedJournalEntry` (S4) is not on main, so DRAFT-only is
+  enforced by the named constant `ZIP_INGEST_JOURNAL_STATUS`.
+  Idempotency: content-addressed key per entry
+  (`sha256('zip-ingest' NUL orgId NUL sha256(entryBytes))`,
+  date-independent) written to `JournalEntry.idempotencyKey` so S11 can
+  adopt it; app-level pre-check skips OCR on re-upload, DB unique
+  constraint backstops races. Chat text parsed lightly and retained as
+  hash-chained evidence (`ZIP_CHAT_INGESTED` / `ZIP_INGEST_COMPLETED`).
+  Strict TDD: RED (module-not-found on both suites) → GREEN
+  (34 new tests; 281 total). No live DB/OCR in tests — all IO injected
+  via `ZipIngestDeps`.
+- **Touching:**
+  - `src/lib/zip-ingest.ts` (new — pure core: guards, split, hash keys, fan-out)
+  - `src/lib/zip-ingest.deps.ts` (new — prisma/gemini-ocr/LedgerService wiring)
+  - `src/app/api/ingest/zip/route.ts` (new — POST route handler)
+  - `tests/unit/zip-ingest.test.ts`, `tests/unit/zip-ingest-route.test.ts` (new)
+  - `package.json` / `package-lock.json` (add `adm-zip`, `@types/adm-zip`)
+- **NOT touching:**
+  - `src/lib/gemini-ocr.ts`, `src/lib/upload-guard.ts`, `src/lib/ledger.service.ts`,
+    `src/lib/approval.service.ts`, `src/lib/automation.service.ts` (reused as-is)
+  - `prisma/schema.prisma`, middleware, auth, UI components
+- **Out of scope:** devserver end-to-end run with the real 517-file zip
+  (checkpoint 4); per-org rate limiting on this route; category→account
+  mapping for drafts (drafts debit Suspense 9999, reclassified at
+  four-eyes review); S11 DB-level idempotency adoption.
 
 ### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
 - **Started:** 2026-05-13
