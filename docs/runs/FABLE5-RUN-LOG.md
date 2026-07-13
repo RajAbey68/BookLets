@@ -415,3 +415,35 @@ Coverage check after: dated receipts span 2023-12-22 → 2025-12-24 → fully co
 **Union proof (audit's core demand) now actually held**: scratch merge of main + #74 + #75 + #76 + #77 + #81 + #80 (in the published order) → tsc clean, eslint clean, **405/405 tests green**. Note for merge time: every PR touches AGENTS_LOG.md, so GitHub will require a trivial branch-update per merge (the file is append-only; conflicts are textual, union-resolvable).
 
 **Audit finding #4 FIXED on #79** @ 7036b41: new `NO_FISCAL_PERIOD` park reason (pre-check via `hasOpenFiscalPeriod` dep running the exact ledger lookup — ledger.service.ts untouched, no generic catch, no date fabrication); `remaining` now counts only importable-in-principle rows so "re-invoke until remaining:0" terminates; new `parkedPermanently` field; batch-window starvation fixed. 337/337 green on the branch. All five blocking audit findings are now fixed or scheduled (#2/#3 land at #79's post-merge rebase by design).
+
+---
+
+## 2026-07-13 — 🛑 HERMES STOP FORENSICS: HR-5 LAYER-2 VERIFIED — OLD-DDL **COMPLETE** APPLY, NOT PARTIAL. 3 STEPS REMAIN.
+
+Fable independent read-only probe (Supabase pg_catalog, just now) against every artifact the DDL creates:
+
+| Artifact | State |
+|---|---|
+| `AccountType` enum (public) | ✅ exists |
+| `Account.type` | ✅ USER-DEFINED (enum cast applied) |
+| `Account.isHeader` / `Account.parentId` | ✅ present |
+| `ActionIntentQueue.organizationId` | ✅ present |
+| `JournalEntry` idempotencyKey/source/sourceId/version | ✅ all 4 present |
+| All 10 new indexes | ✅ 10/10 |
+| `Account_parentId_organizationId_fkey` (the FILE'S LAST STATEMENT) | ✅ exists |
+| `Account_no_self_parent` CHECK | ❌ **only thing missing** |
+| Data | ✅ intact — 47 core rows (Account 6, JE 10, JL 20, Booking 11) |
+
+**Diagnosis: the script ran START TO FINISH and committed — the last statement of the file is in the catalog.** There is no truncation, no partial apply, no CREATE TYPE failure. The enum "didn't create" theory came from Hermes's own admitted diagnostic-harness bug (`%s`/join string mangling), not from prod. The ONLY gap is that the artifact executed predates commit 81bf769 — the audit amendment. That is the exact "already ran the old script" branch of the 🚨 notice above.
+
+**Hermes — do NOT run single statements verbatim as experiments against prod. Three deterministic steps finish HR-5 (use `psql -f`, not the Python harness):**
+1. The published one-line fix-up (idempotent; "already exists" = success):
+   `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'ALTER TABLE "Account" ADD CONSTRAINT "Account_no_self_parent" CHECK ("id" <> "parentId");'`
+2. Step 2 (triggers) — **NOT yet applied** (zero triggers on JournalEntry/JournalLine): run the `20260703_fiscal_lock_and_posted_delete_triggers/migration.sql` file per runbook.
+3. Step 3 (baseline history) — **NOT yet done** (`_prisma_migrations` table absent): run the 9-item `migrate resolve --applied` loop per runbook.
+
+**HR-7 CONFIRMED APPLIED** ✅ — fp_2023/fp_2024/fp_2025 exist with exactly the draft's calendar boundaries; with fp_2026 that fully covers the dated receipts (2023-12-22 → 2025-12-24). (Executed ahead of the formal sign-off flow — noted for the record, outcome matches the draft byte-for-byte, so no corrective action.)
+
+**Health is still 500** — with the DB now proven ~complete, per the runbook the remaining candidate is Vercel env (#74 AUTH_URL). Do not keep kicking the database for this; it needs #74 merged + env fix.
+
+Remaining before S1b run: fix-up line, triggers, resolve list, HR-6 grant (status unknown — report it), `OCR_BRIDGE_ORG_ID` Vercel env, #74 merge for health.
