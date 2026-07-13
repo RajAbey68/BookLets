@@ -25,6 +25,35 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### fable5-builder-e5 (claude/e5-maker-identity) — session-derived maker identity + re-enable P1.4 SoD gate
+- **Started:** 2026-07-12
+- **Goal:** Close mandate E5. Human-initiated ledger writes already thread
+  the session user id as `makerIdentity` (manual journal form, booking
+  form, manual sync, approval checkers); this PR removes the last inlined
+  `'booklets-automation-service'` literals by exporting
+  `AUTOMATION_MAKER_IDENTITY` from `src/lib/maker-identity.ts` (automated
+  OCR pipeline keeps the service identity — correctly, since its entries
+  are always DRAFT and only a distinct human can promote them), and
+  re-enables the P1.4 Segregation-of-Duties gate in CI. P1.4 had never
+  been implemented (added as a placeholder comment in the original
+  workflow, "disabled until a separate PR wires session-based identity");
+  that prerequisite landed with the auth/session refactor, so the gate now
+  verifies: `assertNotSelfApproval` exists and is enforced in the approval
+  actions, checker identity comes from the session, manual entries carry
+  the session user as maker, and no service-identity literal exists
+  outside the shared constant.
+- **Touching:**
+  - `src/lib/maker-identity.ts` (new — single home for the constant)
+  - `src/lib/automation.service.ts` (use the constant, both call sites)
+  - `.github/workflows/p1-governance.yml` (re-enable P1.4)
+  - `tests/unit/maker-identity.test.ts` (new), `tests/unit/batch-approval-actions.test.ts` (fixture uses the constant)
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:** ledger/revenue/approval services, server actions,
+  schema, other workflows.
+- **Out of scope:** `'system'` fallback identities inside
+  `LedgerService` evidence records (legacy/system-initiated calls);
+  Membership admin UI.
+
 ### fable5-builder-s4 (claude/s4-conf-gate) — OCR confidence gate (defect D3): automated entries always DRAFT
 - **Started:** 2026-07-12
 - **Goal:** Close defect D3 (FABLE5 spec, service S4 "conf-gate" / M9):

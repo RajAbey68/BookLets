@@ -18,6 +18,7 @@
  *    touching the database.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AUTOMATION_MAKER_IDENTITY } from '../../src/lib/maker-identity';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -31,7 +32,7 @@ const baseEntry = {
   status: 'DRAFT',
   date: new Date('2026-06-15T00:00:00Z'),
   memo: 'AUTOMATED: Receipt for Colombo Hardware',
-  makerIdentity: 'booklets-automation-service',
+  makerIdentity: AUTOMATION_MAKER_IDENTITY,
   createdBy: null,
   version: 1,
   lines: balancedLines,
