@@ -40,6 +40,7 @@ function mockManualEntryDeps(userId: string) {
         findMany: vi.fn().mockResolvedValue([{ id: 'acc-1' }, { id: 'acc-2' }]),
       },
     },
+    setRlsOrgContext: vi.fn(),
   }));
   vi.doMock('../../src/lib/auth-context', () => ({
     resolveActiveContext: vi.fn().mockResolvedValue({
@@ -127,6 +128,7 @@ function mockReceiptDeps() {
         fn({ expense: { create: vi.fn().mockResolvedValue({ id: 'exp-1' }) } }),
       ),
     },
+    setRlsOrgContext: vi.fn(),
   }));
   vi.doMock('../../src/lib/ledger.service', () => ({ LedgerService: { postEntry } }));
   vi.doMock('../../src/lib/http', () => ({ fetchWithTimeout: vi.fn() }));
