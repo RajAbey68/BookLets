@@ -567,3 +567,17 @@ CodeRabbit re-reviewed the whole union (45 files together) and raised 5 actionab
 7. `review/page.tsx` use REVIEW_QUEUE_CAP not literal 100; `ocr-bridge.deps.ts` drop hardcoded `public.` qualifier to follow search_path.
 
 These map cleanly onto the existing S3 Phase-2 (FORCE RLS) rollout doc — items 1–4 become its pre-flip checklist. **The merge blocker is unchanged and separate: the stale branch-protection required-checks config (see prior entry) — awaiting Raj's call on how to fix it.**
+
+---
+
+## 2026-07-13 — S11 BUILT: SANDBOX/BOOKS TWO-TAB WEB UI (Raj's no-IDE upload workflow) — branch pushed, 487/487
+
+Raj's request: stop uploading via Claude Code/Hermes; do everything in the web app — sandbox ("crap") upload+review, consensus, feed into books, then tab to Books. Built on `claude/s11-sandbox-books-ui` @ 61e05f9 (based on union-audit-proof so it lands cleanly after #82):
+
+- **/sandbox**: zip upload card (raw-bytes POST to /api/ingest/zip, clear 401/403/413 messages, 100MB pre-check) → staging-pile summary (new read-only `summarizeOcrStaging` — importable / parked with plain-English reasons / already imported / total; fail-closed on OCR_BRIDGE_ORG_ID like the route; degrades to "staging unavailable", never crashes) → **"Feed into books"** button (POST /api/ingest/ocr-bridge, plain-English OcrBridgeSummary) → consensus queue (reuses the existing DraftReviewQueue + decide actions).
+- **/books**: POSTED entries grouped by month (newest 6 months, truncation note), FiscalPeriod name + Open/Closed badge per month, vendor-ish column parsed from the three known memo formats.
+- Sidebar: Sandbox + Books nav items. No schema/ledger.service changes; no raj_fin_track writes; P1.4 gate clean.
+- Gates: tsc ✅ eslint ✅ vitest **487/487** (466 + 21 new).
+- PR deliberately NOT opened until #82 merges (else the diff double-counts the union). 
+
+Still blocking the canonical URL: the stale branch-protection required-checks config — one-line admin API call published to Raj (DELETE required_status_checks; review protection stays; correct check names re-added after).
