@@ -447,3 +447,16 @@ Fable independent read-only probe (Supabase pg_catalog, just now) against every 
 **Health is still 500** — with the DB now proven ~complete, per the runbook the remaining candidate is Vercel env (#74 AUTH_URL). Do not keep kicking the database for this; it needs #74 merged + env fix.
 
 Remaining before S1b run: fix-up line, triggers, resolve list, HR-6 grant (status unknown — report it), `OCR_BRIDGE_ORG_ID` Vercel env, #74 merge for health.
+
+---
+
+## 2026-07-13 — AUDIT FINDINGS #2 & #3 PRE-STAGED WITH PROOF: FULL 7-PR UNION GREEN (466/466)
+
+The #79-onto-union merge was rehearsed in an isolated scratch worktree (nothing pushed to any PR branch). Results:
+
+- **Only ONE conflict materialized**: `src/lib/ledger.service.ts` (as the audit predicted). Resolution keeps BOTH sides whole: #76's RLS delegate pattern (`runWithOrgContext` → `postEntryScoped`, `setRlsOrgContext` inside the persist delegate, `checkFiscalPeriod` via `tx ?? prisma`, tx-reuse P2002 rethrow) AND #79's `postEntryWithOutcome` `{entry, created}` TOCTOU split + line currency. `postEntry` survives as a thin `.entry` wrapper, so both sides' callers keep their contracts.
+- **Finding #3 fix**: `OCR_BRIDGE_MAKER` now assigned from `AUTOMATION_MAKER_IDENTITY` import (export name/value unchanged). The REAL P1.4 gate from `.github/workflows/p1-governance.yml` was simulated against the resolved tree: **PASS** (its grep scopes to `src/` only; test literals assert the value and are out of scope). P1.5 EvidenceLog grep: PASS.
+- **Gates on the full 7-PR union**: tsc clean, eslint clean, **vitest 466/466** (union baseline 405 + #79's 61).
+- **Artifact**: `docs/runs/patches/s1b-rebase-prestage.patch` (git diff of the resolution, 9 files) — when #76/#81/#80 merge, the #79 rebase is a mechanical apply of this reviewed patch instead of a live conflict scramble. Sha256 in the commit.
+
+Audit scoreboard: all 5 blocking findings now FIXED (#1 union-proofed 405/405, #4 @ 7036b41 337/337, #5 @ 81bf769) or PRE-STAGED WITH PASSING PROOF (#2, #3 — this entry). CodeRabbit re-reviews: #80 and #81 came back with zero actionable comments; #79's run is in flight.
