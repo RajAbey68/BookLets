@@ -11,6 +11,11 @@ export interface JournalLineInput {
   amount: Decimal | number | string;
   isDebit: boolean;
   memo?: string;
+  /**
+   * ISO currency code for the line (S1b: 'LKR'). Optional — omitted lines
+   * keep the schema default.
+   */
+  currency?: string;
 }
 
 export interface JournalEntryInput {
@@ -22,7 +27,9 @@ export interface JournalEntryInput {
   // 4-Eyes governance metadata (optional — populated by automated agents)
   makerIdentity?: string;
   tenantId?: string;
-  agentConfidence?: number;
+  // Nullable so automated sources without a usable score record an explicit
+  // NULL in the audit trail (S1b) rather than a fabricated number.
+  agentConfidence?: number | null;
   // RAJ-284 idempotency. Supply either a precomputed `idempotencyKey`, or a
   // `source` + `sourceId` pair from which the key is derived (recommended).
   idempotencyKey?: string;

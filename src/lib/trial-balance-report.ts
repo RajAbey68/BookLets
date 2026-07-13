@@ -1,5 +1,6 @@
 import { prisma } from './prisma';
 import { resolveActiveContext } from './auth-context';
+import { runWithOrgContext } from './org-context';
 import { computeTrialBalance, type TrialBalance } from './trial-balance';
 
 /**
@@ -38,7 +39,10 @@ export async function getTrialBalanceReport(period?: string): Promise<TrialBalan
 
   const { organizationId, organizationName } = resolved.context;
 
-  const [accounts, lines] = await Promise.all([
+  // S3 (rls-lock) exemplar: queries below run inside an org context, so the
+  // rls-org-context Prisma extension sets `app.current_org_id` per operation
+  // and the row-level-security policies scope every read to this org.
+  const [accounts, lines] = await runWithOrgContext(organizationId, () => Promise.all([
     prisma.account.findMany({
       where: { organizationId },
       select: { id: true, name: true, code: true, type: true },
@@ -52,7 +56,7 @@ export async function getTrialBalanceReport(period?: string): Promise<TrialBalan
         journalEntry: { select: { date: true } },
       },
     }),
-  ]);
+  ]));
 
   // Period options derived from the actual posting months, newest first.
   const monthLabels = new Map<string, string>();

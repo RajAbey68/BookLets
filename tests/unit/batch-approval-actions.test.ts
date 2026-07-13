@@ -18,6 +18,7 @@
  *    touching the database.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { AUTOMATION_MAKER_IDENTITY } from '../../src/lib/maker-identity';
 
 type AnyRecord = Record<string, unknown>;
 
@@ -31,7 +32,7 @@ const baseEntry = {
   status: 'DRAFT',
   date: new Date('2026-06-15T00:00:00Z'),
   memo: 'AUTOMATED: Receipt for Colombo Hardware',
-  makerIdentity: 'booklets-automation-service',
+  makerIdentity: AUTOMATION_MAKER_IDENTITY,
   createdBy: null,
   version: 1,
   lines: balancedLines,
@@ -102,7 +103,7 @@ function setup(overrides: SetupOverrides = {}) {
     $transaction: vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx)),
   };
 
-  vi.doMock('../../src/lib/prisma', () => ({ prisma }));
+  vi.doMock('../../src/lib/prisma', () => ({ prisma, setRlsOrgContext: vi.fn().mockResolvedValue(undefined) }));
   vi.doMock('../../src/lib/auth-context', () => ({
     resolveActiveContext: vi.fn().mockResolvedValue(
       overrides.unauthenticated

@@ -1,6 +1,7 @@
-import { prisma } from './prisma';
+import { prisma, setRlsOrgContext } from './prisma';
 import { LedgerService } from './ledger.service';
 import { gateAutomatedJournalEntry } from './approval.service';
+import { AUTOMATION_MAKER_IDENTITY } from './maker-identity';
 import { fetchWithTimeout } from './http';
 import { extractReceipt } from './gemini-ocr';
 
@@ -64,7 +65,7 @@ export class AutomationService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-maker-identity': 'booklets-automation-service',
+          'x-maker-identity': AUTOMATION_MAKER_IDENTITY,
           'x-tenant-id': organizationId,
           'x-agent-confidence': '1.0',
         },
@@ -148,8 +149,13 @@ export class AutomationService {
       (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
     const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
 
-    // 4. Record the Expense and Journal Entry
+    // 4. Record the Expense and Journal Entry — ONE transaction: the expense
+    // row and the journal entry commit or roll back together (postEntry is
+    // handed this tx below instead of opening its own).
     return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context — explicit org id
+      // (review finding #1: never rely on an ambient scope being open).
+      await setRlsOrgContext(tx, organizationId);
       // Create Expense Record
       const expense = await tx.expense.create({
         data: {
@@ -166,20 +172,27 @@ export class AutomationService {
       // Create Ledger Entry — ALWAYS DRAFT for automated extraction (D3).
       // The confidence score is recorded for the audit trail but never
       // decides the status; see gateAutomatedJournalEntry.
+      // The open transaction client is passed through (review finding #2):
+      // postEntry writes inside THIS transaction, making expense + journal
+      // entry atomic and reusing the RLS org context set above.
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
         memo: `AUTOMATED: Receipt for ${vendorName}`,
         status: gate.status,
-        // 4-Eyes governance metadata passed through for audit trail
-        makerIdentity: 'booklets-automation-service',
+        // 4-Eyes governance metadata passed through for audit trail.
+        // E5: the OCR pipeline is an AUTOMATED maker — the service
+        // identity is correct here (the uploading user did not author the
+        // extracted figures). Human-initiated paths pass the session
+        // user id instead; see src/lib/maker-identity.ts.
+        makerIdentity: AUTOMATION_MAKER_IDENTITY,
         tenantId: organizationId,
         agentConfidence: confidence,
         lines: [
           { accountId: expenseAccountId, amount: totalAmount, isDebit: true },
           { accountId: bankAccountId, amount: totalAmount, isDebit: false },
         ]
-      });
+      }, tx);
 
       return {
         expenseId: expense.id,
