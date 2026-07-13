@@ -327,3 +327,33 @@ The independent adversarial audit found the DDL was missing the `Account_no_self
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'ALTER TABLE "Account" ADD CONSTRAINT "Account_no_self_parent" CHECK ("id" <> "parentId");'
 ```
 (If it errors with "already exists", that is success.)
+
+---
+
+## 2026-07-13 — INDEPENDENT ADVERSARIAL AUDIT: VERDICT FAIL — "ALL 7 MERGE-READY" CLAIM RETRACTED
+
+Raj asked for a third-party critical-thinking adversarial review. A fresh-context auditor (no access to this session's reasoning, repo + PRs only) returned **VERDICT: FAIL** against the headline claim in the earlier "review-cycle complete" entry. That claim — *"all 7 PRs merge-ready, remaining blockers are human-side only"* — **is hereby RETRACTED**. Two findings were real code defects and two were merge-order landmines. Full findings and current status:
+
+### Blocking findings
+1. **Merged union of the PRs was RED** — once #76 lands, `src/lib/prisma` exports `setRlsOrgContext` and the ledger delegates call it; #81's `tests/unit/maker-identity.test.ts` (2 doMock sites) and #80's `tests/unit/review-page-actions.test.ts` mocked the module without that export → `No "setRlsOrgContext" export is defined` in the merged tree. **FIXED**: #81 @ dfe1100, #80 @ eec8a05 (mock-only, no production changes; both branches re-verified green — 283/283 and 282/282).
+2. **#79 × #76 conflict in `src/lib/ledger.service.ts`** — competing `postEntry` refactors (RLS `runWithOrgContext`/`postEntryScoped` vs S1b's `postEntryWithOutcome` TOCTOU split). Not auto-mergeable. **OPEN — resolution is the merge-order plan below.**
+3. **#79 trips #81's P1.4 gate** — `src/lib/ocr-bridge.ts` declares `OCR_BRIDGE_MAKER = 'booklets-automation-service'` as a literal; #81's CI grep forbids that literal outside `maker-identity.ts`. **OPEN — fixed during #79's post-merge rebase (import `AUTOMATION_MAKER_IDENTITY`).**
+4. **S1b strands rows in prod** — only `fp_2026` exists; `postEntry` throws for any doc_date outside 2026, and such rows stayed in `remaining` forever, so "re-invoke until remaining:0" never terminates. **IN PROGRESS**: new `NO_FISCAL_PERIOD` parking reason (no date fabrication) + `remaining` excludes permanently-parked rows; contract §5 gains prerequisite 4 (FiscalPeriod coverage). Agent dispatched on #79.
+5. **Baseline DDL missed the `Account_no_self_parent` CHECK** (`prisma migrate diff` doesn't model CHECK constraints). **FIXED** @ 81bf769; new artifact sha256 `3699905…` — see the 🚨 Hermes notice above.
+
+### Mandatory merge order (supersedes any earlier "merge in any order")
+1. #74 (deploy fix — unblocks prod 200), #75, #77 — independent, any order.
+2. **#76 (RLS) before #81 and #80.**
+3. #81 (maker identity + P1.4 gate), then #80.
+4. **#79 strictly LAST**: rebase onto main after #76+#81, reconcile `postEntry` (keep `runWithOrgContext`/`postEntryScoped` AND `postEntryWithOutcome` {entry, created}), swap the maker literal for the #81 import, re-run CodeRabbit, then flip from draft.
+
+### Non-blocking audit notes (tracked, not gating)
+- HR-5 runbook: B-hardened pooler entry supersedes the older "DIRECT (5432)" wording in the DDL header — the atomicity analysis stands.
+- After #76 merges, `20260712_rls_org_isolation` must be added to the `migrate resolve --applied` list (it is NOT in the current 9-migration loop Hermes has).
+- Duplicate `source_file` values in `ocr_receipts` map to one idempotencyKey → second row reports `replayed`, invisible in the summary. Acceptable for S1 (idempotency is the point) — noted for the acceptance-evidence reconciliation in contract §6.
+- `ensureVendor` lookup isn't org-scoped (pre-existing, cross-org name collision only) — backlog.
+- #79/#80/#81 remain drafts until their gates above pass.
+- S7 (CF3) / S8 (Wise) / S9 remain ZERO code — unchanged, awaiting sample files from Raj.
+- Backup commit ccbf483 shows author "audit <audit@local>" — a config side-effect of the audit sandbox, content verified intact; repo config restored.
+
+Lesson recorded: "CodeRabbit findings addressed" ≠ "merge-ready". Merge-readiness claims now require a merged-union test run, not per-branch green.
