@@ -49,8 +49,10 @@ export class HostawayService {
       if (isProd || isStrict) {
         throw new Error('[HostawayService] CRITICAL: Failed to retrieve Hostaway OAuth token. Check HOSTAWAY_CLIENT_ID and HOSTAWAY_CLIENT_SECRET.');
       }
-      console.warn('[HostawayService] No API credentials found. Using mock reservations (Dev Mode).');
-      return this.getMockReservations();
+      // No mock fallback: without credentials there are simply no reservations
+      // to sync. Never fabricate data that could reach the ledger.
+      console.warn('[HostawayService] No API credentials found — returning no reservations (Dev Mode).');
+      return [];
     }
 
     try {
@@ -75,7 +77,8 @@ export class HostawayService {
       const message = err instanceof Error ? err.message : String(err);
       console.error('[HostawayService] API Call Failed:', message);
       if (isProd || isStrict) throw err; // Bubble up in production or strict mode
-      return this.getMockReservations();
+      // Dev: surface the failure as an empty result, never as fabricated data.
+      return [];
     }
   }
 
@@ -137,43 +140,6 @@ export class HostawayService {
       console.error('[HostawayService] OAuth2 Token Error:', err);
       return null;
     }
-  }
-
-  /**
-   * Mocks the Hostaway response for development and verification.
-   */
-  private static getMockReservations(): HostawayReservation[] {
-    const today = new Date();
-    const lastWeek = new Date(today);
-    lastWeek.setDate(today.getDate() - 7);
-    
-    const nextWeek = new Date(today);
-    nextWeek.setDate(today.getDate() + 7);
-
-    return [
-      {
-        id: 1001,
-        listingId: 501,
-        checkInDate: lastWeek.toISOString().split('T')[0],
-        checkOutDate: today.toISOString().split('T')[0], // Checked out TODAY
-        totalPrice: 1200.00,
-        status: 'confirmed',
-        guestName: 'John Doe',
-        channelName: 'Airbnb',
-        currency: 'EUR'
-      },
-      {
-        id: 1002,
-        listingId: 501,
-        checkInDate: today.toISOString().split('T')[0],
-        checkOutDate: nextWeek.toISOString().split('T')[0], // Active Booking
-        totalPrice: 850.00,
-        status: 'confirmed',
-        guestName: 'Jane Smith',
-        channelName: 'Booking.com',
-        currency: 'EUR'
-      }
-    ];
   }
 
   /**
