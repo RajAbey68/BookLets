@@ -168,8 +168,31 @@ export class LedgerService {
    * a unique-constraint violation aborts the CALLER's transaction at the
    * database level, so the conflict is rethrown for the caller to retry at
    * its own transaction boundary.
+   *
+   * Callers that need to know WHICH of those happened (new row vs idempotent
+   * replay) should use {@link postEntryWithOutcome}; this method keeps the
+   * historical entry-only return shape for existing call sites.
    */
   static async postEntry(input: JournalEntryInput, tx?: LedgerTransactionClient) {
+    return (await this.postEntryWithOutcome(input, tx)).entry;
+  }
+
+  /**
+   * Same semantics as {@link postEntry}, but also reports the outcome:
+   * `created` is false when the idempotency key already had a persisted entry
+   * — whether that was caught by the fast-path pre-check or by recovering
+   * from a lost concurrent race (P2002) inside the transaction. This lets
+   * callers (e.g. the S1b OCR bridge) count idempotent replays and race
+   * losers as skips instead of misreporting them as newly posted.
+   *
+   * Accepts the same optional `tx` transaction-reuse client as
+   * {@link postEntry}; in reuse mode a P2002 race is rethrown (see above), so
+   * `created: false` there can only come from the fast-path pre-check.
+   */
+  static async postEntryWithOutcome(
+    input: JournalEntryInput,
+    tx?: LedgerTransactionClient,
+  ): Promise<{ entry: Prisma.JournalEntryGetPayload<{ include: { lines: true } }>; created: boolean }> {
     // S3 (rls-lock): open the org scope for the WHOLE call so the preflight
     // reads below (idempotency fast path, fiscal-period check) that may run
     // on the bare client are RLS-scoped too — without this they would fail
@@ -177,7 +200,10 @@ export class LedgerService {
     return runWithOrgContext(input.organizationId, () => this.postEntryScoped(input, tx));
   }
 
-  private static async postEntryScoped(input: JournalEntryInput, tx?: LedgerTransactionClient) {
+  private static async postEntryScoped(
+    input: JournalEntryInput,
+    tx?: LedgerTransactionClient,
+  ): Promise<{ entry: Prisma.JournalEntryGetPayload<{ include: { lines: true } }>; created: boolean }> {
     const {
       organizationId,
       date,
@@ -205,7 +231,7 @@ export class LedgerService {
         where: { organizationId, idempotencyKey },
         include: { lines: true },
       });
-      if (existing) return existing;
+      if (existing) return { entry: existing, created: false };
     }
 
     // 1. Strict Validation for POSTED entries
@@ -252,6 +278,9 @@ export class LedgerService {
               accountId: line.accountId,
               amount: new Decimal(line.amount.toString()), // keep as Decimal — do NOT call .toNumber() (loses precision)
               isDebit: line.isDebit,
+              // Optional per-line currency (S1b posts LKR); undefined keeps
+              // the schema default.
+              currency: line.currency,
             }))
           }
         },
@@ -289,12 +318,13 @@ export class LedgerService {
     // returning the winner would let the caller keep writing on a doomed tx;
     // the conflict must surface at the caller's transaction boundary.
     if (tx) {
-      return await persist(tx);
+      return { entry: await persist(tx), created: true };
     }
 
     // 3b. Own transaction — entry + evidence row succeed or fail together.
     try {
-      return await prisma.$transaction(async (txc) => persist(txc));
+      const entry = await prisma.$transaction(async (txc) => persist(txc));
+      return { entry, created: true };
     } catch (err) {
       // Lost an idempotency race: a concurrent POST with the same key won and
       // tripped the unique constraint. The winner is now persisted — return it
@@ -304,7 +334,7 @@ export class LedgerService {
           where: { organizationId, idempotencyKey },
           include: { lines: true },
         });
-        if (existing) return existing;
+        if (existing) return { entry: existing, created: false };
       }
       throw err;
     }
