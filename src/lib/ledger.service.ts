@@ -1,7 +1,8 @@
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Prisma } from '@prisma/client';
-import { prisma } from './prisma';
+import { prisma, setRlsOrgContext } from './prisma';
+import { runWithOrgContext } from './org-context';
 import { EvidenceLogService } from './evidence-log.service';
 import {
   JournalEntryInput,
@@ -28,6 +29,18 @@ export class OptimisticLockError extends Error {
     this.expectedVersion = expectedVersion;
   }
 }
+
+/**
+ * S3 (rls-lock) review finding #2 — structural view of an interactive-
+ * transaction client covering exactly what postEntry touches. Derived from
+ * the extended client via Pick so it stays in lockstep with the generated
+ * types, and — being structural — accepts both the extended client's
+ * $transaction callback argument and the full client itself.
+ */
+export type LedgerTransactionClient = Pick<
+  typeof prisma,
+  'journalEntry' | 'fiscalPeriod' | 'evidenceLog' | '$executeRaw'
+>;
 
 export class LedgerService {
   /**
@@ -62,9 +75,17 @@ export class LedgerService {
 
   /**
    * Checks if the given date falls within an open fiscal period for the organization.
+   *
+   * `db` defaults to the shared client; pass an open transaction client so
+   * the read runs inside the caller's transaction (sharing its RLS org
+   * context under FORCE row level security).
    */
-  static async checkFiscalPeriod(organizationId: string, date: Date): Promise<boolean> {
-    const period = await prisma.fiscalPeriod.findFirst({
+  static async checkFiscalPeriod(
+    organizationId: string,
+    date: Date,
+    db: Pick<typeof prisma, 'fiscalPeriod'> = prisma,
+  ): Promise<boolean> {
+    const period = await db.fiscalPeriod.findFirst({
       where: {
         organizationId,
         startDate: { lte: date },
@@ -134,8 +155,29 @@ export class LedgerService {
    * a duplicate POST returns the already-persisted entry instead of creating a
    * second one — both on the fast path (key already visible) and after losing a
    * concurrent race (unique-constraint P2002).
+   *
+   * Transaction reuse (S3 review finding #2): pass an open interactive
+   * transaction client as `tx` and the entry + evidence row are written INSIDE
+   * the caller's transaction — atomic with the caller's other writes (e.g.
+   * AutomationService's expense row) and sharing its RLS org context —
+   * instead of opening a nested prisma.$transaction. All validation
+   * (idempotency fast path, trial balance, zero-amount lines, fiscal period)
+   * runs identically in both modes; the idempotency and fiscal-period reads
+   * go through `tx` so they see the caller's uncommitted rows and org scope.
+   * One caveat: the P2002 lose-the-race recovery cannot run in reuse mode —
+   * a unique-constraint violation aborts the CALLER's transaction at the
+   * database level, so the conflict is rethrown for the caller to retry at
+   * its own transaction boundary.
    */
-  static async postEntry(input: JournalEntryInput) {
+  static async postEntry(input: JournalEntryInput, tx?: LedgerTransactionClient) {
+    // S3 (rls-lock): open the org scope for the WHOLE call so the preflight
+    // reads below (idempotency fast path, fiscal-period check) that may run
+    // on the bare client are RLS-scoped too — without this they would fail
+    // closed once Phase-2 FORCE RLS binds the app role.
+    return runWithOrgContext(input.organizationId, () => this.postEntryScoped(input, tx));
+  }
+
+  private static async postEntryScoped(input: JournalEntryInput, tx?: LedgerTransactionClient) {
     const {
       organizationId,
       date,
@@ -156,8 +198,10 @@ export class LedgerService {
     // Fast path: this key already posted → return it, skipping validation and
     // the transaction entirely. The lookup is ALWAYS scoped by organizationId
     // so a key can never resolve to another tenant's entry (N-02 isolation).
+    // In transaction-reuse mode the lookup runs through `tx` so it shares the
+    // caller's RLS org context and sees the caller's uncommitted writes.
     if (idempotencyKey) {
-      const existing = await prisma.journalEntry.findFirst({
+      const existing = await (tx ?? prisma).journalEntry.findFirst({
         where: { organizationId, idempotencyKey },
         include: { lines: true },
       });
@@ -177,13 +221,18 @@ export class LedgerService {
       }
     }
 
-    // 2. Fiscal Period Check (Strict for all)
-    await this.checkFiscalPeriod(organizationId, date);
+    // 2. Fiscal Period Check (Strict for all). In transaction-reuse mode the
+    // read runs through `tx` so it shares the caller's RLS org context.
+    await this.checkFiscalPeriod(organizationId, date, tx ?? prisma);
 
-    // 3. Atomic Transaction — entry + evidence row succeed or fail together.
-    try {
-      return await prisma.$transaction(async (tx) => {
-      const entry = await tx.journalEntry.create({
+    // The transactional body — identical whether we own the transaction or
+    // reuse the caller's: entry + evidence row succeed or fail together.
+    const persist = async (txc: LedgerTransactionClient) => {
+      // S3 (rls-lock): transaction-local RLS org context, org id passed
+      // EXPLICITLY (review finding #1 — the ambient AsyncLocalStorage scope
+      // is only a fallback and is usually not open in server actions).
+      await setRlsOrgContext(txc, organizationId);
+      const entry = await txc.journalEntry.create({
         data: {
           organizationId,
           date,
@@ -211,7 +260,7 @@ export class LedgerService {
         }
       });
 
-      await EvidenceLogService.record(tx, {
+      await EvidenceLogService.record(txc, {
         eventType: 'JOURNAL_POSTED',
         tenantId: tenantId ?? organizationId,
         makerIdentity: makerIdentity ?? 'system',
@@ -232,7 +281,20 @@ export class LedgerService {
       });
 
       return entry;
-      });
+    };
+
+    // 3a. Transaction reuse: write inside the CALLER's open transaction so
+    // the entry is atomic with the caller's other writes. No P2002 recovery
+    // here — a unique-constraint error aborts the caller's transaction, so
+    // returning the winner would let the caller keep writing on a doomed tx;
+    // the conflict must surface at the caller's transaction boundary.
+    if (tx) {
+      return await persist(tx);
+    }
+
+    // 3b. Own transaction — entry + evidence row succeed or fail together.
+    try {
+      return await prisma.$transaction(async (txc) => persist(txc));
     } catch (err) {
       // Lost an idempotency race: a concurrent POST with the same key won and
       // tripped the unique constraint. The winner is now persisted — return it
@@ -268,6 +330,18 @@ export class LedgerService {
     reason: string,
     makerIdentity?: string,
   ): Promise<{ id: string }> {
+    // S3 (rls-lock): org scope covers the preflight lookup below, which runs
+    // on the bare client before the transaction sets the RLS context.
+    return runWithOrgContext(organizationId, () =>
+      this.reverseEntryScoped(organizationId, entryId, reason, makerIdentity));
+  }
+
+  private static async reverseEntryScoped(
+    organizationId: string,
+    entryId: string,
+    reason: string,
+    makerIdentity?: string,
+  ): Promise<{ id: string }> {
     const originalEntry = await prisma.journalEntry.findFirst({
       where: { id: entryId, organizationId },
       include: { lines: true }
@@ -291,6 +365,9 @@ export class LedgerService {
 
     // 2. Create the reversal entry
     return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context — explicit org id
+      // (review finding #1: never rely on an ambient scope being open).
+      await setRlsOrgContext(tx, organizationId);
       const reversal = await tx.journalEntry.create({
         data: {
           organizationId: originalEntry.organizationId,
@@ -357,6 +434,18 @@ export class LedgerService {
     expectedVersion: number,
     data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
   ) {
+    // S3 (rls-lock): org scope covers the stale-write evidence insert in the
+    // catch block, which runs on the bare client outside the transaction.
+    return runWithOrgContext(organizationId, () =>
+      this.updateEntryWithVersionScoped(id, organizationId, expectedVersion, data));
+  }
+
+  private static async updateEntryWithVersionScoped(
+    id: string,
+    organizationId: string,
+    expectedVersion: number,
+    data: Omit<Prisma.JournalEntryUpdateInput, 'version'>,
+  ) {
     // Strip any caller-supplied version — the counter is owned by this method.
     const safeData = { ...(data as Prisma.JournalEntryUpdateInput) };
     delete safeData.version;
@@ -368,6 +457,9 @@ export class LedgerService {
       // updateMany (not update) is required because the version guard is a
       // non-unique filter; update({where:{id,version}}) does not compile.
       return await prisma.$transaction(async (tx) => {
+        // S3 (rls-lock): transaction-local RLS org context — explicit org id
+        // (review finding #1: never rely on an ambient scope being open).
+        await setRlsOrgContext(tx, organizationId);
         const result = await tx.journalEntry.updateMany({
           where: { id, organizationId, version: expectedVersion },
           data: { ...safeData, version: { increment: 1 } },

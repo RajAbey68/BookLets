@@ -74,6 +74,9 @@ function mockDeps(
         fn({ expense: { create: expenseCreate } }),
       ),
     },
+    // S3 (rls-lock): automation.service sets the transaction-local RLS org
+    // context as the first statement of its transaction — stub it out here.
+    setRlsOrgContext: vi.fn().mockResolvedValue(undefined),
   }));
 
   vi.doMock('../../src/lib/ledger.service', () => ({ LedgerService: { postEntry } }));

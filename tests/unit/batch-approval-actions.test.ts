@@ -102,7 +102,7 @@ function setup(overrides: SetupOverrides = {}) {
     $transaction: vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx)),
   };
 
-  vi.doMock('../../src/lib/prisma', () => ({ prisma }));
+  vi.doMock('../../src/lib/prisma', () => ({ prisma, setRlsOrgContext: vi.fn().mockResolvedValue(undefined) }));
   vi.doMock('../../src/lib/auth-context', () => ({
     resolveActiveContext: vi.fn().mockResolvedValue(
       overrides.unauthenticated

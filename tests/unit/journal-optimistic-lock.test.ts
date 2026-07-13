@@ -38,7 +38,7 @@ describe('LedgerService.updateEntryWithVersion', () => {
   const mockPrisma = (updateMany: Mock, findUniqueOrThrow: Mock) => {
     const tx = { journalEntry: { updateMany, findUniqueOrThrow } };
     const $transaction = vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx));
-    vi.doMock('../../src/lib/prisma', () => ({ prisma: { $transaction, journalEntry: tx.journalEntry } }));
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: { $transaction, journalEntry: tx.journalEntry }, setRlsOrgContext: vi.fn().mockResolvedValue(undefined) }));
     const record = vi.fn().mockResolvedValue({});
     vi.doMock('../../src/lib/evidence-log.service', () => ({ EvidenceLogService: { record } }));
     return { $transaction, record };
@@ -102,7 +102,7 @@ describe('LedgerService.updateEntryWithVersion — evidence on rejection (RAJ-41
     const findUniqueOrThrow = vi.fn().mockResolvedValue(updatedEntry);
     const tx = { journalEntry: { updateMany, findUniqueOrThrow } };
     const $transaction = vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx));
-    vi.doMock('../../src/lib/prisma', () => ({ prisma: { $transaction, journalEntry: tx.journalEntry } }));
+    vi.doMock('../../src/lib/prisma', () => ({ prisma: { $transaction, journalEntry: tx.journalEntry }, setRlsOrgContext: vi.fn().mockResolvedValue(undefined) }));
     const record = recordImpl ?? vi.fn().mockResolvedValue({});
     vi.doMock('../../src/lib/evidence-log.service', () => ({ EvidenceLogService: { record } }));
     return { record };
