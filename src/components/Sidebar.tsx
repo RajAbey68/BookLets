@@ -52,8 +52,15 @@ const IconCheckSquare = () => (
   </svg>
 );
 
+const IconZap = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+  </svg>
+);
+
 const NAV_ITEMS = [
   { href: '/',           label: 'Dashboard',  Icon: IconDashboard },
+  { href: '/quick',      label: 'Quick entry', Icon: IconZap      },
   { href: '/properties', label: 'Properties', Icon: IconBuilding  },
   { href: '/bookings',   label: 'Bookings',   Icon: IconCalendar  },
   { href: '/ledger',     label: 'Ledger',     Icon: IconBook      },
