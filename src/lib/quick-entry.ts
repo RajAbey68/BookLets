@@ -50,6 +50,19 @@ export function parseQuickEntry(
   raw: RawQuickEntry,
   accounts: readonly QuickEntryAccount[],
 ): QuickEntryResult {
+  // Server actions receive unchecked client payloads — guard shape and the
+  // kind whitelist explicitly. An unknown kind must NOT fall through to the
+  // expense branch (that would let a crafted payload skip both category-type
+  // checks and post arbitrary transfers).
+  if (raw.kind !== 'income' && raw.kind !== 'expense') {
+    return { ok: false, error: 'Entry type must be income or expense.' };
+  }
+  for (const [field, value] of Object.entries({
+    amount: raw.amount, date: raw.date, propertyId: raw.propertyId,
+    categoryAccountId: raw.categoryAccountId, paymentAccountId: raw.paymentAccountId,
+  })) {
+    if (typeof value !== 'string') return { ok: false, error: `Invalid ${field}.` };
+  }
   const date = new Date(raw.date);
   if (!raw.date || Number.isNaN(date.getTime())) {
     return { ok: false, error: 'A valid date is required.' };

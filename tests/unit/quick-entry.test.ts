@@ -108,6 +108,20 @@ describe('parseQuickEntry', () => {
     const result = parseQuickEntry(raw({ categoryAccountId: 'someone-elses-account' }), accounts);
     expect(result.ok).toBe(false);
   });
+
+  it('rejects an unknown kind rather than falling through to the expense branch', () => {
+    // A crafted payload with kind:'transfer' must NOT skip both category-type
+    // checks — that would allow arbitrary asset-to-asset ledger transfers.
+    const result = parseQuickEntry(raw({ kind: 'transfer' as never, categoryAccountId: 'acc-bank' }), accounts);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toMatch(/income or expense/i);
+  });
+
+  it('rejects non-string field shapes from an unchecked client payload without throwing', () => {
+    const result = parseQuickEntry(raw({ amount: 100 as never }), accounts);
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe('monthlySummary', () => {

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { Decimal } from 'decimal.js';
 import { fetchQuickEntryContext } from '@/app/actions/quick-entry.actions';
 import QuickEntryForm from '@/components/QuickEntryForm';
-import { monthlySummary, resolveEmptyState, type SummaryEntry } from '@/lib/quick-entry';
+import { resolveEmptyState } from '@/lib/quick-entry';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -62,15 +62,11 @@ export default async function QuickEntryPage() {
     );
   }
 
-  const summaryEntries: SummaryEntry[] = context.summaryEntries.map(r => ({
-    date: new Date(r.dateIso),
-    kind: r.kind,
-    amount: new Decimal(r.amount),
-    propertyId: r.propertyId,
-  }));
-  const months = monthlySummary(summaryEntries).slice(0, 3);
-  const gbp = (d: Decimal) =>
-    `£${d.toNumber().toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  // Computed server-side through the P&L authority (POSTED-only,
+  // reversal-aware, DB-aggregated) — see quick-entry.actions.ts.
+  const months = context.months;
+  const gbp = (v: string) =>
+    `£${new Decimal(v).toNumber().toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   return (
     <main style={{ padding: '1rem', maxWidth: 560, margin: '0 auto', display: 'grid', gap: '1.25rem' }}>
