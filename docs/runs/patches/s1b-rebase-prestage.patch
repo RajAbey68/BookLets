@@ -1,0 +1,1720 @@
+diff --git a/.env.example b/.env.example
+index d4387e4..0eaf270 100644
+--- a/.env.example
++++ b/.env.example
+@@ -44,3 +44,8 @@ AUTH_ALLOWED_EMAILS=""
+ #
+ # OCR microservice — defaults to production if unset
+ # OCR_MICROSERVICE_URL="https://ocr-microservice-gamma.vercel.app"
++
++# ── Optional: S1b staging→ledger bridge ──────────────────────────────────────
++# Organization id the org-less raj_fin_track.ocr_receipts staging pool is
++# bound to; /api/ingest/ocr-bridge fails closed (503) while this is unset.
++# OCR_BRIDGE_ORG_ID=""
+diff --git a/src/app/api/ingest/ocr-bridge/route.ts b/src/app/api/ingest/ocr-bridge/route.ts
+new file mode 100644
+index 0000000..d7e51dd
+--- /dev/null
++++ b/src/app/api/ingest/ocr-bridge/route.ts
+@@ -0,0 +1,110 @@
++import { NextResponse } from 'next/server';
++import { resolveActiveContext } from '@/lib/auth-context';
++import { runOcrBridgeImport } from '@/lib/ocr-bridge.deps';
++import { DEFAULT_BATCH_SIZE } from '@/lib/ocr-bridge';
++
++export const dynamic = 'force-dynamic';
++
++/** Serverless guard: one batch must comfortably fit the function time budget. */
++const MAX_BATCH_SIZE = 200;
++
++/**
++ * Roles allowed to trigger the import. Membership.role is a plain string;
++ * the codebase's documented values are OWNER | BOOKKEEPER | ACCOUNTANT |
++ * VIEWER (prisma/schema.prisma). Only OWNER (plus ADMIN, should that role
++ * ever be introduced) may run an org-wide ledger import.
++ */
++const IMPORT_ALLOWED_ROLES = new Set(['OWNER', 'ADMIN']);
++
++/**
++ * S1b — admin-triggered staging→ledger bridge
++ * (docs/runs/S1B-BRIDGE-CONTRACT.md).
++ *
++ * POST /api/ingest/ocr-bridge  { batchSize?: number }
++ *
++ * Imports the next batch of `raj_fin_track.ocr_receipts` rows as DRAFT
++ * journal entries and returns the run summary
++ * ({posted, skipped_existing, failed, parked, parkedPermanently, remaining}).
++ * Idempotent — re-invoke until `remaining` is 0. `remaining` counts only rows
++ * still importable in principle: rows parked for deterministic reasons
++ * (OCR_FAILED / BAD_AMOUNT / NO_DOC_DATE / FX_UNSUPPORTED / NO_FISCAL_PERIOD)
++ * are excluded, so the re-invoke loop always terminates.
++ *
++ * Authorization: requires an authenticated OWNER/ADMIN member (401/403), and
++ * — because the staging pool is org-less (see ocr-bridge.deps.ts) — the
++ * caller's organization must match OCR_BRIDGE_ORG_ID (503 when unset, 403 on
++ * mismatch). The import is scoped to the caller's organization.
++ */
++export async function POST(request: Request) {
++  const resolved = await resolveActiveContext();
++  if (!resolved.ok) {
++    return NextResponse.json({ error: resolved.error }, { status: 401 });
++  }
++
++  if (!IMPORT_ALLOWED_ROLES.has(resolved.context.role)) {
++    return NextResponse.json(
++      { error: 'Only OWNER or ADMIN members may trigger the OCR bridge import.' },
++      { status: 403 },
++    );
++  }
++
++  // The staging pool carries no organization column, so the bridge is bound
++  // to exactly one org by configuration — fail closed when unconfigured.
++  const bridgeOrgId = process.env.OCR_BRIDGE_ORG_ID;
++  if (!bridgeOrgId) {
++    return NextResponse.json(
++      { error: 'OCR bridge is not configured (OCR_BRIDGE_ORG_ID unset).' },
++      { status: 503 },
++    );
++  }
++  if (resolved.context.organizationId !== bridgeOrgId) {
++    return NextResponse.json(
++      { error: 'The OCR bridge staging pool is not bound to your organization.' },
++      { status: 403 },
++    );
++  }
++
++  // Body is optional; an empty or non-JSON body means "use defaults".
++  let body: unknown = {};
++  try {
++    const text = await request.text();
++    if (text.trim() !== '') body = JSON.parse(text);
++  } catch {
++    return NextResponse.json({ error: 'Request body must be valid JSON.' }, { status: 400 });
++  }
++
++  // JSON.parse accepts 'null', arrays and primitives — reject anything that
++  // is not a plain object before dereferencing body.batchSize.
++  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
++    return NextResponse.json(
++      { error: 'Request body must be a JSON object.' },
++      { status: 400 },
++    );
++  }
++
++  let batchSize = DEFAULT_BATCH_SIZE;
++  const rawBatchSize = (body as { batchSize?: unknown }).batchSize;
++  if (rawBatchSize !== undefined) {
++    if (
++      typeof rawBatchSize !== 'number' ||
++      !Number.isInteger(rawBatchSize) ||
++      rawBatchSize < 1 ||
++      rawBatchSize > MAX_BATCH_SIZE
++    ) {
++      return NextResponse.json(
++        { error: `batchSize must be an integer between 1 and ${MAX_BATCH_SIZE}.` },
++        { status: 400 },
++      );
++    }
++    batchSize = rawBatchSize;
++  }
++
++  try {
++    const summary = await runOcrBridgeImport(resolved.context.organizationId, batchSize);
++    return NextResponse.json(summary);
++  } catch (err) {
++    console.error('[ocr-bridge] Import run failed:', err);
++    const message = err instanceof Error ? err.message : 'Bridge import failed.';
++    return NextResponse.json({ error: message }, { status: 500 });
++  }
++}
+diff --git a/src/lib/ledger.service.ts b/src/lib/ledger.service.ts
+index fc1feb8..2046591 100644
+--- a/src/lib/ledger.service.ts
++++ b/src/lib/ledger.service.ts
+@@ -168,8 +168,31 @@ export class LedgerService {
+    * a unique-constraint violation aborts the CALLER's transaction at the
+    * database level, so the conflict is rethrown for the caller to retry at
+    * its own transaction boundary.
++   *
++   * Callers that need to know WHICH of those happened (new row vs idempotent
++   * replay) should use {@link postEntryWithOutcome}; this method keeps the
++   * historical entry-only return shape for existing call sites.
+    */
+   static async postEntry(input: JournalEntryInput, tx?: LedgerTransactionClient) {
++    return (await this.postEntryWithOutcome(input, tx)).entry;
++  }
++
++  /**
++   * Same semantics as {@link postEntry}, but also reports the outcome:
++   * `created` is false when the idempotency key already had a persisted entry
++   * — whether that was caught by the fast-path pre-check or by recovering
++   * from a lost concurrent race (P2002) inside the transaction. This lets
++   * callers (e.g. the S1b OCR bridge) count idempotent replays and race
++   * losers as skips instead of misreporting them as newly posted.
++   *
++   * Accepts the same optional `tx` transaction-reuse client as
++   * {@link postEntry}; in reuse mode a P2002 race is rethrown (see above), so
++   * `created: false` there can only come from the fast-path pre-check.
++   */
++  static async postEntryWithOutcome(
++    input: JournalEntryInput,
++    tx?: LedgerTransactionClient,
++  ): Promise<{ entry: Prisma.JournalEntryGetPayload<{ include: { lines: true } }>; created: boolean }> {
+     // S3 (rls-lock): open the org scope for the WHOLE call so the preflight
+     // reads below (idempotency fast path, fiscal-period check) that may run
+     // on the bare client are RLS-scoped too — without this they would fail
+@@ -177,7 +200,10 @@ export class LedgerService {
+     return runWithOrgContext(input.organizationId, () => this.postEntryScoped(input, tx));
+   }
+ 
+-  private static async postEntryScoped(input: JournalEntryInput, tx?: LedgerTransactionClient) {
++  private static async postEntryScoped(
++    input: JournalEntryInput,
++    tx?: LedgerTransactionClient,
++  ): Promise<{ entry: Prisma.JournalEntryGetPayload<{ include: { lines: true } }>; created: boolean }> {
+     const {
+       organizationId,
+       date,
+@@ -205,7 +231,7 @@ export class LedgerService {
+         where: { organizationId, idempotencyKey },
+         include: { lines: true },
+       });
+-      if (existing) return existing;
++      if (existing) return { entry: existing, created: false };
+     }
+ 
+     // 1. Strict Validation for POSTED entries
+@@ -252,6 +278,9 @@ export class LedgerService {
+               accountId: line.accountId,
+               amount: new Decimal(line.amount.toString()), // keep as Decimal — do NOT call .toNumber() (loses precision)
+               isDebit: line.isDebit,
++              // Optional per-line currency (S1b posts LKR); undefined keeps
++              // the schema default.
++              currency: line.currency,
+             }))
+           }
+         },
+@@ -289,12 +318,13 @@ export class LedgerService {
+     // returning the winner would let the caller keep writing on a doomed tx;
+     // the conflict must surface at the caller's transaction boundary.
+     if (tx) {
+-      return await persist(tx);
++      return { entry: await persist(tx), created: true };
+     }
+ 
+     // 3b. Own transaction — entry + evidence row succeed or fail together.
+     try {
+-      return await prisma.$transaction(async (txc) => persist(txc));
++      const entry = await prisma.$transaction(async (txc) => persist(txc));
++      return { entry, created: true };
+     } catch (err) {
+       // Lost an idempotency race: a concurrent POST with the same key won and
+       // tripped the unique constraint. The winner is now persisted — return it
+@@ -304,7 +334,7 @@ export class LedgerService {
+           where: { organizationId, idempotencyKey },
+           include: { lines: true },
+         });
+-        if (existing) return existing;
++        if (existing) return { entry: existing, created: false };
+       }
+       throw err;
+     }
+diff --git a/src/lib/ocr-bridge.deps.ts b/src/lib/ocr-bridge.deps.ts
+new file mode 100644
+index 0000000..1169873
+--- /dev/null
++++ b/src/lib/ocr-bridge.deps.ts
+@@ -0,0 +1,290 @@
++/**
++ * S1b — staging→ledger bridge, production wiring (contract:
++ * docs/runs/S1B-BRIDGE-CONTRACT.md §3, Option A).
++ *
++ * Staging (`raj_fin_track.ocr_receipts`) and the ledger live in the SAME
++ * Postgres instance, so the bridge is a cross-schema READ via
++ * `prisma.$queryRaw` followed by normal LedgerService.postEntry writes.
++ *
++ * The staging schema is READ-ONLY territory for this app: SELECT only —
++ * never INSERT/UPDATE/DELETE against `raj_fin_track`, and the table is
++ * deliberately NOT added to schema.prisma (it is foreign territory owned by
++ * the OCR pipeline).
++ *
++ * PREREQUISITES before this can run in prod (contract §5):
++ *   HR-5  MIGRATION-BASELINE-DDL.sql applied — the bridge writes
++ *         JournalEntry.idempotencyKey/source/sourceId, which do not exist in
++ *         prod until the baseline lands.
++ *   HR-6  The app role needs read access to the staging schema:
++ *         GRANT USAGE ON SCHEMA raj_fin_track TO <app_role>;
++ *         GRANT SELECT ON raj_fin_track.ocr_receipts TO <app_role>;
++ *
++ * TENANCY MODEL for an org-less staging source: `raj_fin_track.ocr_receipts`
++ * has NO organization column (single-tenant staging owned by the OCR
++ * pipeline, and we cannot alter it), so row→org attribution cannot come from
++ * the data. Instead the pool is bound to exactly ONE organization by
++ * configuration: the route requires env `OCR_BRIDGE_ORG_ID` and refuses to
++ * run (503) when it is unset, and rejects (403) any caller whose
++ * organizationId differs from it. This fails closed — the staging pool can
++ * only ever be imported into the one configured org.
++ */
++
++import { Prisma } from '@prisma/client';
++import { prisma } from './prisma';
++import { LedgerService } from './ledger.service';
++import {
++  DEFAULT_BATCH_SIZE,
++  OCR_BRIDGE_KEY_PREFIX,
++  importOcrReceipts,
++  type OcrBridgeDeps,
++  type OcrBridgeSummary,
++  type OcrStagingRow,
++} from './ocr-bridge';
++import type { JournalEntryInput } from './types';
++
++/**
++ * Row-shape eligibility predicate (contract §2) as SQL. Must stay in
++ * lockstep with classifyStagingRow in ocr-bridge.ts.
++ */
++const ELIGIBLE_PREDICATE = Prisma.sql`
++  r.ocr_status = 'success'
++  AND r.total_amount > 0
++  AND r.doc_date IS NOT NULL
++  AND r.currency = 'LKR'
++`;
++
++/**
++ * doc_date is covered by an OPEN (not closed, not locked) FiscalPeriod of
++ * the org — the same test LedgerService.checkFiscalPeriod applies. Must stay
++ * in lockstep with checkFiscalPeriod AND with hasOpenFiscalPeriod below.
++ */
++function inOpenFiscalPeriod(organizationId: string) {
++  return Prisma.sql`
++    EXISTS (
++      SELECT 1
++      FROM public."FiscalPeriod" fp
++      WHERE fp."organizationId" = ${organizationId}
++        AND fp."startDate" <= r.doc_date
++        AND fp."endDate" >= r.doc_date
++        AND fp."isClosed" = false
++        AND fp."locked" = false
++    )
++  `;
++}
++
++/**
++ * Importable-in-principle: eligible row shape AND an open fiscal period
++ * covering doc_date. This drives BOTH the batch ordering and `remaining`, so
++ * deterministically parked rows (incl. NO_FISCAL_PERIOD) neither starve the
++ * batch window nor hold `remaining` above 0 — the "re-invoke until
++ * remaining: 0" loop is guaranteed to terminate.
++ */
++function importablePredicate(organizationId: string) {
++  return Prisma.sql`${ELIGIBLE_PREDICATE} AND ${inOpenFiscalPeriod(organizationId)}`;
++}
++
++/** NOT EXISTS guard: the row has no JournalEntry with its idempotency key yet. */
++function notYetImported(organizationId: string) {
++  return Prisma.sql`
++    NOT EXISTS (
++      SELECT 1
++      FROM public."JournalEntry" je
++      WHERE je."organizationId" = ${organizationId}
++        AND je."idempotencyKey" = ${OCR_BRIDGE_KEY_PREFIX} || r.source_file
++    )
++  `;
++}
++
++/**
++ * Fetch the next batch of unimported staging rows.
++ *
++ * NOTE (HR-5/HR-6): this query requires the HR-5 baseline (the
++ * `idempotencyKey` column on public."JournalEntry") AND a SELECT grant on
++ * `raj_fin_track.ocr_receipts` for the app role (HR-6) before it can run in
++ * prod. SELECT only — the staging schema is read-only to this app.
++ *
++ * Importable rows are ordered FIRST so parked rows (which are never imported
++ * and therefore never leave the NOT EXISTS set — including NO_FISCAL_PERIOD
++ * rows) cannot permanently occupy the batch window and starve postable rows
++ * behind them. `total_amount` is cast to text so numeric(19,4) survives the
++ * driver without float loss.
++ */
++async function fetchStagingBatch(
++  organizationId: string,
++  batchSize: number,
++): Promise<OcrStagingRow[]> {
++  return prisma.$queryRaw<OcrStagingRow[]>`
++    SELECT
++      r.id,
++      r.source_file,
++      r.doc_date,
++      r.vendor_or_entity,
++      r.total_amount::text AS total_amount,
++      r.currency,
++      r.category,
++      r.raw_response,
++      r.ocr_status
++    FROM raj_fin_track.ocr_receipts r
++    WHERE ${notYetImported(organizationId)}
++    ORDER BY (CASE WHEN ${importablePredicate(organizationId)} THEN 0 ELSE 1 END), r.id
++    LIMIT ${batchSize}
++  `;
++}
++
++/**
++ * Importable rows still lacking a JournalEntry — the route's `remaining`.
++ * Deterministically parked rows (bad shape OR no open fiscal period) are NOT
++ * counted, so `remaining` reaches 0 once every importable row has landed.
++ */
++async function countRemainingEligible(organizationId: string): Promise<number> {
++  const result = await prisma.$queryRaw<{ n: number }[]>`
++    SELECT count(*)::int AS n
++    FROM raj_fin_track.ocr_receipts r
++    WHERE ${importablePredicate(organizationId)}
++      AND ${notYetImported(organizationId)}
++  `;
++  return result[0]?.n ?? 0;
++}
++
++/**
++ * Build the IO deps for one import run. Account/category lookups are
++ * memoized per run — a batch of 50 rows must not issue 100+ identical
++ * account queries.
++ */
++export function createOcrBridgeDeps(organizationId: string): OcrBridgeDeps {
++  let suspenseAccountIdPromise: Promise<string> | undefined;
++  let bankAccountIdPromise: Promise<string> | undefined;
++  const categoryAccountIds = new Map<string, Promise<string>>();
++  const fiscalPeriodByDay = new Map<string, Promise<boolean>>();
++
++  // Suspense (code 9999) must be seeded — it is the fallback for both legs.
++  function suspenseAccountId(): Promise<string> {
++    suspenseAccountIdPromise ??= prisma.account
++      .findFirst({ where: { organizationId, code: '9999' }, select: { id: true } })
++      .then((account) => {
++        if (!account) {
++          throw new Error(
++            'S1b Setup Error: Suspense account (code 9999) is not seeded for this organization.',
++          );
++        }
++        return account.id;
++      });
++    return suspenseAccountIdPromise;
++  }
++
++  return {
++    async ensureVendor(name: string): Promise<void> {
++      // Resolve-or-create, mirroring AutomationService.processReceipt.
++      const vendor = await prisma.vendor.findFirst({ where: { name: { contains: name } } });
++      if (!vendor) {
++        await prisma.vendor.create({ data: { name } });
++      }
++    },
++
++    async resolveExpenseAccountId(category: string | null): Promise<string> {
++      if (!category) return suspenseAccountId();
++
++      let resolved = categoryAccountIds.get(category);
++      if (!resolved) {
++        resolved = (async () => {
++          const suspenseId = await suspenseAccountId();
++          // ExpenseCategory has no organization column, so tenancy is scoped
++          // THROUGH the mapped account: a name match is only usable when its
++          // accountId belongs to an Account of THIS organization. Unmapped
++          // (accountId null) and foreign-org mappings are ignored — an
++          // accountId from another org must never end up on our lines.
++          const candidates = await prisma.expenseCategory.findMany({
++            where: { name: { contains: category }, accountId: { not: null } },
++            select: { accountId: true },
++          });
++          const candidateIds = [...new Set(candidates.map((c) => c.accountId as string))];
++          if (candidateIds.length > 0) {
++            const orgAccount = await prisma.account.findFirst({
++              where: { id: { in: candidateIds }, organizationId },
++              select: { id: true },
++            });
++            if (orgAccount) return orgAccount.id;
++          }
++          // No org-valid mapping — create the category bound to this org's
++          // Suspense account, so it is org-safe by construction.
++          const created = await prisma.expenseCategory.create({
++            data: { name: category, accountId: suspenseId },
++          });
++          return created.accountId ?? suspenseId;
++        })();
++        categoryAccountIds.set(category, resolved);
++      }
++      return resolved;
++    },
++
++    resolveBankAccountId(): Promise<string> {
++      bankAccountIdPromise ??= (async () => {
++        // Primary bank by code, name-match fallback, then Suspense.
++        const bank =
++          (await prisma.account.findFirst({ where: { organizationId, code: '1000' } })) ??
++          (await prisma.account.findFirst({
++            where: { organizationId, name: { contains: 'Cash' } },
++          }));
++        return bank?.id ?? (await suspenseAccountId());
++      })();
++      return bankAccountIdPromise;
++    },
++
++    async postEntry(input: JournalEntryInput): Promise<{ entryId: string; created: boolean }> {
++      // postEntryWithOutcome reports the REAL outcome: `created` is false
++      // both when the key was already visible up front and when this call
++      // lost a concurrent race (P2002 recovery) — so replayed batches and
++      // race losers are counted as skipped_existing, never as posted.
++      // postEntry runs each entry in its OWN transaction, giving the bridge
++      // per-row atomicity — one bad row never aborts the batch.
++      const { entry, created } = await LedgerService.postEntryWithOutcome(input);
++      return { entryId: entry.id, created };
++    },
++
++    hasOpenFiscalPeriod(date: Date): Promise<boolean> {
++      // The exact lookup LedgerService.checkFiscalPeriod performs, minus the
++      // throw — the bridge PARKS uncovered rows (NO_FISCAL_PERIOD) instead of
++      // failing them. Memoized per UTC day so a batch clustered in one month
++      // does not issue a lookup per row. Must stay in lockstep with the
++      // inOpenFiscalPeriod SQL fragment above.
++      const day = date.toISOString().slice(0, 10);
++      let known = fiscalPeriodByDay.get(day);
++      if (!known) {
++        known = prisma.fiscalPeriod
++          .findFirst({
++            where: {
++              organizationId,
++              startDate: { lte: date },
++              endDate: { gte: date },
++              isClosed: false,
++              locked: false,
++            },
++            select: { id: true },
++          })
++          .then((period) => period !== null);
++        fiscalPeriodByDay.set(day, known);
++      }
++      return known;
++    },
++
++    countRemainingEligible: () => countRemainingEligible(organizationId),
++  };
++}
++
++/**
++ * Run one batched bridge import for the organization. Idempotent — invoke
++ * repeatedly until the summary reports `remaining: 0`. `remaining` counts
++ * only rows importable in principle (unimported AND inside an open fiscal
++ * period AND well-shaped), so deterministically parked rows can never keep
++ * the loop alive.
++ */
++export async function runOcrBridgeImport(
++  organizationId: string,
++  batchSize: number = DEFAULT_BATCH_SIZE,
++): Promise<OcrBridgeSummary> {
++  const rows = await fetchStagingBatch(organizationId, batchSize);
++  return importOcrReceipts(rows, createOcrBridgeDeps(organizationId), {
++    organizationId,
++    batchSize,
++  });
++}
+diff --git a/src/lib/ocr-bridge.ts b/src/lib/ocr-bridge.ts
+new file mode 100644
+index 0000000..cbe3224
+--- /dev/null
++++ b/src/lib/ocr-bridge.ts
+@@ -0,0 +1,307 @@
++/**
++ * S1b — staging→ledger bridge, pure core (contract:
++ * docs/runs/S1B-BRIDGE-CONTRACT.md).
++ *
++ * Classifies `raj_fin_track.ocr_receipts` staging rows and turns eligible
++ * ones into DRAFT JournalEntry inputs. This module is deliberately free of
++ * Prisma / network imports — all IO is injected through {@link OcrBridgeDeps}
++ * (production wiring lives in ocr-bridge.deps.ts), so the logic is unit
++ * testable without a database.
++ *
++ * Dispositions (computed at run time — never hardcoded counts):
++ *   POST              ocr_status='success' AND total_amount>0 AND doc_date
++ *                     present AND currency='LKR' AND an open FiscalPeriod
++ *                     covers doc_date → DRAFT journal entry.
++ *   OCR_FAILED        ocr_status <> 'success' (re-OCR is devserver work, not ours).
++ *   BAD_AMOUNT        total_amount NULL / non-numeric / <= 0.
++ *   NO_DOC_DATE       doc_date missing — dates are NEVER fabricated from
++ *                     processed_at; a human assigns them.
++ *   FX_UNSUPPORTED    non-LKR currency — LKR books; no FX policy until S8.
++ *   NO_FISCAL_PERIOD  doc_date is not covered by an OPEN FiscalPeriod — the
++ *                     ledger's checkFiscalPeriod would reject it. Dates are
++ *                     NEVER clamped into a period (contract §7); the row
++ *                     parks until a human opens a covering period.
++ *
++ * Parked rows are only ever REPORTED in the summary; nothing is written back
++ * to the staging schema (read-only territory) and nothing is invented into
++ * the ledger.
++ */
++
++import { Decimal } from 'decimal.js';
++import { gateAutomatedJournalEntry } from './approval.service';
++import { AUTOMATION_MAKER_IDENTITY } from './maker-identity';
++import type { JournalEntryInput, JournalStatus } from './types';
++
++/** Shape of a `raj_fin_track.ocr_receipts` row as read via $queryRaw. */
++export interface OcrStagingRow {
++  id: number;
++  source_file: string;
++  /** pg `date` arrives as Date; keep string tolerated for test/transport ease. */
++  doc_date: Date | string | null;
++  vendor_or_entity: string | null;
++  /** pg numeric(19,4) is read as text to avoid float precision loss. */
++  total_amount: string | number | null;
++  currency: string | null;
++  category: string | null;
++  raw_response: unknown;
++  ocr_status: string | null;
++}
++
++export type ParkReason =
++  | 'OCR_FAILED'
++  | 'NO_DOC_DATE'
++  | 'BAD_AMOUNT'
++  | 'FX_UNSUPPORTED'
++  | 'NO_FISCAL_PERIOD';
++
++export type RowClassification = { kind: 'POST' } | { kind: 'PARK'; reason: ParkReason };
++
++/** IO surface the importer needs — implemented by ocr-bridge.deps.ts. */
++export interface OcrBridgeDeps {
++  /** Resolve-or-create the vendor by name (audit/master-data upkeep only). */
++  ensureVendor(name: string): Promise<void>;
++  /** category → ExpenseCategory → mapped GL account; Suspense (9999) fallback. */
++  resolveExpenseAccountId(category: string | null): Promise<string>;
++  /** Bank account (code 1000); Suspense fallback. */
++  resolveBankAccountId(): Promise<string>;
++  /**
++   * Persist one DRAFT entry. `created: false` means the idempotency key was
++   * already present (replayed batch / concurrent run) — a skip, not an error.
++   */
++  postEntry(input: JournalEntryInput): Promise<{ entryId: string; created: boolean }>;
++  /**
++   * True when an OPEN (not closed, not locked) FiscalPeriod of the org covers
++   * the date — the same test LedgerService.checkFiscalPeriod applies before a
++   * post. Rows failing it park as NO_FISCAL_PERIOD instead of failing postEntry.
++   */
++  hasOpenFiscalPeriod(date: Date): Promise<boolean>;
++  /** Importable staging rows still lacking a JournalEntry — drives `remaining`. */
++  countRemainingEligible(): Promise<number>;
++}
++
++export interface OcrBridgeSummary {
++  posted: number;
++  skipped_existing: number;
++  failed: { id: number; error: string }[];
++  parked: { reason: ParkReason; count: number; ids: number[] }[];
++  /**
++   * Total rows parked this run. Every ParkReason is deterministic (the row
++   * cannot import until a human intervenes), so these rows are also excluded
++   * from `remaining` — they never strand the re-invoke loop.
++   */
++  parkedPermanently: number;
++  /**
++   * Rows still importable in principle after this batch: not yet imported AND
++   * not excluded by a deterministic park reason (OCR_FAILED / BAD_AMOUNT /
++   * NO_DOC_DATE / FX_UNSUPPORTED / NO_FISCAL_PERIOD). Re-invoke until 0 —
++   * parked rows can never hold this above 0, so the loop terminates.
++   */
++  remaining: number;
++}
++
++/** Contract §3: batched to fit the serverless time budget. */
++export const DEFAULT_BATCH_SIZE = 50;
++
++export const OCR_BRIDGE_SOURCE = 'OCR_RECEIPT';
++// E5 / P1.4: the service-identity literal lives ONLY in maker-identity.ts —
++// assign from the shared constant (the governance gate greps src/ for stray
++// literals) while keeping this export name for existing consumers/tests.
++export const OCR_BRIDGE_MAKER = AUTOMATION_MAKER_IDENTITY;
++export const OCR_BRIDGE_KEY_PREFIX = 'ocr-receipt:';
++
++function parseAmount(value: OcrStagingRow['total_amount']): Decimal | null {
++  if (value === null || value === undefined) return null;
++  try {
++    const d = new Decimal(String(value));
++    return d.isFinite() ? d : null;
++  } catch {
++    return null;
++  }
++}
++
++function parseDocDate(value: OcrStagingRow['doc_date']): Date | null {
++  if (value === null || value === undefined) return null;
++  const date = value instanceof Date ? value : new Date(value);
++  return Number.isNaN(date.getTime()) ? null : date;
++}
++
++/**
++ * Eligibility per contract §2. Precedence mirrors the bucket table: OCR
++ * failure first (the extraction is untrustworthy wholesale), then amount,
++ * then date, then currency. NO_FISCAL_PERIOD is NOT decided here — it needs
++ * IO (the FiscalPeriod table), so importOcrReceipts checks it via deps after
++ * all pure reasons.
++ */
++export function classifyStagingRow(row: OcrStagingRow): RowClassification {
++  if (row.ocr_status !== 'success') return { kind: 'PARK', reason: 'OCR_FAILED' };
++
++  const amount = parseAmount(row.total_amount);
++  if (!amount || amount.lessThanOrEqualTo(0)) return { kind: 'PARK', reason: 'BAD_AMOUNT' };
++
++  if (!parseDocDate(row.doc_date)) return { kind: 'PARK', reason: 'NO_DOC_DATE' };
++
++  if (row.currency !== 'LKR') return { kind: 'PARK', reason: 'FX_UNSUPPORTED' };
++
++  return { kind: 'POST' };
++}
++
++/**
++ * Extraction confidence from the staging row's raw OCR payload (top-level
++ * `confidence` number), or null when absent. Range validation is NOT done
++ * here — gateAutomatedJournalEntry rejects out-of-contract values loudly.
++ */
++export function extractConfidence(rawResponse: unknown): number | null {
++  if (typeof rawResponse !== 'object' || rawResponse === null) return null;
++  const confidence = (rawResponse as { confidence?: unknown }).confidence;
++  return typeof confidence === 'number' ? confidence : null;
++}
++
++export interface BridgeAccountContext {
++  organizationId: string;
++  expenseAccountId: string;
++  bankAccountId: string;
++}
++
++/**
++ * Map one eligible staging row to a JournalEntryInput (contract §4).
++ *
++ * Status comes from gateAutomatedJournalEntry — ALWAYS DRAFT; there is no
++ * parameter (and no gate branch) through which a caller or a confidence
++ * score can force POSTED. Amounts stay Decimal end-to-end (numeric(19,4)),
++ * never float.
++ */
++export function buildJournalInput(
++  row: OcrStagingRow,
++  ctx: BridgeAccountContext,
++): JournalEntryInput & { date: Date; status: JournalStatus.DRAFT } {
++  const date = parseDocDate(row.doc_date);
++  if (!date) {
++    // classifyStagingRow parks these before we get here; guard anyway.
++    throw new Error(`Staging row ${row.id}: doc_date is missing or unparseable.`);
++  }
++
++  const amount = parseAmount(row.total_amount);
++  if (!amount || amount.lessThanOrEqualTo(0)) {
++    throw new Error(`Staging row ${row.id}: total_amount is not a positive number.`);
++  }
++
++  const confidence = extractConfidence(row.raw_response);
++  // D3 gate: automated extraction ALWAYS lands as DRAFT. A missing confidence
++  // is gated as 0 (grants nothing anyway); an out-of-range one throws here,
++  // BEFORE any writes for the row.
++  const gate = gateAutomatedJournalEntry(confidence ?? 0);
++
++  return {
++    organizationId: ctx.organizationId,
++    date,
++    memo: `AUTOMATED S1b: Receipt ${row.source_file} — ${row.vendor_or_entity ?? 'unknown vendor'}`,
++    status: gate.status,
++    makerIdentity: OCR_BRIDGE_MAKER,
++    tenantId: ctx.organizationId,
++    // Recorded for the audit trail only — grants no posting authority (D3).
++    agentConfidence: confidence,
++    idempotencyKey: `${OCR_BRIDGE_KEY_PREFIX}${row.source_file}`,
++    source: OCR_BRIDGE_SOURCE,
++    sourceId: String(row.id),
++    lines: [
++      { accountId: ctx.expenseAccountId, amount, isDebit: true, currency: 'LKR' },
++      { accountId: ctx.bankAccountId, amount, isDebit: false, currency: 'LKR' },
++    ],
++  };
++}
++
++/**
++ * Import one batch of staging rows into the ledger.
++ *
++ * Per-row failure isolation: each POST row is attempted independently (the
++ * underlying LedgerService.postEntry already runs each entry in its own
++ * transaction), so one bad row lands in `failed` without aborting the batch.
++ * Idempotency conflicts count as `skipped_existing`. The returned summary
++ * always reconciles: posted + skipped_existing + failed + Σparked = rows
++ * processed (≤ batchSize).
++ *
++ * Rows whose doc_date no open FiscalPeriod covers park as NO_FISCAL_PERIOD
++ * BEFORE any vendor/account/post IO — they must not reach postEntry (where
++ * checkFiscalPeriod would throw and strand them in `failed` forever) and
++ * their dates are never clamped into a period (contract §7).
++ */
++export async function importOcrReceipts(
++  rows: readonly OcrStagingRow[],
++  deps: OcrBridgeDeps,
++  opts: { organizationId: string; batchSize?: number },
++): Promise<OcrBridgeSummary> {
++  const batchSize = opts.batchSize ?? DEFAULT_BATCH_SIZE;
++  const batch = rows.slice(0, batchSize);
++
++  let posted = 0;
++  let skippedExisting = 0;
++  const failed: OcrBridgeSummary['failed'] = [];
++  const parkedByReason = new Map<ParkReason, number[]>();
++  const park = (reason: ParkReason, id: number) => {
++    const ids = parkedByReason.get(reason) ?? [];
++    ids.push(id);
++    parkedByReason.set(reason, ids);
++  };
++
++  for (const row of batch) {
++    const classification = classifyStagingRow(row);
++
++    if (classification.kind === 'PARK') {
++      park(classification.reason, row.id);
++      continue;
++    }
++
++    try {
++      // Fiscal-period gate: LedgerService.checkFiscalPeriod rejects any date
++      // outside an open period, so detect that here and PARK — never let the
++      // row reach postEntry (a permanent `failed` on every run) and never
++      // shift its date into a period (contract §7 forbids date fabrication).
++      const docDate = parseDocDate(row.doc_date);
++      if (docDate && !(await deps.hasOpenFiscalPeriod(docDate))) {
++        park('NO_FISCAL_PERIOD', row.id);
++        continue;
++      }
++
++      // Confidence gate (throws on out-of-contract values) so a broken
++      // extraction fails BEFORE any vendor/category rows are created.
++      gateAutomatedJournalEntry(extractConfidence(row.raw_response) ?? 0);
++
++      if (row.vendor_or_entity) {
++        await deps.ensureVendor(row.vendor_or_entity);
++      }
++
++      const expenseAccountId = await deps.resolveExpenseAccountId(row.category);
++      const bankAccountId = await deps.resolveBankAccountId();
++
++      const input = buildJournalInput(row, {
++        organizationId: opts.organizationId,
++        expenseAccountId,
++        bankAccountId,
++      });
++
++      const result = await deps.postEntry(input);
++      if (result.created) {
++        posted += 1;
++      } else {
++        skippedExisting += 1;
++      }
++    } catch (err) {
++      failed.push({ id: row.id, error: err instanceof Error ? err.message : String(err) });
++    }
++  }
++
++  const parked = [...parkedByReason.entries()].map(([reason, ids]) => ({
++    reason,
++    count: ids.length,
++    ids,
++  }));
++
++  return {
++    posted,
++    skipped_existing: skippedExisting,
++    failed,
++    parked,
++    parkedPermanently: parked.reduce((acc, p) => acc + p.count, 0),
++    remaining: await deps.countRemainingEligible(),
++  };
++}
+diff --git a/src/lib/types.ts b/src/lib/types.ts
+index 10cdd7a..64e08b5 100644
+--- a/src/lib/types.ts
++++ b/src/lib/types.ts
+@@ -11,6 +11,11 @@ export interface JournalLineInput {
+   amount: Decimal | number | string;
+   isDebit: boolean;
+   memo?: string;
++  /**
++   * ISO currency code for the line (S1b: 'LKR'). Optional — omitted lines
++   * keep the schema default.
++   */
++  currency?: string;
+ }
+ 
+ export interface JournalEntryInput {
+@@ -22,7 +27,9 @@ export interface JournalEntryInput {
+   // 4-Eyes governance metadata (optional — populated by automated agents)
+   makerIdentity?: string;
+   tenantId?: string;
+-  agentConfidence?: number;
++  // Nullable so automated sources without a usable score record an explicit
++  // NULL in the audit trail (S1b) rather than a fabricated number.
++  agentConfidence?: number | null;
+   // RAJ-284 idempotency. Supply either a precomputed `idempotencyKey`, or a
+   // `source` + `sourceId` pair from which the key is derived (recommended).
+   idempotencyKey?: string;
+diff --git a/tests/unit/ocr-bridge-deps.test.ts b/tests/unit/ocr-bridge-deps.test.ts
+new file mode 100644
+index 0000000..7080097
+--- /dev/null
++++ b/tests/unit/ocr-bridge-deps.test.ts
+@@ -0,0 +1,147 @@
++/**
++ * S1b — production wiring of the bridge (src/lib/ocr-bridge.deps.ts), focused
++ * on the NO_FISCAL_PERIOD stranding fix (audit blocking finding #4).
++ *
++ * Production reality under test: the ledger has exactly ONE FiscalPeriod
++ * (FY2026) while `raj_fin_track.ocr_receipts` holds rows whose doc_date falls
++ * outside it. Before the fix those rows failed postEntry on every run AND
++ * stayed counted in `remaining`, so the documented "re-invoke until
++ * remaining: 0" loop never terminated. Now they must:
++ *   - park as NO_FISCAL_PERIOD (detected via the same FiscalPeriod lookup
++ *     LedgerService.checkFiscalPeriod performs — no date is ever fabricated
++ *     or clamped, contract §7), creating NO JournalEntry;
++ *   - be excluded from `remaining` by the SQL importable predicate, so a
++ *     second invocation over an all-out-of-period pool reports remaining: 0.
++ *
++ * Mocked Prisma via vi.doMock in the style of journal-idempotency.test.ts —
++ * no database. LedgerService is stubbed so any postEntry reach-through fails
++ * the test loudly.
++ */
++import { describe, it, expect, vi, beforeEach } from 'vitest';
++import type { OcrStagingRow } from '../../src/lib/ocr-bridge';
++
++const ORG = 'org-bridge';
++
++/** Staging rows dated 2024 — outside the sole FY2026 fiscal period. */
++function outOfPeriodRows(): OcrStagingRow[] {
++  return [1, 2].map((id) => ({
++    id,
++    source_file: `receipt-${id}.jpg`,
++    doc_date: new Date(`2024-0${id}-15T00:00:00Z`),
++    vendor_or_entity: 'Keells Super',
++    total_amount: '4500.0000',
++    currency: 'LKR',
++    category: 'Groceries',
++    raw_response: null,
++    ocr_status: 'success',
++  }));
++}
++
++/** A Prisma.sql fragment, duck-typed (Prisma.Sql is not constructable here). */
++function isSqlFragment(v: unknown): v is { strings: string[]; values: unknown[] } {
++  return (
++    typeof v === 'object' &&
++    v !== null &&
++    Array.isArray((v as { strings?: unknown }).strings) &&
++    Array.isArray((v as { values?: unknown }).values)
++  );
++}
++
++/** Flatten a $queryRaw tagged-template call (nested Prisma.sql included) to text. */
++function flattenSql(strings: readonly string[], values: readonly unknown[]): string {
++  return strings.reduce((acc, s, i) => {
++    if (i === 0) return s;
++    const v = values[i - 1];
++    const rendered = isSqlFragment(v) ? flattenSql(v.strings, v.values) : '?';
++    return `${acc}${rendered}${s}`;
++  }, '');
++}
++
++/**
++ * Wire the module mocks: $queryRaw serves the staging batch (all rows out of
++ * period) and answers the remaining-count query with 0 — which is what the
++ * importable predicate yields in Postgres when no open FiscalPeriod covers
++ * any staged doc_date. fiscalPeriod.findFirst finds no covering period.
++ */
++function setup() {
++  const queryTexts: string[] = [];
++  const $queryRaw = vi.fn(async (strings: TemplateStringsArray, ...values: unknown[]) => {
++    const sql = flattenSql(strings, values);
++    queryTexts.push(sql);
++    if (sql.includes('count(*)')) return [{ n: 0 }];
++    return outOfPeriodRows();
++  });
++  const fiscalFindFirst = vi.fn().mockResolvedValue(null); // sole period is FY2026
++  vi.doMock('../../src/lib/prisma', () => ({
++    prisma: { $queryRaw, fiscalPeriod: { findFirst: fiscalFindFirst } },
++    setRlsOrgContext: vi.fn(),
++  }));
++  const postEntryWithOutcome = vi.fn(async () => {
++    throw new Error('postEntry must never be reached for out-of-period rows');
++  });
++  vi.doMock('../../src/lib/ledger.service', () => ({
++    LedgerService: { postEntryWithOutcome },
++  }));
++  return { queryTexts, fiscalFindFirst, postEntryWithOutcome };
++}
++
++beforeEach(() => vi.resetModules());
++
++describe('runOcrBridgeImport — NO_FISCAL_PERIOD (audit blocking finding #4)', () => {
++  it('parks out-of-period rows with NO_FISCAL_PERIOD and writes no JournalEntry', async () => {
++    const { fiscalFindFirst, postEntryWithOutcome } = setup();
++    const { runOcrBridgeImport } = await import('../../src/lib/ocr-bridge.deps');
++    const summary = await runOcrBridgeImport(ORG);
++
++    expect(summary.parked).toEqual([{ reason: 'NO_FISCAL_PERIOD', count: 2, ids: [1, 2] }]);
++    expect(summary.parkedPermanently).toBe(2);
++    expect(summary.posted).toBe(0);
++    expect(summary.failed).toEqual([]); // parked with a reason, NOT failed
++    expect(postEntryWithOutcome).not.toHaveBeenCalled();
++
++    // Detection mirrors LedgerService.checkFiscalPeriod: open (not closed,
++    // not locked) period of THIS org covering the doc_date.
++    expect(fiscalFindFirst).toHaveBeenCalledWith({
++      where: {
++        organizationId: ORG,
++        startDate: { lte: new Date('2024-01-15T00:00:00Z') },
++        endDate: { gte: new Date('2024-01-15T00:00:00Z') },
++        isClosed: false,
++        locked: false,
++      },
++      select: { id: true },
++    });
++  });
++
++  it('returns remaining: 0 when everything left is permanently parked, so the loop terminates', async () => {
++    setup();
++    const { runOcrBridgeImport } = await import('../../src/lib/ocr-bridge.deps');
++
++    // Second invocation over the same all-out-of-period pool — before the
++    // fix this reported remaining > 0 forever (rows failed, never parked,
++    // still counted), making "re-invoke until remaining: 0" non-terminating.
++    const first = await runOcrBridgeImport(ORG);
++    const second = await runOcrBridgeImport(ORG);
++    expect(first.remaining).toBe(0);
++    expect(second.remaining).toBe(0);
++    expect(second.posted).toBe(0);
++    expect(second.parked).toEqual([{ reason: 'NO_FISCAL_PERIOD', count: 2, ids: [1, 2] }]);
++  });
++
++  it('excludes rows without an open covering FiscalPeriod from BOTH the remaining count and the batch priority', async () => {
++    const { queryTexts } = setup();
++    const { runOcrBridgeImport } = await import('../../src/lib/ocr-bridge.deps');
++    await runOcrBridgeImport(ORG);
++
++    const [batchSql, countSql] = queryTexts;
++    // Batch ordering demotes non-importable rows so they cannot starve the
++    // window; the remaining count applies the same importable predicate.
++    for (const sql of [batchSql, countSql]) {
++      expect(sql).toContain('"FiscalPeriod"');
++      expect(sql).toContain('"isClosed" = false');
++      expect(sql).toContain('"locked" = false');
++    }
++    expect(batchSql).toContain('ORDER BY');
++    expect(countSql).toContain('count(*)');
++  });
++});
+diff --git a/tests/unit/ocr-bridge-route.test.ts b/tests/unit/ocr-bridge-route.test.ts
+new file mode 100644
+index 0000000..569c910
+--- /dev/null
++++ b/tests/unit/ocr-bridge-route.test.ts
+@@ -0,0 +1,186 @@
++/**
++ * S1b — POST /api/ingest/ocr-bridge authorization + input guards.
++ *
++ * The bridge imports an ORG-LESS staging pool, so the route carries the whole
++ * tenancy defence (see src/lib/ocr-bridge.deps.ts):
++ *   401  unauthenticated;
++ *   403  authenticated but not OWNER/ADMIN (role gate);
++ *   503  OCR_BRIDGE_ORG_ID unset — fail closed, never guess an org;
++ *   403  caller's organization ≠ OCR_BRIDGE_ORG_ID (org binding);
++ *   400  body is valid JSON but not a plain object (null/array/primitive).
++ *
++ * Mocked-module tests in the style of approval-actions.test.ts — no database;
++ * runOcrBridgeImport is stubbed and must only be reached by authorized calls.
++ */
++import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
++
++const ORG = 'org-bridge';
++
++const summary = {
++  posted: 1,
++  skipped_existing: 0,
++  failed: [],
++  parked: [],
++  parkedPermanently: 0,
++  remaining: 0,
++};
++
++interface SetupOverrides {
++  unauthenticated?: boolean;
++  role?: string;
++  organizationId?: string;
++}
++
++function setup(overrides: SetupOverrides = {}) {
++  const runOcrBridgeImport = vi.fn().mockResolvedValue(summary);
++  vi.doMock('../../src/lib/ocr-bridge.deps', () => ({ runOcrBridgeImport }));
++  vi.doMock('../../src/lib/auth-context', () => ({
++    resolveActiveContext: vi.fn().mockResolvedValue(
++      overrides.unauthenticated
++        ? { ok: false, error: 'Not authenticated. Sign in to continue.' }
++        : {
++            ok: true,
++            context: {
++              organizationId: overrides.organizationId ?? ORG,
++              organizationName: 'Bridge Org',
++              userId: 'user-1',
++              role: overrides.role ?? 'OWNER',
++            },
++          },
++    ),
++  }));
++  return { runOcrBridgeImport };
++}
++
++async function post(body?: string) {
++  const { POST } = await import('../../src/app/api/ingest/ocr-bridge/route');
++  return POST(
++    new Request('http://localhost/api/ingest/ocr-bridge', {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body,
++    }),
++  );
++}
++
++beforeEach(() => {
++  vi.resetModules();
++  vi.stubEnv('OCR_BRIDGE_ORG_ID', ORG);
++});
++
++afterEach(() => vi.unstubAllEnvs());
++
++describe('POST /api/ingest/ocr-bridge — authorization', () => {
++  it('returns 401 when unauthenticated', async () => {
++    const { runOcrBridgeImport } = setup({ unauthenticated: true });
++    const res = await post();
++    expect(res.status).toBe(401);
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++
++  it('returns 403 for authenticated members without OWNER/ADMIN role', async () => {
++    for (const role of ['BOOKKEEPER', 'ACCOUNTANT', 'VIEWER', 'owner', '']) {
++      vi.resetModules();
++      const { runOcrBridgeImport } = setup({ role });
++      const res = await post();
++      expect(res.status).toBe(403);
++      const body = await res.json();
++      expect(body.error).toMatch(/OWNER or ADMIN/);
++      expect(runOcrBridgeImport).not.toHaveBeenCalled();
++    }
++  });
++
++  it('allows OWNER and ADMIN roles through the gate', async () => {
++    for (const role of ['OWNER', 'ADMIN']) {
++      vi.resetModules();
++      const { runOcrBridgeImport } = setup({ role });
++      const res = await post();
++      expect(res.status).toBe(200);
++      expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, expect.any(Number));
++    }
++  });
++
++  it('fails closed with 503 when OCR_BRIDGE_ORG_ID is unset', async () => {
++    vi.stubEnv('OCR_BRIDGE_ORG_ID', '');
++    const { runOcrBridgeImport } = setup();
++    const res = await post();
++    expect(res.status).toBe(503);
++    expect((await res.json()).error).toBe(
++      'OCR bridge is not configured (OCR_BRIDGE_ORG_ID unset).',
++    );
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++
++  it("returns 403 when the caller's organization is not the configured bridge org", async () => {
++    const { runOcrBridgeImport } = setup({ organizationId: 'org-other' });
++    const res = await post();
++    expect(res.status).toBe(403);
++    expect((await res.json()).error).toMatch(/not bound to your organization/);
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++});
++
++describe('POST /api/ingest/ocr-bridge — body validation', () => {
++  it('returns 400 for a JSON null body instead of an unstructured 500', async () => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post('null');
++    expect(res.status).toBe(400);
++    expect((await res.json()).error).toBe('Request body must be a JSON object.');
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++
++  it('returns 400 for JSON array and primitive bodies', async () => {
++    for (const body of ['[]', '42', '"batchSize"', 'true']) {
++      vi.resetModules();
++      const { runOcrBridgeImport } = setup();
++      const res = await post(body);
++      expect(res.status).toBe(400);
++      expect(runOcrBridgeImport).not.toHaveBeenCalled();
++    }
++  });
++
++  it('returns 400 for malformed JSON', async () => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post('{not json');
++    expect(res.status).toBe(400);
++    expect((await res.json()).error).toBe('Request body must be valid JSON.');
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++
++  it('treats an empty body as defaults and runs the import for the caller org', async () => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post();
++    expect(res.status).toBe(200);
++    expect(await res.json()).toEqual(summary);
++    expect(runOcrBridgeImport).toHaveBeenCalledTimes(1);
++    expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, 50);
++  });
++
++  it('honours an explicit valid batchSize', async () => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post(JSON.stringify({ batchSize: 7 }));
++    expect(res.status).toBe(200);
++    expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, 7);
++  });
++
++  it.each([
++    ['zero', 0],
++    ['negative', -5],
++    ['non-integer', 1.5],
++    ['above the maximum', 201],
++    ['a string', '50'],
++  ])('rejects batchSize %s with 400 and never runs the import', async (_label, value) => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post(JSON.stringify({ batchSize: value }));
++    expect(res.status).toBe(400);
++    expect((await res.json()).error).toBe('batchSize must be an integer between 1 and 200.');
++    expect(runOcrBridgeImport).not.toHaveBeenCalled();
++  });
++
++  it.each([1, 200])('accepts the exact boundary batchSize %i', async (value) => {
++    const { runOcrBridgeImport } = setup();
++    const res = await post(JSON.stringify({ batchSize: value }));
++    expect(res.status).toBe(200);
++    expect(runOcrBridgeImport).toHaveBeenCalledWith(ORG, value);
++  });
++});
+diff --git a/tests/unit/ocr-bridge.test.ts b/tests/unit/ocr-bridge.test.ts
+new file mode 100644
+index 0000000..bee15f6
+--- /dev/null
++++ b/tests/unit/ocr-bridge.test.ts
+@@ -0,0 +1,512 @@
++/**
++ * S1b — staging→ledger bridge (`raj_fin_track.ocr_receipts` → JournalEntry).
++ *
++ * Contract under test: docs/runs/S1B-BRIDGE-CONTRACT.md.
++ *   - Eligibility: POST only when ocr_status='success' AND total_amount>0
++ *     AND doc_date present AND currency='LKR' AND an open FiscalPeriod covers
++ *     doc_date; everything else PARKS with a reason code (OCR_FAILED |
++ *     NO_DOC_DATE | BAD_AMOUNT | FX_UNSUPPORTED | NO_FISCAL_PERIOD).
++ *   - Idempotency key = 'ocr-receipt:' + source_file (replay-safe).
++ *   - Status is ALWAYS DRAFT via gateAutomatedJournalEntry — no confidence
++ *     score (including exactly 1.0) can force POSTED.
++ *   - Batched (default 50), per-row failure isolation, and the summary
++ *     reconciles: posted + skipped_existing + failed + parked = input count.
++ *
++ * Pure deps-injection tests — the core (src/lib/ocr-bridge.ts) has zero
++ * Prisma imports, so no database or mocking of the prisma singleton is needed.
++ */
++import { describe, it, expect, vi } from 'vitest';
++import { Decimal } from 'decimal.js';
++import {
++  classifyStagingRow,
++  buildJournalInput,
++  extractConfidence,
++  importOcrReceipts,
++  DEFAULT_BATCH_SIZE,
++  type OcrStagingRow,
++  type OcrBridgeDeps,
++} from '../../src/lib/ocr-bridge';
++import { JournalStatus } from '../../src/lib/types';
++
++// ─── Fixtures ────────────────────────────────────────────────────────────────
++
++let nextId = 1;
++
++/** A fully eligible (POST) staging row; override fields to make it park. */
++function makeRow(overrides: Partial<OcrStagingRow> = {}): OcrStagingRow {
++  const id = nextId++;
++  return {
++    id,
++    source_file: `receipt-${id}.jpg`,
++    doc_date: new Date('2026-06-15T00:00:00Z'),
++    vendor_or_entity: 'Keells Super',
++    total_amount: '4500.0000', // pg numeric arrives as text via $queryRaw
++    currency: 'LKR',
++    category: 'Groceries',
++    raw_response: null,
++    ocr_status: 'success',
++    ...overrides,
++  };
++}
++
++function makeDeps(overrides: Partial<OcrBridgeDeps> = {}): OcrBridgeDeps {
++  return {
++    ensureVendor: vi.fn().mockResolvedValue(undefined),
++    resolveExpenseAccountId: vi.fn().mockResolvedValue('acct-expense'),
++    resolveBankAccountId: vi.fn().mockResolvedValue('acct-bank'),
++    postEntry: vi.fn().mockResolvedValue({ entryId: 'je-1', created: true }),
++    hasOpenFiscalPeriod: vi.fn().mockResolvedValue(true),
++    countRemainingEligible: vi.fn().mockResolvedValue(0),
++    ...overrides,
++  };
++}
++
++const ORG = 'org-1';
++
++// ─── Eligibility classification ──────────────────────────────────────────────
++
++describe('classifyStagingRow', () => {
++  it('POSTs a success row with positive LKR amount and a doc_date', () => {
++    expect(classifyStagingRow(makeRow())).toEqual({ kind: 'POST' });
++  });
++
++  it('parks OCR_FAILED when ocr_status is not "success"', () => {
++    expect(classifyStagingRow(makeRow({ ocr_status: 'failed' }))).toEqual({
++      kind: 'PARK',
++      reason: 'OCR_FAILED',
++    });
++  });
++
++  it('parks OCR_FAILED when ocr_status is null (boundary)', () => {
++    expect(classifyStagingRow(makeRow({ ocr_status: null }))).toEqual({
++      kind: 'PARK',
++      reason: 'OCR_FAILED',
++    });
++  });
++
++  it('parks BAD_AMOUNT when total_amount is exactly 0 (boundary)', () => {
++    expect(classifyStagingRow(makeRow({ total_amount: '0.0000' }))).toEqual({
++      kind: 'PARK',
++      reason: 'BAD_AMOUNT',
++    });
++  });
++
++  it('parks BAD_AMOUNT when total_amount is null', () => {
++    expect(classifyStagingRow(makeRow({ total_amount: null }))).toEqual({
++      kind: 'PARK',
++      reason: 'BAD_AMOUNT',
++    });
++  });
++
++  it('parks BAD_AMOUNT when total_amount is negative', () => {
++    expect(classifyStagingRow(makeRow({ total_amount: '-12.5000' }))).toEqual({
++      kind: 'PARK',
++      reason: 'BAD_AMOUNT',
++    });
++  });
++
++  it('parks BAD_AMOUNT when total_amount is not numeric', () => {
++    expect(classifyStagingRow(makeRow({ total_amount: 'garbage' }))).toEqual({
++      kind: 'PARK',
++      reason: 'BAD_AMOUNT',
++    });
++  });
++
++  it('parks NO_DOC_DATE when doc_date is null — dates are never fabricated', () => {
++    expect(classifyStagingRow(makeRow({ doc_date: null }))).toEqual({
++      kind: 'PARK',
++      reason: 'NO_DOC_DATE',
++    });
++  });
++
++  it('parks NO_DOC_DATE when doc_date is unparseable', () => {
++    expect(classifyStagingRow(makeRow({ doc_date: 'not-a-date' }))).toEqual({
++      kind: 'PARK',
++      reason: 'NO_DOC_DATE',
++    });
++  });
++
++  it('parks FX_UNSUPPORTED for non-LKR currency', () => {
++    for (const currency of ['GBP', 'USD', 'other']) {
++      expect(classifyStagingRow(makeRow({ currency }))).toEqual({
++        kind: 'PARK',
++        reason: 'FX_UNSUPPORTED',
++      });
++    }
++  });
++
++  it('parks FX_UNSUPPORTED when currency is null (boundary — LKR books only)', () => {
++    expect(classifyStagingRow(makeRow({ currency: null }))).toEqual({
++      kind: 'PARK',
++      reason: 'FX_UNSUPPORTED',
++    });
++  });
++
++  it('applies precedence: a failed-OCR row with a bad amount parks as OCR_FAILED', () => {
++    expect(
++      classifyStagingRow(makeRow({ ocr_status: 'error', total_amount: null, doc_date: null })),
++    ).toEqual({ kind: 'PARK', reason: 'OCR_FAILED' });
++  });
++});
++
++// ─── Journal input mapping ───────────────────────────────────────────────────
++
++describe('buildJournalInput', () => {
++  const ctx = { organizationId: ORG, expenseAccountId: 'acct-expense', bankAccountId: 'acct-bank' };
++
++  it('derives the idempotency key as "ocr-receipt:" + source_file', () => {
++    const input = buildJournalInput(makeRow({ source_file: 'scan 001.pdf' }), ctx);
++    expect(input.idempotencyKey).toBe('ocr-receipt:scan 001.pdf');
++  });
++
++  it('sets source=OCR_RECEIPT, sourceId=String(id), maker identity and org', () => {
++    const input = buildJournalInput(makeRow({ id: 42 }), ctx);
++    expect(input.source).toBe('OCR_RECEIPT');
++    expect(input.sourceId).toBe('42');
++    expect(input.makerIdentity).toBe('booklets-automation-service');
++    expect(input.organizationId).toBe(ORG);
++    expect(input.tenantId).toBe(ORG);
++  });
++
++  it('builds the AUTOMATED S1b memo with the vendor name', () => {
++    const input = buildJournalInput(
++      makeRow({ source_file: 'r1.jpg', vendor_or_entity: 'Cargills' }),
++      ctx,
++    );
++    expect(input.memo).toBe('AUTOMATED S1b: Receipt r1.jpg — Cargills');
++  });
++
++  it('falls back to "unknown vendor" in the memo when vendor_or_entity is null', () => {
++    const input = buildJournalInput(
++      makeRow({ source_file: 'r2.jpg', vendor_or_entity: null }),
++      ctx,
++    );
++    expect(input.memo).toBe('AUTOMATED S1b: Receipt r2.jpg — unknown vendor');
++  });
++
++  it('uses doc_date as the entry date', () => {
++    const input = buildJournalInput(makeRow({ doc_date: '2026-05-02' }), ctx);
++    expect(input.date).toBeInstanceOf(Date);
++    expect(input.date.toISOString().slice(0, 10)).toBe('2026-05-02');
++  });
++
++  it('creates exactly two balanced LKR lines: debit expense, credit bank', () => {
++    const input = buildJournalInput(makeRow({ total_amount: '1234.5600' }), ctx);
++    expect(input.lines).toHaveLength(2);
++
++    const [debit, credit] = input.lines;
++    expect(debit.accountId).toBe('acct-expense');
++    expect(debit.isDebit).toBe(true);
++    expect(debit.currency).toBe('LKR');
++    expect(new Decimal(debit.amount.toString()).toFixed(4)).toBe('1234.5600');
++
++    expect(credit.accountId).toBe('acct-bank');
++    expect(credit.isDebit).toBe(false);
++    expect(credit.currency).toBe('LKR');
++    expect(new Decimal(credit.amount.toString()).toFixed(4)).toBe('1234.5600');
++  });
++
++  it('takes agentConfidence from raw_response when present', () => {
++    const input = buildJournalInput(makeRow({ raw_response: { confidence: 0.87 } }), ctx);
++    expect(input.agentConfidence).toBe(0.87);
++  });
++
++  it('leaves agentConfidence null when raw_response has no confidence', () => {
++    expect(buildJournalInput(makeRow({ raw_response: null }), ctx).agentConfidence).toBeNull();
++    expect(
++      buildJournalInput(makeRow({ raw_response: { vendor: 'x' } }), ctx).agentConfidence,
++    ).toBeNull();
++  });
++});
++
++describe('extractConfidence', () => {
++  it('returns a numeric top-level confidence', () => {
++    expect(extractConfidence({ confidence: 0.5 })).toBe(0.5);
++  });
++
++  it('returns null for null, non-object, missing or non-numeric confidence', () => {
++    expect(extractConfidence(null)).toBeNull();
++    expect(extractConfidence('0.9')).toBeNull();
++    expect(extractConfidence({})).toBeNull();
++    expect(extractConfidence({ confidence: 'high' })).toBeNull();
++  });
++});
++
++// ─── DRAFT-always (D3 gate) ──────────────────────────────────────────────────
++
++describe('DRAFT-always via gateAutomatedJournalEntry', () => {
++  const ctx = { organizationId: ORG, expenseAccountId: 'a', bankAccountId: 'b' };
++
++  it('lands as DRAFT with no confidence at all', () => {
++    expect(buildJournalInput(makeRow(), ctx).status).toBe(JournalStatus.DRAFT);
++  });
++
++  it('lands as DRAFT even at confidence 1.0 — no score can force POSTED', () => {
++    for (const confidence of [0.5, 0.95, 0.99999, 1.0]) {
++      const input = buildJournalInput(makeRow({ raw_response: { confidence } }), ctx);
++      expect(input.status).toBe(JournalStatus.DRAFT);
++    }
++  });
++
++  it('never hands postEntry anything but DRAFT across a whole batch', async () => {
++    const posted: string[] = [];
++    const deps = makeDeps({
++      postEntry: vi.fn(async (input) => {
++        posted.push(input.status as string);
++        return { entryId: `je-${posted.length}`, created: true };
++      }),
++    });
++    const rows = [
++      makeRow({ raw_response: { confidence: 1.0 } }),
++      makeRow({ raw_response: { confidence: 0.99 } }),
++      makeRow(),
++    ];
++    await importOcrReceipts(rows, deps, { organizationId: ORG });
++    expect(posted).toEqual([JournalStatus.DRAFT, JournalStatus.DRAFT, JournalStatus.DRAFT]);
++  });
++
++  it('fails the row loudly (not silently posted) when raw confidence is out of contract', async () => {
++    const deps = makeDeps();
++    const rows = [makeRow({ raw_response: { confidence: 1.5 } })];
++    const summary = await importOcrReceipts(rows, deps, { organizationId: ORG });
++    expect(summary.posted).toBe(0);
++    expect(summary.failed).toHaveLength(1);
++    expect(summary.failed[0].id).toBe(rows[0].id);
++    // The gate rejects BEFORE any writes for that row.
++    expect(deps.postEntry).not.toHaveBeenCalled();
++    expect(deps.ensureVendor).not.toHaveBeenCalled();
++  });
++});
++
++// ─── Importer orchestration ──────────────────────────────────────────────────
++
++describe('importOcrReceipts', () => {
++  it('exposes the contract default batch size of 50', () => {
++    expect(DEFAULT_BATCH_SIZE).toBe(50);
++  });
++
++  it('processes at most batchSize rows per invocation', async () => {
++    const deps = makeDeps({ countRemainingEligible: vi.fn().mockResolvedValue(3) });
++    const rows = Array.from({ length: 5 }, () => makeRow());
++    const summary = await importOcrReceipts(rows, deps, { organizationId: ORG, batchSize: 2 });
++    expect(deps.postEntry).toHaveBeenCalledTimes(2);
++    expect(summary.posted).toBe(2);
++    expect(summary.remaining).toBe(3);
++  });
++
++  it('defaults the batch size to 50', async () => {
++    const deps = makeDeps();
++    const rows = Array.from({ length: 60 }, () => makeRow());
++    const summary = await importOcrReceipts(rows, deps, { organizationId: ORG });
++    expect(deps.postEntry).toHaveBeenCalledTimes(50);
++    expect(summary.posted).toBe(50);
++  });
++
++  it('counts idempotency conflicts as skipped_existing, not errors', async () => {
++    const deps = makeDeps({
++      postEntry: vi
++        .fn()
++        .mockResolvedValueOnce({ entryId: 'je-1', created: true })
++        .mockResolvedValueOnce({ entryId: 'je-old', created: false })
++        .mockResolvedValueOnce({ entryId: 'je-2', created: true }),
++    });
++    const summary = await importOcrReceipts([makeRow(), makeRow(), makeRow()], deps, {
++      organizationId: ORG,
++    });
++    expect(summary.posted).toBe(2);
++    expect(summary.skipped_existing).toBe(1);
++    expect(summary.failed).toEqual([]);
++  });
++
++  it('counts a concurrent-race loser as skipped_existing, not posted (TOCTOU)', async () => {
++    // Two imports race over the SAME staging rows. The shared "database"
++    // below models postEntryWithOutcome: the first writer of a key persists
++    // it (created: true); the race loser observes the existing row and gets
++    // created: false. Both runs must reconcile without double-counting.
++    const persisted = new Set<string>();
++    function racingDeps(): OcrBridgeDeps {
++      return makeDeps({
++        postEntry: vi.fn(async (input) => {
++          const key = input.idempotencyKey as string;
++          if (persisted.has(key)) return { entryId: `je-${key}`, created: false };
++          // Yield before the "write" so the two runs genuinely interleave.
++          await Promise.resolve();
++          if (persisted.has(key)) return { entryId: `je-${key}`, created: false };
++          persisted.add(key);
++          return { entryId: `je-${key}`, created: true };
++        }),
++      });
++    }
++    const rows = [makeRow(), makeRow(), makeRow()];
++    const [a, b] = await Promise.all([
++      importOcrReceipts(rows, racingDeps(), { organizationId: ORG }),
++      importOcrReceipts(rows, racingDeps(), { organizationId: ORG }),
++    ]);
++    // Each row is created exactly once across both runs; every other attempt
++    // is a skip. Nothing fails and nothing is double-posted.
++    expect(a.posted + b.posted).toBe(rows.length);
++    expect(a.skipped_existing + b.skipped_existing).toBe(rows.length);
++    expect(a.failed).toEqual([]);
++    expect(b.failed).toEqual([]);
++    expect(a.posted + a.skipped_existing).toBe(rows.length);
++    expect(b.posted + b.skipped_existing).toBe(rows.length);
++  });
++
++  it('isolates per-row failures: one bad row does not abort the batch', async () => {
++    let call = 0;
++    const deps = makeDeps({
++      postEntry: vi.fn(async () => {
++        call += 1;
++        if (call === 2) throw new Error('fiscal period closed');
++        return { entryId: `je-${call}`, created: true };
++      }),
++    });
++    const rows = [makeRow(), makeRow(), makeRow()];
++    const summary = await importOcrReceipts(rows, deps, { organizationId: ORG });
++    expect(summary.posted).toBe(2);
++    expect(summary.failed).toEqual([{ id: rows[1].id, error: 'fiscal period closed' }]);
++  });
++
++  it('aggregates parked rows by reason with their staging ids', async () => {
++    const deps = makeDeps();
++    const failedOcr = makeRow({ ocr_status: 'failed' });
++    const noDate1 = makeRow({ doc_date: null });
++    const noDate2 = makeRow({ doc_date: null });
++    const fx = makeRow({ currency: 'USD' });
++    const summary = await importOcrReceipts([failedOcr, noDate1, noDate2, fx], deps, {
++      organizationId: ORG,
++    });
++    expect(summary.posted).toBe(0);
++    expect(summary.parked).toEqual(
++      expect.arrayContaining([
++        { reason: 'OCR_FAILED', count: 1, ids: [failedOcr.id] },
++        { reason: 'NO_DOC_DATE', count: 2, ids: [noDate1.id, noDate2.id] },
++        { reason: 'FX_UNSUPPORTED', count: 1, ids: [fx.id] },
++      ]),
++    );
++    expect(summary.parked).toHaveLength(3); // no empty reason buckets
++    expect(summary.parkedPermanently).toBe(4);
++  });
++
++  // ─── NO_FISCAL_PERIOD (audit blocking finding #4) ──────────────────────────
++
++  it('parks NO_FISCAL_PERIOD when no open fiscal period covers doc_date — no entry, no failure', async () => {
++    const deps = makeDeps({ hasOpenFiscalPeriod: vi.fn().mockResolvedValue(false) });
++    const row = makeRow({ doc_date: new Date('2025-03-10T00:00:00Z') });
++    const summary = await importOcrReceipts([row], deps, { organizationId: ORG });
++    expect(summary.parked).toEqual([{ reason: 'NO_FISCAL_PERIOD', count: 1, ids: [row.id] }]);
++    expect(summary.parkedPermanently).toBe(1);
++    expect(summary.posted).toBe(0);
++    expect(summary.failed).toEqual([]); // parked, NOT stranded in failed
++    // Parking means NO writes of any kind: no JournalEntry, no vendor,
++    // no account/category rows.
++    expect(deps.postEntry).not.toHaveBeenCalled();
++    expect(deps.ensureVendor).not.toHaveBeenCalled();
++    expect(deps.resolveExpenseAccountId).not.toHaveBeenCalled();
++  });
++
++  it('checks the period with the row doc_date and never clamps a date into one (contract §7)', async () => {
++    const hasOpenFiscalPeriod = vi.fn(async (d: Date) => d.getUTCFullYear() === 2026);
++    const deps = makeDeps({ hasOpenFiscalPeriod });
++    const inPeriod = makeRow({ doc_date: new Date('2026-06-15T00:00:00Z') });
++    const outOfPeriod = makeRow({ doc_date: new Date('2024-12-31T00:00:00Z') });
++    const summary = await importOcrReceipts([inPeriod, outOfPeriod], deps, {
++      organizationId: ORG,
++    });
++    expect(hasOpenFiscalPeriod).toHaveBeenCalledWith(new Date('2024-12-31T00:00:00Z'));
++    expect(summary.posted).toBe(1);
++    expect(summary.parked).toEqual([
++      { reason: 'NO_FISCAL_PERIOD', count: 1, ids: [outOfPeriod.id] },
++    ]);
++    // The row that DID post kept its own doc_date untouched.
++    const input = vi.mocked(deps.postEntry).mock.calls[0][0];
++    expect((input.date as Date).toISOString().slice(0, 10)).toBe('2026-06-15');
++  });
++
++  it('pure park reasons take precedence — the fiscal period is never consulted for them', async () => {
++    const deps = makeDeps({ hasOpenFiscalPeriod: vi.fn().mockResolvedValue(false) });
++    const summary = await importOcrReceipts([makeRow({ doc_date: null })], deps, {
++      organizationId: ORG,
++    });
++    expect(summary.parked).toEqual([{ reason: 'NO_DOC_DATE', count: 1, ids: expect.any(Array) }]);
++    expect(deps.hasOpenFiscalPeriod).not.toHaveBeenCalled();
++  });
++
++  it('reconciles: posted + skipped_existing + failed + parked === input count', async () => {
++    let call = 0;
++    const deps = makeDeps({
++      postEntry: vi.fn(async () => {
++        call += 1;
++        if (call === 1) throw new Error('boom');
++        if (call === 2) return { entryId: 'je-existing', created: false };
++        return { entryId: `je-${call}`, created: true };
++      }),
++    });
++    const rows = [
++      makeRow(), // fails (boom)
++      makeRow(), // skipped_existing
++      makeRow(), // posted
++      makeRow(), // posted
++      makeRow({ ocr_status: 'failed' }),
++      makeRow({ doc_date: null }),
++      makeRow({ total_amount: '0' }),
++      makeRow({ currency: 'GBP' }),
++    ];
++    const summary = await importOcrReceipts(rows, deps, { organizationId: ORG });
++    const parkedTotal = summary.parked.reduce((acc, p) => acc + p.count, 0);
++    expect(summary.posted).toBe(2);
++    expect(summary.skipped_existing).toBe(1);
++    expect(summary.failed).toHaveLength(1);
++    expect(parkedTotal).toBe(4);
++    expect(summary.parkedPermanently).toBe(parkedTotal);
++    expect(summary.posted + summary.skipped_existing + summary.failed.length + parkedTotal).toBe(
++      rows.length,
++    );
++  });
++
++  it('resolves the expense account from the row category and credits the bank account', async () => {
++    const captured: unknown[] = [];
++    const deps = makeDeps({
++      resolveExpenseAccountId: vi.fn().mockResolvedValue('acct-utilities'),
++      postEntry: vi.fn(async (input) => {
++        captured.push(input);
++        return { entryId: 'je-1', created: true };
++      }),
++    });
++    const row = makeRow({ category: 'Utilities' });
++    await importOcrReceipts([row], deps, { organizationId: ORG });
++    expect(deps.resolveExpenseAccountId).toHaveBeenCalledWith('Utilities');
++    const input = captured[0] as ReturnType<typeof buildJournalInput>;
++    expect(input.lines[0].accountId).toBe('acct-utilities');
++    expect(input.lines[1].accountId).toBe('acct-bank');
++  });
++
++  it('resolves-or-creates the vendor for posted rows, but not for null vendors', async () => {
++    const deps = makeDeps();
++    await importOcrReceipts(
++      [makeRow({ vendor_or_entity: 'Cargills' }), makeRow({ vendor_or_entity: null })],
++      deps,
++      { organizationId: ORG },
++    );
++    expect(deps.ensureVendor).toHaveBeenCalledTimes(1);
++    expect(deps.ensureVendor).toHaveBeenCalledWith('Cargills');
++  });
++
++  it('never touches vendor/account/post deps for parked rows', async () => {
++    const deps = makeDeps();
++    await importOcrReceipts(
++      [makeRow({ ocr_status: 'failed' }), makeRow({ currency: 'USD' })],
++      deps,
++      { organizationId: ORG },
++    );
++    expect(deps.ensureVendor).not.toHaveBeenCalled();
++    expect(deps.resolveExpenseAccountId).not.toHaveBeenCalled();
++    expect(deps.postEntry).not.toHaveBeenCalled();
++  });
++
++  it('reports remaining from the deps count so callers can re-invoke until 0', async () => {
++    const deps = makeDeps({ countRemainingEligible: vi.fn().mockResolvedValue(129) });
++    const summary = await importOcrReceipts([makeRow()], deps, { organizationId: ORG });
++    expect(summary.remaining).toBe(129);
++  });
++});

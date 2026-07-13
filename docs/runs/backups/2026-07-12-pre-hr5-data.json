@@ -1,0 +1,95 @@
+{
+  "_meta": {
+    "purpose": "HR-5 Step-0 backup — full data snapshot of the prod public schema BEFORE the migration-baseline DDL. Taken read-only via the authorized Supabase connector. Companion schema DDL: 2026-07-12-pre-hr5-schema.sql (pg_catalog introspection of the same state).",
+    "snapshot_utc": "2026-07-12T23:33:03.334727+00:00",
+    "project": "euqdfxekrxnoibeahogq",
+    "scope": "public schema only — raj_fin_track is untouched by HR-5 and excluded by design",
+    "row_counts": {
+      "Organization": 1, "User": 1, "Membership": 1, "Property": 3, "Owner": 0,
+      "PropertyOwnership": 0, "OwnerStatement": 0, "Account": 6, "FiscalPeriod": 1,
+      "GuestPayout": 0, "JournalEntry": 10, "JournalLine": 20, "Channel": 3,
+      "Booking": 11, "BookingCharge": 0, "Vendor": 0, "ExpenseCategory": 0,
+      "Expense": 0, "EvidenceLog": 0, "ActionIntentQueue": 0
+    },
+    "restore_note": "To restore: recreate schema from the companion .sql, then INSERT each array below in the file's key order (respects FK dependencies). All timestamps are naive-UTC as stored."
+  },
+  "Organization": [{"id":"org_booklets","name":"BookLets Portfolio","slug":"default","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206"}],
+  "User": [{"id":"cmp5xaaxp000004kvuwkvlit0","name":"Raj Abeysinghe","email":"rajabey68@gmail.com","image":"https://lh3.googleusercontent.com/a/ACg8ocI4knIfWFNDm97MlMjQsa-2B3enSE_Kt6qCrZcHq6fEY1ZgPujo=s96-c","createdAt":"2026-05-14T20:10:07.453","updatedAt":"2026-07-09T13:27:53.947","emailVerified":"2026-05-14T20:10:07.16"}],
+  "Membership": [{"id":"69157f57-8f3d-4998-8e43-54e7ac629d48","role":"OWNER","userId":"cmp5xaaxp000004kvuwkvlit0","createdAt":"2026-05-14T20:10:30.286","organizationId":"org_booklets"}],
+  "Property": [
+    {"id":"prop_marina_suite","name":"Marina Suite","type":"APARTMENT","status":"ACTIVE","address":"14 Harbour View, Dún Laoghaire, Dublin","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"organizationId":"org_booklets"},
+    {"id":"prop_temple_bar","name":"Temple Bar Loft","type":"APARTMENT","status":"ACTIVE","address":"8 Crown Alley, Temple Bar, Dublin 2","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"organizationId":"org_booklets"},
+    {"id":"prop_coastal_cottage","name":"Coastal Cottage","type":"HOUSE","status":"ACTIVE","address":"3 Strand Road, Portmarnock, Co. Dublin","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"organizationId":"org_booklets"}
+  ],
+  "Owner": [],
+  "PropertyOwnership": [],
+  "OwnerStatement": [],
+  "Account": [
+    {"id":"acc_operating_cash","code":"1000","name":"Operating Cash","type":"ASSET","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"},
+    {"id":"acc_guest_prepayments","code":"2000","name":"Guest Pre-payments","type":"LIABILITY","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"},
+    {"id":"acc_rental_income","code":"4000","name":"Rental Income","type":"REVENUE","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"},
+    {"id":"acc_cleaning_fee_income","code":"4100","name":"Cleaning Fee Income","type":"REVENUE","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"},
+    {"id":"acc_commission_expense","code":"6000","name":"Commission Expense","type":"EXPENSE","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"},
+    {"id":"acc_suspense","code":"9999","name":"Suspense","type":"SUSPENSE","locked":false,"closedAt":null,"currency":"EUR","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","organizationId":"org_booklets"}
+  ],
+  "FiscalPeriod": [{"id":"fp_2026","name":"FY 2026","locked":false,"endDate":"2026-12-31T00:00:00","closedAt":null,"isClosed":false,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","startDate":"2026-01-01T00:00:00","organizationId":"org_booklets"}],
+  "GuestPayout": [],
+  "JournalEntry": [
+    {"id":"je_001","date":"2026-01-10T00:00:00","memo":"Marina Suite — Airbnb booking Jan 5–10","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_002","date":"2026-01-12T00:00:00","memo":"Temple Bar Loft — Airbnb booking Jan 8–12","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_003","date":"2026-02-07T00:00:00","memo":"Coastal Cottage — Booking.com Feb 1–7","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_004","date":"2026-02-18T00:00:00","memo":"Marina Suite — Direct booking Feb 14–18","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_005","date":"2026-03-08T00:00:00","memo":"Temple Bar Loft — Booking.com Mar 3–8","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_006","date":"2026-03-25T00:00:00","memo":"Coastal Cottage — Airbnb Mar 20–25","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_007","date":"2026-03-28T00:00:00","memo":"Q1 Airbnb platform commission","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_008","date":"2026-05-07T00:00:00","memo":"Coastal Cottage — Airbnb May 2–7","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_009","date":"2026-05-13T00:00:00","memo":"Marina Suite — Booking.com May 9–13","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null},
+    {"id":"je_010","date":"2026-05-13T00:00:00","memo":"May Booking.com commission","status":"POSTED","tenantId":null,"createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","updatedAt":"2026-05-14T17:12:18.206","updatedBy":null,"makerIdentity":"seed","organizationId":"org_booklets","agentConfidence":null}
+  ],
+  "JournalLine": [
+    {"id":"dd79d29d-5ea0-4d0f-93f9-4f6a6bf6cc8c","amount":1250,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_001"},
+    {"id":"3857b2df-5513-4b79-beb9-6829dde8e569","amount":1250,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_001"},
+    {"id":"eb708e56-3bb9-4394-b4c9-3f1a9ef99e8b","amount":980,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_002"},
+    {"id":"5df5921b-2b58-4c8f-8859-1e4e46bde79a","amount":980,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_002"},
+    {"id":"78cb8b2c-de28-4f12-a0e9-2e73fce6bf86","amount":1540,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_003"},
+    {"id":"89168c2c-b96e-49bd-b91f-7cbe65d4c71d","amount":1540,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_003"},
+    {"id":"96993c65-7a8e-4b01-945d-979ba74f2e21","amount":900,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_004"},
+    {"id":"5b65908b-07ac-41d7-b6fb-715af234d9b6","amount":900,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_004"},
+    {"id":"ed073e1f-ab5e-491b-ab4d-69bd9fdde35b","amount":1100,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_005"},
+    {"id":"24f5d8ad-d65f-4219-b6e7-1b5019f6420d","amount":1100,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_005"},
+    {"id":"8d8960d0-3796-4f46-a1ff-59ec6e06536c","amount":1350,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_006"},
+    {"id":"e8f6fac7-9ec0-496c-8c78-30bdb1eb3895","amount":1350,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_006"},
+    {"id":"4ad83263-778b-4aff-a083-15c89dffe423","amount":465,"isDebit":true,"currency":"EUR","accountId":"acc_commission_expense","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_007"},
+    {"id":"4259494d-f4d3-43f0-b981-b22819b2960d","amount":465,"isDebit":false,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_007"},
+    {"id":"8a2a495e-719c-4163-9abd-f54ed5aa23c7","amount":1420,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_008"},
+    {"id":"fddf3e3d-ecf3-432e-8f53-8a8157e25518","amount":1420,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_008"},
+    {"id":"ea63fb9b-fa8f-4ca0-8974-8b34378e1939","amount":1080,"isDebit":true,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_009"},
+    {"id":"634f1cbc-9385-4a6a-8d18-5c66f2d1bf11","amount":1080,"isDebit":false,"currency":"EUR","accountId":"acc_rental_income","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_009"},
+    {"id":"88ac5bd4-bd31-46e0-9cd7-3b072ce3a02d","amount":108,"isDebit":true,"currency":"EUR","accountId":"acc_commission_expense","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_010"},
+    {"id":"c9e9f3b3-5742-4af7-b2c9-0579f6a81058","amount":108,"isDebit":false,"currency":"EUR","accountId":"acc_operating_cash","createdAt":"2026-05-14T17:12:18.206","createdBy":"seed","journalEntryId":"je_010"}
+  ],
+  "Channel": [
+    {"id":"channel_airbnb","name":"Airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206"},
+    {"id":"channel_bookingcom","name":"Booking.com","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206"},
+    {"id":"channel_direct","name":"Direct","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206"}
+  ],
+  "Booking": [
+    {"id":"bk_001","status":"COMPLETED","checkIn":"2026-01-05T00:00:00","checkOut":"2026-01-10T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_marina_suite","totalAmount":1250,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_002","status":"COMPLETED","checkIn":"2026-01-08T00:00:00","checkOut":"2026-01-12T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_temple_bar","totalAmount":980,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_003","status":"COMPLETED","checkIn":"2026-02-01T00:00:00","checkOut":"2026-02-07T00:00:00","channelId":"channel_bookingcom","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_coastal_cottage","totalAmount":1540,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_004","status":"COMPLETED","checkIn":"2026-02-14T00:00:00","checkOut":"2026-02-18T00:00:00","channelId":"channel_direct","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_marina_suite","totalAmount":900,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_005","status":"COMPLETED","checkIn":"2026-03-03T00:00:00","checkOut":"2026-03-08T00:00:00","channelId":"channel_bookingcom","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_temple_bar","totalAmount":1100,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_006","status":"COMPLETED","checkIn":"2026-03-20T00:00:00","checkOut":"2026-03-25T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_coastal_cottage","totalAmount":1350,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_007","status":"COMPLETED","checkIn":"2026-04-05T00:00:00","checkOut":"2026-04-09T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_marina_suite","totalAmount":860,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_008","status":"COMPLETED","checkIn":"2026-04-12T00:00:00","checkOut":"2026-04-16T00:00:00","channelId":"channel_direct","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_temple_bar","totalAmount":740,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_009","status":"COMPLETED","checkIn":"2026-05-02T00:00:00","checkOut":"2026-05-07T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_coastal_cottage","totalAmount":1420,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_010","status":"COMPLETED","checkIn":"2026-05-09T00:00:00","checkOut":"2026-05-13T00:00:00","channelId":"channel_bookingcom","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_marina_suite","totalAmount":1080,"deferredPosted":false,"hostawayStatus":null},
+    {"id":"bk_011","status":"CONFIRMED","checkIn":"2026-05-16T00:00:00","checkOut":"2026-05-20T00:00:00","channelId":"channel_airbnb","createdAt":"2026-05-14T17:12:18.206","updatedAt":"2026-05-14T17:12:18.206","hostawayId":null,"propertyId":"prop_temple_bar","totalAmount":920,"deferredPosted":false,"hostawayStatus":null}
+  ],
+  "BookingCharge": [],
+  "Vendor": [],
+  "ExpenseCategory": [],
+  "Expense": [],
+  "EvidenceLog": [],
+  "ActionIntentQueue": []
+}
