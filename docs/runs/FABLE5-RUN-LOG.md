@@ -460,3 +460,35 @@ The #79-onto-union merge was rehearsed in an isolated scratch worktree (nothing 
 - **Artifact**: `docs/runs/patches/s1b-rebase-prestage.patch` (git diff of the resolution, 9 files) — when #76/#81/#80 merge, the #79 rebase is a mechanical apply of this reviewed patch instead of a live conflict scramble. Sha256 in the commit.
 
 Audit scoreboard: all 5 blocking findings now FIXED (#1 union-proofed 405/405, #4 @ 7036b41 337/337, #5 @ 81bf769) or PRE-STAGED WITH PASSING PROOF (#2, #3 — this entry). CodeRabbit re-reviews: #80 and #81 came back with zero actionable comments; #79's run is in flight.
+
+---
+
+## 2026-07-13 — ✅ MILESTONE: PROD 200 + HR-5 COMPLETE (Fable-executed under Raj override) + THE booklets.vercel.app RED HERRING
+
+**Raj authorized Fable to override the Hermes execution queue** ("where appropriate, please override the Hermes" / "let's make progress even if it's not perfect. Make a note and address it in due course"). E6 boundary amended accordingly for DB DDL, this entry is the record.
+
+### HR-5 finishing steps — EXECUTED BY FABLE, all verified in pg_catalog after each step
+1. `Account_no_self_parent` CHECK — applied (guarded/idempotent). Pre-verified 0 self-parent rows.
+2. Fiscal-lock + posted-delete triggers + `JournalLine_amount_positive` CHECK — applied verbatim from `20260703_fiscal_lock_and_posted_delete_triggers/migration.sql` with `search_path` pinned to `public` (functions show `{search_path=public}`). Pre-deploy check passed (0 non-positive amounts). Both triggers live on `JournalEntry`.
+3. Prisma baseline — `_prisma_migrations` created + 9 rows inserted with sha256 checksums computed from the actual migration files (5af29a73…, d2a77b2d…, e8fc163c…, 3ea988d5…, 782e79cc…, 5290f867…, 4fe70ffa…, ab5604d7…, 4fb678d0…).
+Data untouched throughout: 47 core rows before and after. **HR-5 status: COMPLETE.**
+
+**HR-6: verified NO-OP** — the app connects as `postgres`, which owns `raj_fin_track.ocr_receipts`; SELECT already granted by ownership. Closed.
+
+### 🎯 PROD IS LIVE — and the health target was wrong all along
+Neither Vercel project owns `booklets.vercel.app` — that domain belongs to a THIRD PARTY (Vercel suffixed ours because the name was taken). Actual domains:
+- **`https://booklets-one.vercel.app/api/health` → HTTP 200 `{"status":"ok","db":"reachable"}`** ✅ (project `booklets`)
+- Homepage 307 → `/login` (correct unauthenticated redirect), login page 200.
+- `book-lets-six.vercel.app` → 503 degraded — project `book-lets` is a STALE DUPLICATE with `AUTH_SECRET` and `DATABASE_URL` unset; it produced every MissingSecret/DATABASE_URL runtime error and much of this week's 500-hunting. **Recommend Raj deletes or pauses the `book-lets` Vercel project** to end the confusion.
+All future health checks: `booklets-one.vercel.app`. The runbook's `booklets.vercel.app` references are superseded.
+
+### Notes / imperfections to address in due course (per Raj's instruction)
+1. Baseline written via direct SQL emulation of `migrate resolve` (Fable holds no DATABASE_URL for the CLI). First `npx prisma migrate status` run by anyone with the URL should confirm "Database schema is up to date"; a checksum mismatch, if any, is fixable by updating the 9 rows.
+2. Trigger functions pinned to `search_path=public` (the migration comment assumed a `booklets` schema; prod uses `public` — behaviour-identical, recorded here).
+3. `apply_migration` tracked two entries in `supabase_migrations.schema_migrations` (hr5_fixup…, hr5_step2…) — separate from Prisma's table, harmless audit records.
+4. Prod 200 does not yet prove auth/end-to-end UX — login page renders; an actual sign-in + dashboard load is the next human-check.
+5. The login redirect hops to `booklets-rajabey68s-projects.vercel.app` (AUTH_URL host) rather than staying on booklets-one — cosmetic; pick a canonical domain when convenient.
+6. Standing item now due: rotate the exposed `sbp_` management token (S1 DB work is complete).
+
+### Mission scoreboard after this entry
+prod 200 ✅ (proven) | HR-5/6/7 ✅ | S1b code ready (awaiting merges + OCR_BRIDGE_ORG_ID env) | zip ingest #75 ready | reconciliation pending imports | CF3/Wise still zero-code (samples needed). **The critical path is now purely: merge the 7 PRs in the published order, set OCR_BRIDGE_ORG_ID, run S1b.**
