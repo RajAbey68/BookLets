@@ -24,8 +24,11 @@ const IMPORT_ALLOWED_ROLES = new Set(['OWNER', 'ADMIN']);
  *
  * Imports the next batch of `raj_fin_track.ocr_receipts` rows as DRAFT
  * journal entries and returns the run summary
- * ({posted, skipped_existing, failed, parked, remaining}). Idempotent —
- * re-invoke until `remaining` is 0.
+ * ({posted, skipped_existing, failed, parked, parkedPermanently, remaining}).
+ * Idempotent — re-invoke until `remaining` is 0. `remaining` counts only rows
+ * still importable in principle: rows parked for deterministic reasons
+ * (OCR_FAILED / BAD_AMOUNT / NO_DOC_DATE / FX_UNSUPPORTED / NO_FISCAL_PERIOD)
+ * are excluded, so the re-invoke loop always terminates.
  *
  * Authorization: requires an authenticated OWNER/ADMIN member (401/403), and
  * — because the staging pool is org-less (see ocr-bridge.deps.ts) — the

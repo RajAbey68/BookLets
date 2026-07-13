@@ -43,9 +43,8 @@ import {
 import type { JournalEntryInput } from './types';
 
 /**
- * Eligibility predicate (contract §2) as SQL, used both to drain eligible
- * rows first and to compute `remaining`. Must stay in lockstep with
- * classifyStagingRow in ocr-bridge.ts.
+ * Row-shape eligibility predicate (contract §2) as SQL. Must stay in
+ * lockstep with classifyStagingRow in ocr-bridge.ts.
  */
 const ELIGIBLE_PREDICATE = Prisma.sql`
   r.ocr_status = 'success'
@@ -53,6 +52,36 @@ const ELIGIBLE_PREDICATE = Prisma.sql`
   AND r.doc_date IS NOT NULL
   AND r.currency = 'LKR'
 `;
+
+/**
+ * doc_date is covered by an OPEN (not closed, not locked) FiscalPeriod of
+ * the org — the same test LedgerService.checkFiscalPeriod applies. Must stay
+ * in lockstep with checkFiscalPeriod AND with hasOpenFiscalPeriod below.
+ */
+function inOpenFiscalPeriod(organizationId: string) {
+  return Prisma.sql`
+    EXISTS (
+      SELECT 1
+      FROM public."FiscalPeriod" fp
+      WHERE fp."organizationId" = ${organizationId}
+        AND fp."startDate" <= r.doc_date
+        AND fp."endDate" >= r.doc_date
+        AND fp."isClosed" = false
+        AND fp."locked" = false
+    )
+  `;
+}
+
+/**
+ * Importable-in-principle: eligible row shape AND an open fiscal period
+ * covering doc_date. This drives BOTH the batch ordering and `remaining`, so
+ * deterministically parked rows (incl. NO_FISCAL_PERIOD) neither starve the
+ * batch window nor hold `remaining` above 0 — the "re-invoke until
+ * remaining: 0" loop is guaranteed to terminate.
+ */
+function importablePredicate(organizationId: string) {
+  return Prisma.sql`${ELIGIBLE_PREDICATE} AND ${inOpenFiscalPeriod(organizationId)}`;
+}
 
 /** NOT EXISTS guard: the row has no JournalEntry with its idempotency key yet. */
 function notYetImported(organizationId: string) {
@@ -74,10 +103,11 @@ function notYetImported(organizationId: string) {
  * `raj_fin_track.ocr_receipts` for the app role (HR-6) before it can run in
  * prod. SELECT only — the staging schema is read-only to this app.
  *
- * Eligible rows are ordered FIRST so parked rows (which are never imported
- * and therefore never leave the NOT EXISTS set) cannot permanently occupy
- * the batch window and starve postable rows behind them. `total_amount` is
- * cast to text so numeric(19,4) survives the driver without float loss.
+ * Importable rows are ordered FIRST so parked rows (which are never imported
+ * and therefore never leave the NOT EXISTS set — including NO_FISCAL_PERIOD
+ * rows) cannot permanently occupy the batch window and starve postable rows
+ * behind them. `total_amount` is cast to text so numeric(19,4) survives the
+ * driver without float loss.
  */
 async function fetchStagingBatch(
   organizationId: string,
@@ -96,17 +126,21 @@ async function fetchStagingBatch(
       r.ocr_status
     FROM raj_fin_track.ocr_receipts r
     WHERE ${notYetImported(organizationId)}
-    ORDER BY (CASE WHEN ${ELIGIBLE_PREDICATE} THEN 0 ELSE 1 END), r.id
+    ORDER BY (CASE WHEN ${importablePredicate(organizationId)} THEN 0 ELSE 1 END), r.id
     LIMIT ${batchSize}
   `;
 }
 
-/** Eligible rows still lacking a JournalEntry — the route's `remaining`. */
+/**
+ * Importable rows still lacking a JournalEntry — the route's `remaining`.
+ * Deterministically parked rows (bad shape OR no open fiscal period) are NOT
+ * counted, so `remaining` reaches 0 once every importable row has landed.
+ */
 async function countRemainingEligible(organizationId: string): Promise<number> {
   const result = await prisma.$queryRaw<{ n: number }[]>`
     SELECT count(*)::int AS n
     FROM raj_fin_track.ocr_receipts r
-    WHERE ${ELIGIBLE_PREDICATE}
+    WHERE ${importablePredicate(organizationId)}
       AND ${notYetImported(organizationId)}
   `;
   return result[0]?.n ?? 0;
@@ -121,6 +155,7 @@ export function createOcrBridgeDeps(organizationId: string): OcrBridgeDeps {
   let suspenseAccountIdPromise: Promise<string> | undefined;
   let bankAccountIdPromise: Promise<string> | undefined;
   const categoryAccountIds = new Map<string, Promise<string>>();
+  const fiscalPeriodByDay = new Map<string, Promise<boolean>>();
 
   // Suspense (code 9999) must be seeded — it is the fallback for both legs.
   function suspenseAccountId(): Promise<string> {
@@ -206,13 +241,42 @@ export function createOcrBridgeDeps(organizationId: string): OcrBridgeDeps {
       return { entryId: entry.id, created };
     },
 
+    hasOpenFiscalPeriod(date: Date): Promise<boolean> {
+      // The exact lookup LedgerService.checkFiscalPeriod performs, minus the
+      // throw — the bridge PARKS uncovered rows (NO_FISCAL_PERIOD) instead of
+      // failing them. Memoized per UTC day so a batch clustered in one month
+      // does not issue a lookup per row. Must stay in lockstep with the
+      // inOpenFiscalPeriod SQL fragment above.
+      const day = date.toISOString().slice(0, 10);
+      let known = fiscalPeriodByDay.get(day);
+      if (!known) {
+        known = prisma.fiscalPeriod
+          .findFirst({
+            where: {
+              organizationId,
+              startDate: { lte: date },
+              endDate: { gte: date },
+              isClosed: false,
+              locked: false,
+            },
+            select: { id: true },
+          })
+          .then((period) => period !== null);
+        fiscalPeriodByDay.set(day, known);
+      }
+      return known;
+    },
+
     countRemainingEligible: () => countRemainingEligible(organizationId),
   };
 }
 
 /**
  * Run one batched bridge import for the organization. Idempotent — invoke
- * repeatedly until the summary reports `remaining: 0`.
+ * repeatedly until the summary reports `remaining: 0`. `remaining` counts
+ * only rows importable in principle (unimported AND inside an open fiscal
+ * period AND well-shaped), so deterministically parked rows can never keep
+ * the loop alive.
  */
 export async function runOcrBridgeImport(
   organizationId: string,

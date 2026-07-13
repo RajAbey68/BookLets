@@ -9,13 +9,18 @@
  * testable without a database.
  *
  * Dispositions (computed at run time — never hardcoded counts):
- *   POST            ocr_status='success' AND total_amount>0 AND doc_date
- *                   present AND currency='LKR' → DRAFT journal entry.
- *   OCR_FAILED      ocr_status <> 'success' (re-OCR is devserver work, not ours).
- *   BAD_AMOUNT      total_amount NULL / non-numeric / <= 0.
- *   NO_DOC_DATE     doc_date missing — dates are NEVER fabricated from
- *                   processed_at; a human assigns them.
- *   FX_UNSUPPORTED  non-LKR currency — LKR books; no FX policy until S8.
+ *   POST              ocr_status='success' AND total_amount>0 AND doc_date
+ *                     present AND currency='LKR' AND an open FiscalPeriod
+ *                     covers doc_date → DRAFT journal entry.
+ *   OCR_FAILED        ocr_status <> 'success' (re-OCR is devserver work, not ours).
+ *   BAD_AMOUNT        total_amount NULL / non-numeric / <= 0.
+ *   NO_DOC_DATE       doc_date missing — dates are NEVER fabricated from
+ *                     processed_at; a human assigns them.
+ *   FX_UNSUPPORTED    non-LKR currency — LKR books; no FX policy until S8.
+ *   NO_FISCAL_PERIOD  doc_date is not covered by an OPEN FiscalPeriod — the
+ *                     ledger's checkFiscalPeriod would reject it. Dates are
+ *                     NEVER clamped into a period (contract §7); the row
+ *                     parks until a human opens a covering period.
  *
  * Parked rows are only ever REPORTED in the summary; nothing is written back
  * to the staging schema (read-only territory) and nothing is invented into
@@ -41,7 +46,12 @@ export interface OcrStagingRow {
   ocr_status: string | null;
 }
 
-export type ParkReason = 'OCR_FAILED' | 'NO_DOC_DATE' | 'BAD_AMOUNT' | 'FX_UNSUPPORTED';
+export type ParkReason =
+  | 'OCR_FAILED'
+  | 'NO_DOC_DATE'
+  | 'BAD_AMOUNT'
+  | 'FX_UNSUPPORTED'
+  | 'NO_FISCAL_PERIOD';
 
 export type RowClassification = { kind: 'POST' } | { kind: 'PARK'; reason: ParkReason };
 
@@ -58,7 +68,13 @@ export interface OcrBridgeDeps {
    * already present (replayed batch / concurrent run) — a skip, not an error.
    */
   postEntry(input: JournalEntryInput): Promise<{ entryId: string; created: boolean }>;
-  /** Eligible staging rows still lacking a JournalEntry — drives `remaining`. */
+  /**
+   * True when an OPEN (not closed, not locked) FiscalPeriod of the org covers
+   * the date — the same test LedgerService.checkFiscalPeriod applies before a
+   * post. Rows failing it park as NO_FISCAL_PERIOD instead of failing postEntry.
+   */
+  hasOpenFiscalPeriod(date: Date): Promise<boolean>;
+  /** Importable staging rows still lacking a JournalEntry — drives `remaining`. */
   countRemainingEligible(): Promise<number>;
 }
 
@@ -67,7 +83,18 @@ export interface OcrBridgeSummary {
   skipped_existing: number;
   failed: { id: number; error: string }[];
   parked: { reason: ParkReason; count: number; ids: number[] }[];
-  /** Eligible rows still unimported after this batch; re-invoke until 0. */
+  /**
+   * Total rows parked this run. Every ParkReason is deterministic (the row
+   * cannot import until a human intervenes), so these rows are also excluded
+   * from `remaining` — they never strand the re-invoke loop.
+   */
+  parkedPermanently: number;
+  /**
+   * Rows still importable in principle after this batch: not yet imported AND
+   * not excluded by a deterministic park reason (OCR_FAILED / BAD_AMOUNT /
+   * NO_DOC_DATE / FX_UNSUPPORTED / NO_FISCAL_PERIOD). Re-invoke until 0 —
+   * parked rows can never hold this above 0, so the loop terminates.
+   */
   remaining: number;
 }
 
@@ -97,7 +124,9 @@ function parseDocDate(value: OcrStagingRow['doc_date']): Date | null {
 /**
  * Eligibility per contract §2. Precedence mirrors the bucket table: OCR
  * failure first (the extraction is untrustworthy wholesale), then amount,
- * then date, then currency.
+ * then date, then currency. NO_FISCAL_PERIOD is NOT decided here — it needs
+ * IO (the FiscalPeriod table), so importOcrReceipts checks it via deps after
+ * all pure reasons.
  */
 export function classifyStagingRow(row: OcrStagingRow): RowClassification {
   if (row.ocr_status !== 'success') return { kind: 'PARK', reason: 'OCR_FAILED' };
@@ -186,6 +215,11 @@ export function buildJournalInput(
  * Idempotency conflicts count as `skipped_existing`. The returned summary
  * always reconciles: posted + skipped_existing + failed + Σparked = rows
  * processed (≤ batchSize).
+ *
+ * Rows whose doc_date no open FiscalPeriod covers park as NO_FISCAL_PERIOD
+ * BEFORE any vendor/account/post IO — they must not reach postEntry (where
+ * checkFiscalPeriod would throw and strand them in `failed` forever) and
+ * their dates are never clamped into a period (contract §7).
  */
 export async function importOcrReceipts(
   rows: readonly OcrStagingRow[],
@@ -199,19 +233,32 @@ export async function importOcrReceipts(
   let skippedExisting = 0;
   const failed: OcrBridgeSummary['failed'] = [];
   const parkedByReason = new Map<ParkReason, number[]>();
+  const park = (reason: ParkReason, id: number) => {
+    const ids = parkedByReason.get(reason) ?? [];
+    ids.push(id);
+    parkedByReason.set(reason, ids);
+  };
 
   for (const row of batch) {
     const classification = classifyStagingRow(row);
 
     if (classification.kind === 'PARK') {
-      const ids = parkedByReason.get(classification.reason) ?? [];
-      ids.push(row.id);
-      parkedByReason.set(classification.reason, ids);
+      park(classification.reason, row.id);
       continue;
     }
 
     try {
-      // Gate first (throws on out-of-contract confidence) so a broken
+      // Fiscal-period gate: LedgerService.checkFiscalPeriod rejects any date
+      // outside an open period, so detect that here and PARK — never let the
+      // row reach postEntry (a permanent `failed` on every run) and never
+      // shift its date into a period (contract §7 forbids date fabrication).
+      const docDate = parseDocDate(row.doc_date);
+      if (docDate && !(await deps.hasOpenFiscalPeriod(docDate))) {
+        park('NO_FISCAL_PERIOD', row.id);
+        continue;
+      }
+
+      // Confidence gate (throws on out-of-contract values) so a broken
       // extraction fails BEFORE any vendor/category rows are created.
       gateAutomatedJournalEntry(extractConfidence(row.raw_response) ?? 0);
 
@@ -250,6 +297,7 @@ export async function importOcrReceipts(
     skipped_existing: skippedExisting,
     failed,
     parked,
+    parkedPermanently: parked.reduce((acc, p) => acc + p.count, 0),
     remaining: await deps.countRemainingEligible(),
   };
 }

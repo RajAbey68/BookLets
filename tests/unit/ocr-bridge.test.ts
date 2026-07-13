@@ -3,8 +3,9 @@
  *
  * Contract under test: docs/runs/S1B-BRIDGE-CONTRACT.md.
  *   - Eligibility: POST only when ocr_status='success' AND total_amount>0
- *     AND doc_date present AND currency='LKR'; everything else PARKS with a
- *     reason code (OCR_FAILED | NO_DOC_DATE | BAD_AMOUNT | FX_UNSUPPORTED).
+ *     AND doc_date present AND currency='LKR' AND an open FiscalPeriod covers
+ *     doc_date; everything else PARKS with a reason code (OCR_FAILED |
+ *     NO_DOC_DATE | BAD_AMOUNT | FX_UNSUPPORTED | NO_FISCAL_PERIOD).
  *   - Idempotency key = 'ocr-receipt:' + source_file (replay-safe).
  *   - Status is ALWAYS DRAFT via gateAutomatedJournalEntry — no confidence
  *     score (including exactly 1.0) can force POSTED.
@@ -54,6 +55,7 @@ function makeDeps(overrides: Partial<OcrBridgeDeps> = {}): OcrBridgeDeps {
     resolveExpenseAccountId: vi.fn().mockResolvedValue('acct-expense'),
     resolveBankAccountId: vi.fn().mockResolvedValue('acct-bank'),
     postEntry: vi.fn().mockResolvedValue({ entryId: 'je-1', created: true }),
+    hasOpenFiscalPeriod: vi.fn().mockResolvedValue(true),
     countRemainingEligible: vi.fn().mockResolvedValue(0),
     ...overrides,
   };
@@ -383,6 +385,51 @@ describe('importOcrReceipts', () => {
       ]),
     );
     expect(summary.parked).toHaveLength(3); // no empty reason buckets
+    expect(summary.parkedPermanently).toBe(4);
+  });
+
+  // ─── NO_FISCAL_PERIOD (audit blocking finding #4) ──────────────────────────
+
+  it('parks NO_FISCAL_PERIOD when no open fiscal period covers doc_date — no entry, no failure', async () => {
+    const deps = makeDeps({ hasOpenFiscalPeriod: vi.fn().mockResolvedValue(false) });
+    const row = makeRow({ doc_date: new Date('2025-03-10T00:00:00Z') });
+    const summary = await importOcrReceipts([row], deps, { organizationId: ORG });
+    expect(summary.parked).toEqual([{ reason: 'NO_FISCAL_PERIOD', count: 1, ids: [row.id] }]);
+    expect(summary.parkedPermanently).toBe(1);
+    expect(summary.posted).toBe(0);
+    expect(summary.failed).toEqual([]); // parked, NOT stranded in failed
+    // Parking means NO writes of any kind: no JournalEntry, no vendor,
+    // no account/category rows.
+    expect(deps.postEntry).not.toHaveBeenCalled();
+    expect(deps.ensureVendor).not.toHaveBeenCalled();
+    expect(deps.resolveExpenseAccountId).not.toHaveBeenCalled();
+  });
+
+  it('checks the period with the row doc_date and never clamps a date into one (contract §7)', async () => {
+    const hasOpenFiscalPeriod = vi.fn(async (d: Date) => d.getUTCFullYear() === 2026);
+    const deps = makeDeps({ hasOpenFiscalPeriod });
+    const inPeriod = makeRow({ doc_date: new Date('2026-06-15T00:00:00Z') });
+    const outOfPeriod = makeRow({ doc_date: new Date('2024-12-31T00:00:00Z') });
+    const summary = await importOcrReceipts([inPeriod, outOfPeriod], deps, {
+      organizationId: ORG,
+    });
+    expect(hasOpenFiscalPeriod).toHaveBeenCalledWith(new Date('2024-12-31T00:00:00Z'));
+    expect(summary.posted).toBe(1);
+    expect(summary.parked).toEqual([
+      { reason: 'NO_FISCAL_PERIOD', count: 1, ids: [outOfPeriod.id] },
+    ]);
+    // The row that DID post kept its own doc_date untouched.
+    const input = vi.mocked(deps.postEntry).mock.calls[0][0];
+    expect((input.date as Date).toISOString().slice(0, 10)).toBe('2026-06-15');
+  });
+
+  it('pure park reasons take precedence — the fiscal period is never consulted for them', async () => {
+    const deps = makeDeps({ hasOpenFiscalPeriod: vi.fn().mockResolvedValue(false) });
+    const summary = await importOcrReceipts([makeRow({ doc_date: null })], deps, {
+      organizationId: ORG,
+    });
+    expect(summary.parked).toEqual([{ reason: 'NO_DOC_DATE', count: 1, ids: expect.any(Array) }]);
+    expect(deps.hasOpenFiscalPeriod).not.toHaveBeenCalled();
   });
 
   it('reconciles: posted + skipped_existing + failed + parked === input count', async () => {
@@ -411,6 +458,7 @@ describe('importOcrReceipts', () => {
     expect(summary.skipped_existing).toBe(1);
     expect(summary.failed).toHaveLength(1);
     expect(parkedTotal).toBe(4);
+    expect(summary.parkedPermanently).toBe(parkedTotal);
     expect(summary.posted + summary.skipped_existing + summary.failed.length + parkedTotal).toBe(
       rows.length,
     );

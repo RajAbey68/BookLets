@@ -21,6 +21,7 @@ const summary = {
   skipped_existing: 0,
   failed: [],
   parked: [],
+  parkedPermanently: 0,
   remaining: 0,
 };
 
