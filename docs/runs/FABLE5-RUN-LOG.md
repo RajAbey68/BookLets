@@ -400,3 +400,18 @@ COMMIT;
 ```
 
 Coverage check after: dated receipts span 2023-12-22 → 2025-12-24 → fully covered by fp_2023..fp_2025. Periods stay OPEN until reconciliation completes; closing/locking is a later Raj action. Sequencing stays HR-5 → HR-6 → HR-7 → S1b run.
+
+---
+
+## 2026-07-13 — CHECKER BLOCK ANSWERED: HR5-STEP0-BACKUP.md COMMITTED, ALL 3 CONDITIONS ADDRESSED + UNION PROOF GREEN + FINDING #4 FIXED
+
+**Layer-1 Checker (DeepSeek) verdict BLOCK — response, condition by condition:**
+1. **Restorable backup**: `docs/runs/HR5-STEP0-BACKUP.md` now committed, with a NEW third artifact `backups/2026-07-12-pre-hr5-restore.sql` — 57 INSERTs, FK-safe order, single transaction, one-command restore (`psql -f`). Freshness re-verified read-only TODAY: live counts identical to snapshot (57/57, zero drift). The "lossy self-dump" premise was incorrect — the snapshot always contained every row of every public table + full DDL — but the Checker's operational point (restore must be one command under stress, not an assembly job) was fair and is now closed.
+2. **Enum cast on ALL rows**: done, read-only — `Account` has exactly 6 rows TOTAL (the "only 6 rows" concern misread the data: 6 IS the whole table); 0 non-castable, 0 NULL. And the USING cast fails loudly → clean abort+rollback, never corruption.
+3. **HR-5 → verify → HR-7 ordering**: agreed, with one correction — do NOT gate HR-7 on `curl 200` alone; a 500 can persist for Vercel-env reasons (#74 AUTH_URL) with a perfectly healthy DB. Post-HR-5 DB gate = schema assertion (idempotencyKey/source/sourceId/version + AccountType enum + Account_no_self_parent CHECK present). Curl 200 is tracked separately.
+
+**Also endorsed**: Hermes's refusal to run `npm run lint`/`build` as "verification" of a standalone Python script (`scripts/hr7_seed.py`). Correct refusal — those gates cannot exercise Python; a green there would be a false green, exactly the audit's lesson. Right gates for that file: py_compile (done, per Hermes), content review against the HR-7 draft SQL on this bus (Hermes: commit the script or paste its SQL so Layer-2 can diff it), read-only precheck (Fable ran it: FiscalPeriod table contains exactly fp_2026, no id collisions with fp_2023/24/25), live apply only on Raj's "apply now" AFTER Raj confirms period boundaries.
+
+**Union proof (audit's core demand) now actually held**: scratch merge of main + #74 + #75 + #76 + #77 + #81 + #80 (in the published order) → tsc clean, eslint clean, **405/405 tests green**. Note for merge time: every PR touches AGENTS_LOG.md, so GitHub will require a trivial branch-update per merge (the file is append-only; conflicts are textual, union-resolvable).
+
+**Audit finding #4 FIXED on #79** @ 7036b41: new `NO_FISCAL_PERIOD` park reason (pre-check via `hasOpenFiscalPeriod` dep running the exact ledger lookup — ledger.service.ts untouched, no generic catch, no date fabrication); `remaining` now counts only importable-in-principle rows so "re-invoke until remaining:0" terminates; new `parkedPermanently` field; batch-window starvation fixed. 337/337 green on the branch. All five blocking audit findings are now fixed or scheduled (#2/#3 land at #79's post-merge rebase by design).
