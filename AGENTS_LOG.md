@@ -25,6 +25,160 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### fable5-builder-e5 (claude/e5-maker-identity) — session-derived maker identity + re-enable P1.4 SoD gate
+- **Started:** 2026-07-12
+- **Goal:** Close mandate E5. Human-initiated ledger writes already thread
+  the session user id as `makerIdentity` (manual journal form, booking
+  form, manual sync, approval checkers); this PR removes the last inlined
+  `'booklets-automation-service'` literals by exporting
+  `AUTOMATION_MAKER_IDENTITY` from `src/lib/maker-identity.ts` (automated
+  OCR pipeline keeps the service identity — correctly, since its entries
+  are always DRAFT and only a distinct human can promote them), and
+  re-enables the P1.4 Segregation-of-Duties gate in CI. P1.4 had never
+  been implemented (added as a placeholder comment in the original
+  workflow, "disabled until a separate PR wires session-based identity");
+  that prerequisite landed with the auth/session refactor, so the gate now
+  verifies: `assertNotSelfApproval` exists and is enforced in the approval
+  actions, checker identity comes from the session, manual entries carry
+  the session user as maker, and no service-identity literal exists
+  outside the shared constant.
+- **Touching:**
+  - `src/lib/maker-identity.ts` (new — single home for the constant)
+  - `src/lib/automation.service.ts` (use the constant, both call sites)
+  - `.github/workflows/p1-governance.yml` (re-enable P1.4)
+  - `tests/unit/maker-identity.test.ts` (new), `tests/unit/batch-approval-actions.test.ts` (fixture uses the constant)
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:** ledger/revenue/approval services, server actions,
+  schema, other workflows.
+- **Out of scope:** `'system'` fallback identities inside
+  `LedgerService` evidence records (legacy/system-initiated calls);
+  Membership admin UI.
+
+### fable5-builder-s4 (claude/s4-conf-gate) — OCR confidence gate (defect D3): automated entries always DRAFT
+- **Started:** 2026-07-12
+- **Goal:** Close defect D3 (FABLE5 spec, service S4 "conf-gate" / M9):
+  `AutomationService.processReceipt` auto-POSTed journal entries when OCR
+  confidence exceeded 0.9. New named domain rule
+  `gateAutomatedJournalEntry` (in `approval.service.ts`, the 4-eyes
+  authority) makes every machine-extracted entry land as DRAFT — no
+  confidence, including exactly 1.0, grants posting authority. The only
+  DRAFT→POSTED path remains the human checker sign-off
+  (`decideDraftJournalEntry`). Strict TDD: RED tests proved the 0.9
+  auto-post, then GREEN.
+- **Touching:**
+  - `src/lib/approval.service.ts` (add `gateAutomatedJournalEntry` + result type)
+  - `src/lib/automation.service.ts` (use the gate; result status always `HIL_REQUIRED`)
+  - `src/components/ReceiptUploader.tsx` (copy: HIL message no longer claims a threshold)
+  - `tests/unit/receipt-confidence-gate.test.ts` (new)
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:**
+  - `src/lib/ledger.service.ts` (`postEntry` still defaults to POSTED when
+    `status` is omitted — see out of scope)
+  - `src/lib/prisma.ts` SymbiOS integrity extension (gate composes with it,
+    does not bypass it)
+  - approval actions / 4-eyes flow (unchanged; it stays the sole promotion path)
+- **Out of scope (followups):**
+  - `LedgerService.postEntry` defaulting `status` to POSTED means a future
+    call-site that forgets `status` silently auto-posts; consider requiring
+    an explicit status (or defaulting to DRAFT) for maker identities that
+    are agents.
+  - The SymbiOS fallback path trusts the remote `extraction.confidence`
+    without clamping; the gate now throws on out-of-contract values, but a
+    friendlier degrade (clamp + DRAFT) could be argued.
+
+### fable5-builder-s2 (claude/s2-deploy-fix) — repo-side diagnosis + hardening for the production blanket-500 (S2 "deploy-fix" / M2, defect D1)
+- **Started:** 2026-07-12
+- **Goal:** Diagnose `booklets.vercel.app` returning 500 on every request
+  from the repo side (no live-infra access) and land only env-independent
+  hardening. Root-cause candidate #1 (locally reproduced): a malformed
+  `AUTH_URL`/`NEXTAUTH_URL` (missing `https://`) throws
+  `TypeError: Invalid URL` inside next-auth's `reqWithEnvURL` on every
+  middleware invocation → MIDDLEWARE_INVOCATION_FAILED → blanket 500,
+  including `/api/health` and `/login`. Also fixed: the auth gate failed
+  OPEN when NextAuth's session fetch errored (`req.auth` was set to the
+  truthy error body `{ message: ... }`).
+- **Touching:**
+  - `middleware.ts` → `src/proxy.ts` (migrated to this Next version's
+    non-deprecated `proxy` convention; root-level `proxy.ts` is NOT
+    detected when the app lives in `src/`): public routes short-circuit
+    before NextAuth runs, `req.auth?.user` check (fail-closed), fail-fast
+    env diagnostics naming the broken var, try/catch with structured 500,
+    `/api/health` excluded from the matcher.
+  - `src/app/api/health/route.ts` (structured 503 `reason`, comment)
+  - `src/auth.config.ts` (comment only)
+  - `.env.example` (AUTH_URL format warning; DATABASE_URL runtime-only +
+    `schema=` param note — the pg adapter ignores it; search_path is set
+    in `src/lib/prisma.ts`)
+- **NOT touching:** auth semantics for valid sessions, `src/auth.ts`,
+  Prisma client/schema, Vercel/Supabase config (Hermes owns live-env
+  verification).
+- **Out of scope (follow-ups):** Hermes to confirm the live Vercel env
+  values (AUTH_URL/NEXTAUTH_URL/AUTH_SECRET/DATABASE_URL) and runtime
+  logs; PgBouncer `options` startup-parameter support for the
+  `search_path` (only verifiable against the live pooler).
+### fable5-builder-s5 (claude/s5-zip-ingest) — S5/M4 WhatsApp export zip ingestion
+- **Started:** 2026-07-12
+- **Goal:** POST `/api/ingest/zip` — auth-gated (session org via
+  `resolveActiveContext`, never client input) ingestion of WhatsApp
+  finance/petty-cash export zips (~517 files: chat text + receipt
+  images). Security guards run before any OCR spend: 1000-entry cap,
+  200 MB uncompressed cap (declared AND actual inflated bytes), path
+  traversal (`../`, absolute, backslash, drive-letter), per-entry
+  zip-bomb ratio guard (100x above a 64 KB floor), extension allowlist
+  (jpg/jpeg/png/webp/heic + .txt) with per-entry skip reasons, plus
+  magic-byte re-validation reusing `upload-guard`. OCR fan-out capped
+  at 5 concurrent via the existing `gemini-ocr` module. Every journal
+  entry is created DRAFT via `LedgerService.postEntry` —
+  `gateAutomatedJournalEntry` (S4) is not on main, so DRAFT-only is
+  enforced by the named constant `ZIP_INGEST_JOURNAL_STATUS`.
+  Idempotency: content-addressed key per entry
+  (`sha256('zip-ingest' NUL orgId NUL sha256(entryBytes))`,
+  date-independent) written to `JournalEntry.idempotencyKey` so S11 can
+  adopt it; app-level pre-check skips OCR on re-upload, DB unique
+  constraint backstops races. Chat text parsed lightly and retained as
+  hash-chained evidence (`ZIP_CHAT_INGESTED` / `ZIP_INGEST_COMPLETED`).
+  Strict TDD: RED (module-not-found on both suites) → GREEN
+  (34 new tests; 281 total). No live DB/OCR in tests — all IO injected
+  via `ZipIngestDeps`.
+- **Touching:**
+  - `src/lib/zip-ingest.ts` (new — pure core: guards, split, hash keys, fan-out)
+  - `src/lib/zip-ingest.deps.ts` (new — prisma/gemini-ocr/LedgerService wiring)
+  - `src/app/api/ingest/zip/route.ts` (new — POST route handler)
+  - `tests/unit/zip-ingest.test.ts`, `tests/unit/zip-ingest-route.test.ts` (new)
+  - `package.json` / `package-lock.json` (add `adm-zip`, `@types/adm-zip`)
+- **NOT touching:**
+  - `src/lib/gemini-ocr.ts`, `src/lib/upload-guard.ts`, `src/lib/ledger.service.ts`,
+    `src/lib/approval.service.ts`, `src/lib/automation.service.ts` (reused as-is)
+  - `prisma/schema.prisma`, middleware, auth, UI components
+- **Out of scope:** devserver end-to-end run with the real 517-file zip
+  (checkpoint 4); per-org rate limiting on this route; category→account
+  mapping for drafts (drafts debit Suspense 9999, reclassified at
+  four-eyes review); S11 DB-level idempotency adoption.
+### fable5-builder-s10 (claude/s10-phantom-fix) — D4 phantom-revenue verification + regression fence
+- **Started:** 2026-07-12
+- **Goal:** Investigate alleged defect D4 (manual booking creates phantom
+  revenue). VERDICT: already fixed by RAJ-287 (merge `e8df4a2`,
+  `feat/booking-ledger-posting`) — `createBooking` posts DR Operating Cash /
+  CR Guest Pre-payments via `RevenueService.recordBookingPrepayment`; revenue
+  is only recognized at checkout. Added regression-fence tests pinning: post
+  at payment time for CONFIRMED/COMPLETED only, compensating rollback on
+  ledger failure, no revenue account touched at pre-payment, idempotency
+  parity (source/sourceId/operation) between manual and Hostaway-sync paths,
+  and re-sync no-double-post via `deferredPosted`.
+- **Touching:**
+  - `tests/unit/booking-phantom-revenue-fence.test.ts` (new — fence only)
+- **NOT touching:**
+  - `src/**` — no production code change needed; defect not reproducible
+- **Out of scope (followups):**
+  - A manual booking created directly as COMPLETED posts its pre-payment but
+    is never picked up by `recognizeRevenue` (query filters `status:
+    "CONFIRMED"`), so its liability never converts to Rental Income —
+    understated revenue, not phantom revenue; separate ticket suggested.
+  - Residual double-count risk: a human manually keying a booking that ALSO
+    exists in Hostaway creates two Booking rows (manual row has
+    `hostawayId: null`, sync upserts by `hostawayId`) → two liability
+    entries. Needs entity-level matching, not ledger idempotency.
+
 ### Claude — prime process-handling agent (claude/auth-google-oauth) — auth scaffold (Google OAuth + Vercel target)
 - **Started:** 2026-05-13
 - **Goal:** Scaffold Auth.js v5 with Google OAuth so the operator can let
@@ -45,7 +199,7 @@ joining this repo should read it before claiming scope here.
   - `src/lib/*` services — service refactor is the next PR
   - `src/app/actions/*` — same
   - schema beyond the two new models + back-ref
-- **Out of scope (followups):**
+- **Out of scope (follow-ups):**
   - Replace `prisma.organization.findFirst()` in `sync.actions.ts`,
     `automation.service.ts`, etc. with session-derived org via
     `Membership`.
@@ -80,16 +234,141 @@ joining this repo should read it before claiming scope here.
     add upstream context, claim scope)
 - **NOT touching:** all source code, schema, CI workflows.
 
+### fable5-builder-s6 (claude/s6-review-ui) — DRAFT review queue with batch 4-eyes decisions
+- **Started:** 2026-07-12
+- **Agent:** fable5-builder-s6
+- **Goal:** S6 review-ui — a review queue where a checker sees each DRAFT
+  journal entry with its evidence side-by-side (extracted vendor/category
+  via memo parsing, amount, date, agentConfidence, source/sourceId,
+  heuristically matched Expense record, per-entry EvidenceLog trail) and
+  can approve/reject many at once. Batch decisions fan out SEQUENTIALLY
+  over the existing `decideDraftJournalEntry` path, so every 4-eyes
+  control holds per entry: session-resolved checker identity (already
+  real — `resolveActiveContext()`), `assertNotSelfApproval` (own drafts
+  fail with a per-entry error, never silently approved), DRAFT-only
+  state machine, guarded update + EvidenceLog in one transaction.
+- **Touching:**
+  - `src/app/actions/approval.actions.ts` (add `batchDecideDraftJournalEntries`, `fetchDraftReviewQueue`)
+  - `src/lib/approval.service.ts` (add exported `isSameIdentity` helper)
+  - `src/lib/draft-evidence.ts` (new — pure memo/source evidence parsing)
+  - `src/components/DraftReviewQueue.tsx` (new — client queue with batch selection)
+  - `src/app/(app)/approvals/page.tsx` (drafts table → `DraftReviewQueue`)
+  - `tests/unit/batch-approval-actions.test.ts`, `tests/unit/draft-evidence.test.ts` (new)
+- **NOT touching:**
+  - `decideDraftJournalEntry` / `decideActionIntent` internals — batch is a caller, not a rewrite
+  - `src/lib/ledger.service.ts`, `src/lib/evidence-log.service.ts`, schema
+  - S5 zip-ingest files (`src/lib/zip-ingest*`, `src/app/api/ingest/zip/`)
+- **Out of scope (followups):**
+  - **Receipt image persistence.** Verified reality: receipt images are
+    NOT stored anywhere. `Expense.receiptCloudId` exists in the schema
+    but nothing writes it; `AutomationService.processReceipt` OCRs the
+    base64 in-memory and discards it; S5 zip-ingest keeps only a sha256
+    (`sourceId`). The review UI renders a clearly-typed placeholder slot
+    that will light up once a stored reference exists. Follow-up: persist
+    uploads to object storage, write `receiptCloudId`, add a viewer.
+  - **Structured JournalEntry ↔ Expense link.** No FK exists; the queue
+    matches heuristically (vendor + amount + same UTC day) and labels the
+    match as heuristic. Follow-up: set `source='receipt-automation'`,
+    `sourceId=<expense.id>` in `AutomationService` at creation time.
+  - Pagination for large DRAFT queues (batch is capped at 50 per request).
+
+### fable5-builder-s6 (claude/s6-review-ui, round 2) — dedicated /review page + sidebar badge
+- **Started:** 2026-07-12
+- **Agent:** fable5-builder-s6
+- **Goal:** Finish S6 review-ui: a dedicated `/review` route (the queue
+  previously only lived inside `/approvals`) plus a sidebar "Review" link
+  with a server-computed DRAFT-count badge. No new approval machinery —
+  the page reuses `fetchDraftReviewQueue` / `DraftReviewQueue` and all
+  decisions still run through `decideDraftJournalEntry` /
+  `batchDecideDraftJournalEntries` (4-eyes per entry, per-row batch
+  isolation, checker = session user).
+- **Touching:**
+  - `src/app/(app)/review/page.tsx` (new — auth-gated by global middleware)
+  - `src/app/actions/approval.actions.ts` (add `fetchDraftReviewCount`;
+    cap `fetchDraftReviewQueue` at 100 newest-first with a `createdAt`
+    tiebreaker; decisions also `revalidatePath('/review')`)
+  - `src/components/Sidebar.tsx` (Review nav item + count badge),
+    `src/components/AppShell.tsx`, `src/app/(app)/layout.tsx` (badge wiring)
+  - `tests/unit/review-page-actions.test.ts` (new)
+- **NOT touching:**
+  - `decideDraftJournalEntry` / `batchDecideDraftJournalEntries` decision
+    logic, `src/lib/approval.service.ts`, schema, `/approvals` page
+- **Out of scope (followups):**
+  - True pagination past the newest-100 cap (deciding entries surfaces
+    the older remainder; fine at current volumes).
+  - Live badge updates without navigation (would need client polling —
+    deliberately skipped per S6 scope).
+
 ### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
-- See PR #2 description. Rebased on `main`. Build is no longer blocked
-  on this PR (PR #8 carved out the `ReceiptUploader → server action`
-  commit with attribution); PR #2 still owns the design-system CSS
-  primitives and page-wiring commits. Held in draft for human visual
-  signoff per PR #2's own test plan.
+- **LANDED (2026-07-12 reconciliation):** the design-system CSS primitives
+  this entry tracked are on `main` via `1e1b1b9` ("feat(ui): add
+  design-system primitives, strip Tailwind from shell"). Do not treat this
+  work as pending. Entry retained for history only.
 
 ### Lead coordinator (claude/float-to-decimal, PR #5) — Float → Decimal money columns
-- See PR #5 description. Draft. Rebased on `main` after PR #3 + PR #8
-  landed. No further conflicts expected.
+- **LANDED (2026-07-12 reconciliation):** Float→Decimal on all monetary
+  fields is on `main` via `bdd8cff` (schema shows `Decimal(19,4)`
+  throughout). Do not treat this work as pending. Entry retained for
+  history only.
+
+### fable5-builder-doc-drift (claude/fable5-doc-drift) — doc-drift reconciliation
+- **Started:** 2026-07-12
+- **Goal:** Conservative, factual doc corrections only (FABLE5 pre-Wave-0
+  E5): fix the false "no automated tests" claim in
+  `docs/BRIEFING_FOR_OTHER_SERVICES.md` (24 Vitest suites exist), annotate
+  the stale `bbcf03b` baseline / PR #2 / PR #5 references, and mark
+  RAJ-277…296 roadmap issues done in `ROADMAP.md` where git history proves
+  a merge to `main`.
+- **Touching:**
+  - `docs/BRIEFING_FOR_OTHER_SERVICES.md`
+  - `ROADMAP.md`
+  - `AGENTS_LOG.md` (this entry)
+- **NOT touching:** all source code, schema, CI workflows, tests.
+- **Out of scope:** restructuring either doc; verifying Linear issue
+  states in Linear itself; RAJ-277/278/280/293 (no git evidence — left
+  open).
+
+### fable5-builder-s3 (claude/s3-rls-lock) — RLS org-isolation policies + org-context plumbing
+- **Started:** 2026-07-12
+- **Agent:** agent=fable5-builder-s3 (FABLE5 autonomous run, service S3 "rls-lock" / M3)
+- **Goal:** Close Message.md follow-up #5 (RLS on, no policies) — org-isolation
+  RLS policies on every tenant table keyed off transaction-local
+  `app.current_org_id` (pgBouncer/Supavisor-transaction-pooling safe), plus the
+  app-side org-context plumbing. Migration is Phase 1 (safe); the app-role
+  lockdown (FORCE ROW LEVEL SECURITY) is staged for Hermes behind an explicit
+  gate in `docs/runs/reviews/S3-HERMES-APPLY.md` (checkpoint 3a).
+- **Touching:**
+  - `prisma/migrations/20260712_rls_org_isolation/migration.sql` (new)
+  - `src/lib/org-context.ts` (new — AsyncLocalStorage org context)
+  - `src/lib/prisma.ts` (rls-org-context extension, `setRlsOrgContext(tx)` helper;
+    SymbiOS layer preserved, its pre-checks now org-aware)
+  - `src/lib/ledger.service.ts`, `src/lib/automation.service.ts`,
+    `src/app/actions/approval.actions.ts` (set RLS context in interactive txns)
+  - `src/lib/trial-balance-report.ts` (runWithOrgContext exemplar)
+  - `tests/unit/rls-org-isolation.test.ts`, `tests/unit/org-context.test.ts` (new);
+    prisma-mock updates in 4 existing test files
+  - `docs/runs/reviews/S3-HERMES-APPLY.md` (new — apply/verify/rollback runbook)
+- **NOT touching:** `src/auth.ts`, seed, remaining server actions/pages
+  (runWithOrgContext adoption there is a Phase-2 prerequisite, listed in the runbook).
+- **Out of scope (followups):** wire `runWithOrgContext` into all actions/routes/
+  server components; seed-script GUC support; Phase 2 FORCE application (Hermes).
+- **Update 2026-07-12 (external review, CodeRabbit on PR #76):** all 7 findings
+  addressed. (1+3+5) `setRlsOrgContext(tx, organizationId)` now takes the
+  resolved org id EXPLICITLY at all six interactive transactions (ledger
+  postEntry/reverseEntry/updateEntryWithVersion, automation, both approval
+  actions) — the ambient AsyncLocalStorage scope is fallback only, fixing the
+  silent no-op → fail-closed trap under FORCE. (2) `LedgerService.postEntry`
+  accepts an optional `LedgerTransactionClient`; AutomationService forwards its
+  open tx so expense + journal entry are atomic (P2002 race recovery is
+  owned-transaction-mode only — documented). (4) transaction detection in the
+  rls-org-context extension extracted to `resolveRlsWrapMode()` — fails SAFE
+  (passthrough + one-time loud warning) if Prisma's private `__internalParams`
+  vanishes; behavior pinned by unit tests. (6) runbook: all SQL schema-qualified
+  via psql `\set tenant_schema`, Phase 2 smoke-test failure is now a HARD ABORT,
+  probe cleanup wrapped in a GUC-setting transaction. (7) first-Organization-
+  under-FORCE requirement documented as Phase 2 prerequisite 3 (no signup flow
+  exists — verified; code change deferred until one does). Tests: 304 (pre-S3 baseline) → 318 (current total after this change)
+  (new `tests/unit/ledger-postentry-tx-reuse.test.ts`, extended org-context.test.ts).
 
 ## Recently completed
 

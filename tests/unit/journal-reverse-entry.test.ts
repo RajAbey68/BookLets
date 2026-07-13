@@ -37,6 +37,7 @@ function mockDeps(findFirstResult: unknown) {
   const $transaction = vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx));
   vi.doMock('../../src/lib/prisma', () => ({
     prisma: { journalEntry: { findFirst }, $transaction },
+    setRlsOrgContext: vi.fn().mockResolvedValue(undefined),
   }));
   const record = vi.fn().mockResolvedValue({});
   vi.doMock('../../src/lib/evidence-log.service', () => ({ EvidenceLogService: { record } }));

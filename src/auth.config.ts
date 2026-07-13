@@ -5,12 +5,13 @@ import Google from "next-auth/providers/google";
  * Edge-safe Auth.js configuration.
  *
  * This file MUST NOT import Prisma (or anything that transitively pulls in
- * Node's `crypto`). It is consumed by `middleware.ts`, which runs in the
- * Edge runtime — importing the Prisma client there crashes every route
- * with "The edge runtime does not support Node.js 'crypto' module".
+ * Node's `crypto`). It is consumed by `proxy.ts` (this Next version's
+ * renamed middleware convention), which runs in the Edge runtime —
+ * importing the Prisma client there crashes every route with "The edge
+ * runtime does not support Node.js 'crypto' module".
  *
  * Providers, the session strategy, and the sign-in page live here because
- * the middleware needs them to verify the JWT and redirect. The
+ * the proxy needs them to verify the JWT and redirect. The
  * DB-touching callbacks (signIn upsert, jwt user lookup) live in `auth.ts`,
  * which only runs in the Node runtime.
  */

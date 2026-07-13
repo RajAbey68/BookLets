@@ -10,9 +10,11 @@ interface AppShellProps {
   userName?: string;
   userImage?: string;
   userRole?: string;
+  /** DRAFT entries awaiting 4-eyes review — sidebar badge (S6). */
+  reviewCount?: number;
 }
 
-export default function AppShell({ children, orgName, userName, userImage, userRole }: AppShellProps) {
+export default function AppShell({ children, orgName, userName, userImage, userRole, reviewCount }: AppShellProps) {
   const [isSidebarOpen, setSidebarOpen] = useState(false);
 
   const toggleSidebar = () => setSidebarOpen(!isSidebarOpen);
@@ -27,7 +29,7 @@ export default function AppShell({ children, orgName, userName, userImage, userR
         />
       )}
 
-      <Sidebar isOpen={isSidebarOpen} />
+      <Sidebar isOpen={isSidebarOpen} reviewCount={reviewCount} />
 
       <div className="main-wrapper">
         <AppHeader

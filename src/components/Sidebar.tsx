@@ -52,15 +52,29 @@ const IconCheckSquare = () => (
   </svg>
 );
 
+const IconEye = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
 const NAV_ITEMS = [
   { href: '/',           label: 'Dashboard',  Icon: IconDashboard },
   { href: '/properties', label: 'Properties', Icon: IconBuilding  },
   { href: '/bookings',   label: 'Bookings',   Icon: IconCalendar  },
   { href: '/ledger',     label: 'Ledger',     Icon: IconBook      },
+  { href: '/review',     label: 'Review',     Icon: IconEye       },
   { href: '/approvals',  label: 'Approvals',  Icon: IconCheckSquare },
 ];
 
-export default function Sidebar({ isOpen }: { isOpen?: boolean }) {
+interface SidebarProps {
+  isOpen?: boolean;
+  /** DRAFT entries awaiting 4-eyes review — computed server-side (S6). */
+  reviewCount?: number;
+}
+
+export default function Sidebar({ isOpen, reviewCount }: SidebarProps) {
   const pathname = usePathname();
 
   return (
@@ -82,6 +96,14 @@ export default function Sidebar({ isOpen }: { isOpen?: boolean }) {
               <Link href={href} className={pathname === href ? 'active' : ''}>
                 <Icon />
                 {label}
+                {href === '/review' && typeof reviewCount === 'number' && reviewCount > 0 && (
+                  <span
+                    aria-label={`${reviewCount} draft ${reviewCount === 1 ? 'entry' : 'entries'} awaiting review`}
+                    style={{ marginLeft: 'auto', minWidth: '1.375rem', padding: '0.0625rem 0.375rem', borderRadius: '999px', background: 'var(--accent-color)', color: '#fff', fontSize: '0.6875rem', fontWeight: 700, textAlign: 'center', lineHeight: '1.125rem' }}
+                  >
+                    {reviewCount > 99 ? '99+' : reviewCount}
+                  </span>
+                )}
               </Link>
             </li>
           ))}

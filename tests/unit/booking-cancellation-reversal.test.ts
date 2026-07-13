@@ -133,6 +133,7 @@ describe('source/sourceId persistence (RAJ-455 contract)', () => {
         },
         $transaction: vi.fn().mockImplementation((fn: (client: typeof tx) => unknown) => fn(tx)),
       },
+      setRlsOrgContext: vi.fn().mockResolvedValue(undefined),
     }));
     vi.doMock('../../src/lib/evidence-log.service', () => ({
       EvidenceLogService: { record: vi.fn().mockResolvedValue({}) },

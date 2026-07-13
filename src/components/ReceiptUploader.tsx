@@ -105,7 +105,7 @@ export const ReceiptUploader: React.FC<ReceiptUploaderProps> = ({
           {status === 'UPLOADING' && 'Reading file...'}
           {status === 'ANALYZING' && 'Gemini 3 Flash is identifying vendors and accounts...'}
           {status === 'SUCCESS' && !showHil && 'The entry has been recorded in the double-entry ledger.'}
-          {status === 'SUCCESS' && showHil && 'Confidence below threshold. Entry queued as DRAFT for human review.'}
+          {status === 'SUCCESS' && showHil && 'Entry recorded as DRAFT and queued for 4-eyes human review before posting.'}
           {status === 'ERROR' && error}
         </p>
 

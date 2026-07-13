@@ -1,29 +1,19 @@
 import {
   fetchPendingActionIntents,
-  fetchDraftJournalEntries,
+  fetchDraftReviewQueue,
   fetchRecentDecisions,
 } from '@/app/actions/approval.actions';
 import ApprovalDecisionButtons from '@/components/ApprovalDecisionButtons';
+import DraftReviewQueue from '@/components/DraftReviewQueue';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 type IntentItem = Awaited<ReturnType<typeof fetchPendingActionIntents>>[number];
-type DraftEntry = Awaited<ReturnType<typeof fetchDraftJournalEntries>>[number];
 type Decision = Awaited<ReturnType<typeof fetchRecentDecisions>>[number];
 
 const formatDateTime = (date: Date | string) =>
   new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(date));
-
-const formatDate = (date: Date | string) =>
-  new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium' }).format(new Date(date));
-
-const formatCurrency = (amount: number | { toString(): string }) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
-
-/** Total debit side of a balanced entry = the entry's headline amount. */
-const entryAmount = (entry: DraftEntry) =>
-  entry.lines.filter((l) => l.isDebit).reduce((sum, l) => sum + Number(l.amount), 0);
 
 const DECISION_LABELS: Record<string, { label: string; color: string }> = {
   ACTION_INTENT_APPROVED: { label: 'Intent approved', color: 'var(--success-color)' },
@@ -33,9 +23,9 @@ const DECISION_LABELS: Record<string, { label: string; color: string }> = {
 };
 
 export default async function ApprovalsPage() {
-  const [intents, drafts, decisions] = await Promise.all([
+  const [intents, draftQueue, decisions] = await Promise.all([
     fetchPendingActionIntents(),
-    fetchDraftJournalEntries(),
+    fetchDraftReviewQueue(),
     fetchRecentDecisions(),
   ]);
 
@@ -102,56 +92,13 @@ export default async function ApprovalsPage() {
         </table>
       </div>
 
-      {/* ── Draft journal entries (>€10k auto-parked by RevenueService) ── */}
+      {/* ── DRAFT review queue (S6): automated + high-value entries with
+             side-by-side evidence and batch 4-eyes decisions ── */}
       <h2 style={{ fontSize: '1.125rem', marginBottom: '1rem' }}>
         Draft journal entries awaiting posting
-        <span style={{ marginLeft: '0.5rem', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>({drafts.length})</span>
+        <span style={{ marginLeft: '0.5rem', fontSize: '0.8125rem', color: 'var(--text-secondary)' }}>({draftQueue.items.length})</span>
       </h2>
-      <div className="glass-card" style={{ marginBottom: '2.5rem' }}>
-        <table className="premium-table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Memo</th>
-              <th>Maker</th>
-              <th style={{ textAlign: 'right' }}>Amount</th>
-              <th style={{ textAlign: 'right' }}>Decision</th>
-            </tr>
-          </thead>
-          <tbody>
-            {drafts.length === 0 ? (
-              <tr>
-                <td colSpan={5} style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)' }}>
-                  No draft entries waiting. High-value entries (over €10,000) land here for review before posting.
-                </td>
-              </tr>
-            ) : (
-              drafts.map((entry: DraftEntry) => (
-                <tr key={entry.id}>
-                  <td data-label="Date" style={{ padding: '1rem', color: 'var(--text-secondary)', fontSize: '0.8125rem' }}>
-                    {formatDate(entry.date)}
-                  </td>
-                  <td data-label="Memo" style={{ padding: '1rem' }}>
-                    <div style={{ fontWeight: 500 }}>{entry.memo || '—'}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                      {entry.lines.map((l) => `${l.isDebit ? 'DR' : 'CR'} ${l.account.name}`).join(' · ')}
-                    </div>
-                  </td>
-                  <td data-label="Maker" style={{ padding: '1rem', color: 'var(--text-secondary)' }}>
-                    {entry.makerIdentity ?? entry.createdBy ?? '—'}
-                  </td>
-                  <td data-label="Amount" style={{ padding: '1rem', textAlign: 'right', fontWeight: 'bold' }}>
-                    {formatCurrency(entryAmount(entry))}
-                  </td>
-                  <td data-label="Decision" style={{ padding: '1rem' }}>
-                    <ApprovalDecisionButtons kind="journal" itemId={entry.id} />
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+      <DraftReviewQueue items={draftQueue.items} />
 
       {/* ── Audit trail — recent decisions from the EvidenceLog ── */}
       <h2 style={{ fontSize: '1.125rem', marginBottom: '1rem' }}>Recent decisions (audit trail)</h2>
