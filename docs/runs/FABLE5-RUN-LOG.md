@@ -531,3 +531,20 @@ Hermes missed Raj's 10-minute HR-8 deadline (no RajAbeyBot approvals as of 01:45
    (Anyone logged into the Vercel team can also use the bare preview URL.)
 
 **State: functionality delivered; git formality pending one approval.** When RajAbeyBot approves #82 (or Raj merges it in the UI), Fable un-drafts + merges it, the 7 constituent PRs auto-close as merged, Vercel deploys the identical tree to the canonical production URL, and the loop's merge objective closes.
+
+---
+
+## 2026-07-13 — NAMING SETTLED + EXTERNAL REVIEW QUORUM DESIGN (Raj directive: third-party LLM reviewers approve, never Raj)
+
+**Account facts (from the repo's collaborator API, verbatim):** exactly two collaborators — `RajAbey68` (admin) and `RajAbeyBot` (write). The bot Raj calls **HermesBot** IS the login `RajAbeyBot`. All prior HR-8 instructions apply unchanged to the token Hermes holds — the curl command works as written. Referenced everywhere as "HermesBot (login: RajAbeyBot)" from now on.
+
+**External Review Quorum — v1 (works today, devserver-side, no new infrastructure):**
+1. Hermes fetches the PR diff (`curl https://github.com/RajAbey68/BookLets/pull/82.diff` — public repo, no auth needed).
+2. Hermes submits it for verdicts to every external LLM it holds keys for: DeepSeek (already wired as Layer-1 Checker); add Z.AI GLM 5.2, Qwen, Gemini as keys become available — all expose OpenAI-compatible chat endpoints, so ONE script covers all. Verdict format: PASS/FAIL + one-paragraph rationale.
+3. Quorum rule: ≥2/3 PASS (while only DeepSeek is wired: its single PASS suffices, per Raj's "any other Frontier LLM").
+4. On quorum PASS, HermesBot submits the APPROVE review via API with all verdicts embedded in the body (auditable four-eyes: Claude writes, non-Anthropic quorum approves).
+5. Fable auto-merges on the approval webhook. Note: GitHub only counts approvals from ACCOUNTS with write access — LLMs and GitHub Apps (incl. CodeRabbit and the Codex connector already reviewing this repo) can never satisfy the gate directly; the bot signs on the quorum's behalf. That is why HermesBot is load-bearing.
+
+**v2 (optional, later):** a GitHub Action (`llm-quorum-review.yml`) doing steps 1–4 automatically on every ready-for-review PR, with LLM keys + HermesBot token as repo secrets. Fable can author the workflow; secrets must be added by an admin session — parked until wanted.
+
+**IMMEDIATE APPLICATION — HR-8 stands, one command:** HermesBot approves PR #82 (all checks green, evidence chain on the bus). Fable merges on the webhook; the 7 constituent PRs auto-close as merged; canonical prod URL updates.

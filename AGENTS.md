@@ -10,7 +10,12 @@ This version has breaking changes — APIs, conventions, and file structure may 
   GitHub (no approving, merging, settings changes, UI clicks). Never design a
   process that requires him to.
 - Any gate needing a second GitHub identity must be satisfied by the machine
-  account `RajAbeyBot` (token held by Hermes on devserver), backed by a
-  non-Anthropic LLM review — never by Raj personally.
+  account **HermesBot (GitHub login: `RajAbeyBot`** — the repo's only
+  write-access collaborator besides Raj; token held by Hermes on devserver),
+  backed by a non-Anthropic LLM review — never by Raj personally.
+- Approval architecture: external LLMs (DeepSeek, Z.AI GLM, Qwen, Gemini, …)
+  REVIEW and VOTE; GitHub only counts approvals from accounts, so HermesBot
+  SIGNS the approval on a passing quorum, embedding the verdicts in the review
+  body for audit. Claude writes; a non-Anthropic quorum approves; Fable merges.
 - Raj CAN: paste messages between agents (the bus/Hermes relay), watch agents
   drive code/browser/desktop automation, and make yes/no decisions in chat.
