@@ -36,7 +36,7 @@ Plus two infrastructure modules:
 | Channels (ids) | `channel_airbnb`, `channel_booking.com`, `channel_direct` |
 | Fiscal period id | `fp_<year>` (auto-seeded for current year, `isClosed: false`) |
 | Database URL config | `prisma.config.ts` (Prisma 7 dropped `datasource.url` from `schema.prisma`) |
-| Money precision | `Decimal(19, 4)` on `JournalLine.amount`; other money columns tracked for migration in PR #5 |
+| Money precision | `Decimal(19, 4)` on all money columns (`JournalLine.amount`, `Booking.totalAmount`, `Expense.amount`, `BookingCharge.amount`, `GuestPayout.amount`, `OwnerStatement.totalDue`) since commit `bdd8cff` |
 | High-value journal threshold | `HIGH_VALUE_THRESHOLD = 10000` EUR (auto-DRAFT above) |
 | Default currency | EUR |
 
@@ -52,10 +52,10 @@ Plus two infrastructure modules:
 3. **Closed fiscal periods are sealed.** No write into a FiscalPeriod with
    `isClosed: true`. Enforced in the `prisma` extension at create and update.
 4. **No zero-amount lines** on POSTED entries.
-5. **Money precision.** `JournalLine.amount` is `Decimal(19, 4)` — never
-   round-trip through JS `number`. Other money columns (`Booking.totalAmount`,
-   `Expense.amount`, `BookingCharge.amount`, `GuestPayout.amount`,
-   `OwnerStatement.totalDue`) are tracked for migration in PR #5.
+5. **Money precision.** All money columns (`JournalLine.amount`,
+   `Booking.totalAmount`, `Expense.amount`, `BookingCharge.amount`,
+   `GuestPayout.amount`, `OwnerStatement.totalDue`) are `Decimal(19, 4)`
+   since commit `bdd8cff` — never round-trip through JS `number`.
 6. **Every ledger write is audited.** `LedgerService.postEntry` and
    `LedgerService.reverseEntry` write an `EvidenceLog` row inside the same
    transaction. Hash chain is per `tenantId` (organization). Don't bypass
@@ -179,7 +179,7 @@ For arbitrary journal entries from agent code:
 
 | File / Pattern | Replacement | Why |
 |---|---|---|
-| Tailwind classnames in components (`className="hidden lg:flex"`, `bg-blue-500/10`, `animate-pulse`, etc.) | DESIGN.md primitives once PR #2 lands (`.glass-card`, `.btn-primary`, `.is-analyzing`, `.lg-only-flex`) | No Tailwind installed; classes are dead. |
+| Tailwind classnames in components (`className="hidden lg:flex"`, `bg-blue-500/10`, `animate-pulse`, etc.) | Design-system primitives in `src/app/globals.css` (`.glass-card`, `.btn-primary`, `.is-analyzing`, `.lg-only-flex`) — landed in commit `1e1b1b9` | No Tailwind installed; classes are dead. |
 | Raw `fetch()` in services | `fetchWithTimeout` / `fetchWithRetry` from `src/lib/http.ts` | No timeouts → server-action stalls. |
 | Hardcoded FK strings (`'SUSPENSE_ACC_ID'`, `'PRIMARY_BANK_ACC_ID'`, `'channel_gen_001'`) | Resolve from seed by code/name | These never matched real DB rows. |
 | `try { await LedgerService.postEntry(...) } catch (err) { console.error... }` swallowing errors in sync paths | Let errors propagate; aggregate in `SyncReport.failures` | Silent partial failure was the original bug. |
@@ -190,6 +190,13 @@ For arbitrary journal entries from agent code:
 | `account.accountType`, `journalLine.debitCredit`, `fiscalPeriod.closedAt + locked` | `account.type`, `journalLine.isDebit`, `fiscalPeriod.isClosed` | Schema renames in PR #1; old names will not resolve. |
 
 ## Current Baseline (as of `main @ bbcf03b`)
+
+> **Drift note (2026-07-12):** this baseline snapshot dates from
+> 2026-05-10; `main` has since advanced (currently `38f1807`) with the
+> Phase 1 accounting work (see `ROADMAP.md`), the design-system CSS
+> (`1e1b1b9`), the Float→Decimal migration + Vitest bootstrap
+> (`bdd8cff`), and Gemini OCR integration. The bullets below remain true
+> unless struck through, but the PR #2 visual caveat is resolved.
 
 - Schema, services, and CI workflows are aligned (PR #1).
 - Node 20 + actions@v4 in CI workflows; `npm install` clean (PR #1).
@@ -202,7 +209,7 @@ For arbitrary journal entries from agent code:
 - `ReceiptUploader` is now a pure client component; receipt processing goes through the `processReceiptAction` server action so Prisma is no longer pulled into the browser bundle (PR #8).
 - CI gates: P0.1–P0.6, P1.1, P1.2, P1.3, P1.5 all passing. **P1.4 (SoD) explicitly disabled, tracked.**
 - `npm run build` **passes** end-to-end (PR #8).
-- **Visual caveat:** the `ReceiptUploader` references design-system class names (`.glass-card`, `.is-analyzing`, `.is-success`, `.is-hil`, `.btn-primary`, `.uploader-*`) that PR #2's CSS commit defines. Until PR #2 lands, the receipt component renders unstyled but functional. PR #2 is held in draft for human visual signoff per its test plan; this is an intentional, transient state.
+- ~~**Visual caveat:** the `ReceiptUploader` references design-system class names (`.glass-card`, `.is-analyzing`, `.is-success`, `.is-hil`, `.btn-primary`, `.uploader-*`) that PR #2's CSS commit defines. Until PR #2 lands, the receipt component renders unstyled but functional.~~ **Resolved:** the design-system CSS primitives landed in `src/app/globals.css` (commit `1e1b1b9`, 2026-05-10).
 
 ## Required Service Changes For Any New Agent
 
@@ -250,11 +257,15 @@ Required environment:
 
 - Real auth/session and per-request `organizationId` resolution.
 - SoD enforcement (`makerIdentity !== checkerIdentity`); re-enables P1.4.
-- Float → Decimal migration for remaining money columns (PR #5 in flight).
+- ~~Float → Decimal migration for remaining money columns (PR #5 in flight).~~
+  **Done:** all monetary fields are `Decimal(19, 4)` since commit `bdd8cff` (2026-05-13).
 - Owner statement generation, reconciliation, and payout export.
 - Multi-currency handling (currently EUR-only at the type level).
 - Mobile-app shape for `ReceiptUploader` (currently web only).
-- **Test infrastructure — there are no automated tests in the repo today.**
+- ~~Test infrastructure — there are no automated tests in the repo today.~~
+  **Done (2026-05-13, commit `bdd8cff` and onward):** the repo now has 24
+  Vitest suites under `tests/unit/`, run via `npm run test:unit`
+  (`vitest run`, config in `vitest.config.ts`).
 - Per-tenant serialisation of `EvidenceLog` writes (advisory lock or
   `SELECT … FOR UPDATE`) to prevent chain forking under concurrent writers.
 - An automated agent-scope-guard CI check that fails any PR touching
