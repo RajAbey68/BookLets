@@ -39,6 +39,7 @@ import {
   type OcrBridgeDeps,
   type OcrBridgeSummary,
   type OcrStagingRow,
+  type ParkReason,
 } from './ocr-bridge';
 import type { JournalEntryInput } from './types';
 
@@ -144,6 +145,123 @@ async function countRemainingEligible(organizationId: string): Promise<number> {
       AND ${notYetImported(organizationId)}
   `;
   return result[0]?.n ?? 0;
+}
+
+// ─── S11 sandbox — read-only staging-pile summary ────────────────────────────
+
+/** One park-reason bucket of the staging summary (counts only, no row ids). */
+export interface OcrStagingParkedCount {
+  reason: ParkReason;
+  count: number;
+}
+
+export interface OcrStagingSummary {
+  /**
+   * False when the staging table / grant / database is absent (e.g. local
+   * dev without raj_fin_track) — the sandbox page renders a "staging
+   * unavailable" note instead of crashing.
+   */
+  available: boolean;
+  /** Rows importable right now: well-shaped, open fiscal period, unimported. */
+  importable: number;
+  /** Unimported rows parked by deterministic reason (nonzero buckets only). */
+  parked: OcrStagingParkedCount[];
+  /** Rows that already have a JournalEntry (idempotency key present). */
+  alreadyImported: number;
+  /** All rows in the staging pool. */
+  total: number;
+}
+
+/** Raw counts row of the summary query (every column is `::int`). */
+interface StagingSummaryCounts {
+  total: number;
+  already_imported: number;
+  importable: number;
+  ocr_failed: number;
+  bad_amount: number;
+  no_doc_date: number;
+  fx_unsupported: number;
+  no_fiscal_period: number;
+}
+
+const UNAVAILABLE_STAGING_SUMMARY: OcrStagingSummary = {
+  available: false,
+  importable: 0,
+  parked: [],
+  alreadyImported: 0,
+  total: 0,
+};
+
+/**
+ * S11 — read-only counts over the staging pool for the /sandbox pile card.
+ *
+ * Cross-schema SELECT ONLY — the staging schema stays read-only territory
+ * (never INSERT/UPDATE/DELETE against raj_fin_track). The park-reason buckets
+ * apply classifyStagingRow's exact precedence (OCR failure first, then
+ * amount, date, currency; fiscal period last because it needs the ledger's
+ * FiscalPeriod table), so the summary always reconciles with what a bridge
+ * run would actually do: total = alreadyImported + importable + Σparked.
+ *
+ * Degrades to `available: false` instead of throwing when the staging table,
+ * the SELECT grant (HR-6), or the database itself is missing — a summary
+ * card must never take down the page it renders on.
+ */
+export async function summarizeOcrStaging(organizationId: string): Promise<OcrStagingSummary> {
+  let counts: StagingSummaryCounts | undefined;
+  try {
+    const rows = await prisma.$queryRaw<StagingSummaryCounts[]>`
+      SELECT
+        count(*)::int AS total,
+        count(*) FILTER (WHERE NOT ${notYetImported(organizationId)})::int AS already_imported,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND ${importablePredicate(organizationId)})::int AS importable,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND r.ocr_status IS DISTINCT FROM 'success')::int AS ocr_failed,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND r.ocr_status = 'success'
+          AND (r.total_amount IS NULL OR r.total_amount <= 0))::int AS bad_amount,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND r.ocr_status = 'success'
+          AND r.total_amount > 0
+          AND r.doc_date IS NULL)::int AS no_doc_date,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND r.ocr_status = 'success'
+          AND r.total_amount > 0
+          AND r.doc_date IS NOT NULL
+          AND r.currency IS DISTINCT FROM 'LKR')::int AS fx_unsupported,
+        count(*) FILTER (WHERE ${notYetImported(organizationId)}
+          AND ${ELIGIBLE_PREDICATE}
+          AND NOT ${inOpenFiscalPeriod(organizationId)})::int AS no_fiscal_period
+      FROM raj_fin_track.ocr_receipts r
+    `;
+    counts = rows[0];
+  } catch (error) {
+    console.error('[ocr-bridge] summarizeOcrStaging: staging unavailable:', error);
+    return UNAVAILABLE_STAGING_SUMMARY;
+  }
+  if (!counts) return UNAVAILABLE_STAGING_SUMMARY;
+
+  // classifyStagingRow precedence order; zero buckets are omitted so the UI
+  // only lists reasons that actually occur.
+  const parked: OcrStagingParkedCount[] = (
+    [
+      ['OCR_FAILED', counts.ocr_failed],
+      ['BAD_AMOUNT', counts.bad_amount],
+      ['NO_DOC_DATE', counts.no_doc_date],
+      ['FX_UNSUPPORTED', counts.fx_unsupported],
+      ['NO_FISCAL_PERIOD', counts.no_fiscal_period],
+    ] as const
+  )
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => ({ reason, count }));
+
+  return {
+    available: true,
+    importable: counts.importable,
+    parked,
+    alreadyImported: counts.already_imported,
+    total: counts.total,
+  };
 }
 
 /**
