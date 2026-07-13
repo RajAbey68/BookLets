@@ -548,3 +548,22 @@ Hermes missed Raj's 10-minute HR-8 deadline (no RajAbeyBot approvals as of 01:45
 **v2 (optional, later):** a GitHub Action (`llm-quorum-review.yml`) doing steps 1–4 automatically on every ready-for-review PR, with LLM keys + HermesBot token as repo secrets. Fable can author the workflow; secrets must be added by an admin session — parked until wanted.
 
 **IMMEDIATE APPLICATION — HR-8 stands, one command:** HermesBot approves PR #82 (all checks green, evidence chain on the bus). Fable merges on the webhook; the 7 constituent PRs auto-close as merged; canonical prod URL updates.
+
+---
+
+## 2026-07-13 — CODERABBIT UNION REVIEW (#82) TRIAGE — none merge-blocking; batched as post-merge / Phase-2 follow-up
+
+CodeRabbit re-reviewed the whole union (45 files together) and raised 5 actionable + 4 nitpicks. NOT pushing fixes to `union-audit-proof` now — a commit there dismisses HermesBot's approval and resets CI while we're blocked on the branch-protection config. Tracked here for a follow-up PR after #82 lands:
+
+**Security / correctness (do before Phase-2 FORCE RLS flip — which is still commented out, so not live yet):**
+1. `src/lib/prisma.ts` fiscal-period pre-check: `...(activeOrgId ? {organizationId} : {})` DROPS the org filter when no context → scans all orgs, can leak another tenant's period name in the error. Fix = skip the check when `activeOrgId` falsy (never widen). Latent today (all call sites wrap in runWithOrgContext), but real. **Worth doing.**
+2. `src/app/actions/approval.actions.ts` fetchDraftReviewCount/Queue + actionIntentQueue/journalEntry reads use bare `prisma` → must go through the org-scoped client before FORCE RLS. Phase-2 prerequisite.
+3. `src/lib/ocr-bridge.deps.ts` runOcrBridgeImport not wrapped in runWithOrgContext → raw $queryRaw reads lack app.current_org_id; under FORCE RLS they fail closed and mis-park rows. Phase-2 prerequisite.
+4. `prisma/migrations/20260712_rls_org_isolation`: confirm btree FK indexes (JournalLine.journalEntryId, BookingCharge.bookingId, Booking.propertyId, PropertyOwnership.propertyId, OwnerStatement.ownerId, Expense.propertyId) exist before FORCE, else per-row EXISTS probes get expensive. Phase-2 prerequisite.
+
+**Quick-win cleanups (non-urgent):**
+5. `src/app/api/health/route.ts`: race `$queryRaw SELECT 1` against a ~3s timeout so a hung DB conn returns a fast 503 instead of hanging.
+6. `src/app/(app)/layout.tsx`: pass the already-resolved orgId into fetchDraftReviewCount(orgId?) to kill a duplicate auth()+membership query per request.
+7. `review/page.tsx` use REVIEW_QUEUE_CAP not literal 100; `ocr-bridge.deps.ts` drop hardcoded `public.` qualifier to follow search_path.
+
+These map cleanly onto the existing S3 Phase-2 (FORCE RLS) rollout doc — items 1–4 become its pre-flip checklist. **The merge blocker is unchanged and separate: the stale branch-protection required-checks config (see prior entry) — awaiting Raj's call on how to fix it.**
