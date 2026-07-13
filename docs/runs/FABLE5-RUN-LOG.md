@@ -357,3 +357,23 @@ Raj asked for a third-party critical-thinking adversarial review. A fresh-contex
 - Backup commit ccbf483 shows author "audit <audit@local>" — a config side-effect of the audit sandbox, content verified intact; repo config restored.
 
 Lesson recorded: "CodeRabbit findings addressed" ≠ "merge-ready". Merge-readiness claims now require a merged-union test run, not per-branch green.
+
+---
+
+## 2026-07-13 — FINDING #4 QUANTIFIED: S1B WOULD IMPORT **ZERO** ROWS TODAY — NEW HR-7 (FiscalPeriods) FOR RAJ/HERMES
+
+The doc_date sizing query (previously blocked by connector failures) finally ran, read-only:
+
+```
+SELECT min(doc_date), max(doc_date), count(*),
+       count(*) FILTER (WHERE doc_date IS NULL),
+       count(*) FILTER (WHERE doc_date < '2026-01-01' OR doc_date > '2026-12-31')
+FROM raj_fin_track.ocr_receipts;
+-- min 2023-12-22 | max 2025-12-24 | total 468 | null_date 449 | outside_fy2026 19
+```
+
+Read that carefully: **every dated receipt (19/19) is outside FY2026**, and prod's only FiscalPeriod is fp_2026. The audit's "stranding" finding is not an edge case — as things stand the bridge would park 449 rows NO_DOC_DATE + 19 rows NO_FISCAL_PERIOD and import **nothing**. (The earlier "~179 eligible" bucket predates doc_date-aware eligibility — the contract's acceptance numbers in §6 must be re-derived at run time, not assumed.)
+
+**HR-7 (new, Raj decision + Hermes execution): create FiscalPeriods covering 2023-12 → 2025-12** (e.g. fp_2024: 2024-01-01→2024-12-31, fp_2025: 2025-01-01→2025-12-31, and fp_2023 or a stub period covering 2023-12-22→2023-12-31 for the earliest receipts), all OPEN until reconciliation completes. Which period boundaries to use (calendar vs fiscal year) is an accounting decision — Raj calls it; Fable will emit exact INSERT statements on request once Raj picks the boundaries. The 449 NULL-doc_date rows are a separate problem: they need OCR re-extraction or manual dating upstream in raj_fin_track (devserver-side, Hermes) — the bridge correctly refuses to invent dates (§7).
+
+Sequencing impact: HR-5 → HR-6 → **HR-7** → S1b run. Without HR-7 the S1b acceptance test "JournalEntry count = eligible bucket" passes vacuously at 0, which proves nothing.

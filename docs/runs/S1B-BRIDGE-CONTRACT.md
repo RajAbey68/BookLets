@@ -77,6 +77,11 @@ read-only to the app) and never invented into the ledger.
    (no date fabrication — see §7) and excludes them from `remaining` so the
    "re-invoke until remaining:0" loop terminates. Importing them later requires
    Raj to create the covering FiscalPeriod(s) first, then re-invoke.
+   **Measured live 2026-07-13**: 468 staging rows — 449 NULL `doc_date`
+   (park `NO_DOC_DATE`), 19 dated spanning 2023-12-22 → 2025-12-24, i.e.
+   **ALL dated rows fall outside FY2026 and ZERO rows are importable** until
+   FiscalPeriods covering 2023-12 → 2025-12 exist. Creating those periods is
+   an accounting decision → Raj/Hermes action (HR-7 candidate), not Fable's.
 
 ## 6. Acceptance evidence (🛑 checkpoint, four-eyes)
 - `SELECT count(*) FROM public."JournalEntry" WHERE source='OCR_RECEIPT'` = eligible-bucket count at run time (~179), all `status='DRAFT'`.
