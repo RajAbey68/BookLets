@@ -377,3 +377,26 @@ Read that carefully: **every dated receipt (19/19) is outside FY2026**, and prod
 **HR-7 (new, Raj decision + Hermes execution): create FiscalPeriods covering 2023-12 → 2025-12** (e.g. fp_2024: 2024-01-01→2024-12-31, fp_2025: 2025-01-01→2025-12-31, and fp_2023 or a stub period covering 2023-12-22→2023-12-31 for the earliest receipts), all OPEN until reconciliation completes. Which period boundaries to use (calendar vs fiscal year) is an accounting decision — Raj calls it; Fable will emit exact INSERT statements on request once Raj picks the boundaries. The 449 NULL-doc_date rows are a separate problem: they need OCR re-extraction or manual dating upstream in raj_fin_track (devserver-side, Hermes) — the bridge correctly refuses to invent dates (§7).
 
 Sequencing impact: HR-5 → HR-6 → **HR-7** → S1b run. Without HR-7 the S1b acceptance test "JournalEntry count = eligible bucket" passes vacuously at 0, which proves nothing.
+
+---
+
+## 2026-07-13 — STATUS PROBE + HR-7 DRAFT DDL (awaiting Raj boundary sign-off) + doc_date recovery lead
+
+Read-only probe results (Supabase, 2026-07-13):
+- **HR-5 NOT YET APPLIED** — `JournalEntry` has none of idempotencyKey/source/sourceId/version, `Account` has no isHeader/parentId, no `AccountType` enum, no `Account_no_self_parent` CHECK. Hermes: the B-hardened runbook above (plus the 🚨 amended-DDL notice) is still the live instruction.
+- **Prod health still 500** `FUNCTION_INVOCATION_FAILED` — expected until #74 merges + envs fixed; unchanged diagnosis.
+- **doc_date recovery lead**: all 449 NULL-doc_date staging rows HAVE `raw_response` payloads. Dates may be recoverable by re-parsing raw_response on devserver (Hermes) — no re-OCR needed. Worth a Hermes look before we accept 449 permanently-parked rows.
+
+**HR-7 DRAFT** — exact statements, matching the seeded fp_2026 row's shape (id/name/createdBy conventions). ⚠️ NOT authorized to run yet: Raj must confirm the period boundaries (calendar years assumed; say the word and Fable re-emits for fiscal-year boundaries). Hermes executes after Raj confirms, single transaction:
+
+```sql
+BEGIN;
+INSERT INTO "FiscalPeriod" ("id","organizationId","name","startDate","endDate","isClosed","locked","createdBy")
+VALUES
+  ('fp_2023','org_booklets','FY 2023','2023-01-01','2023-12-31',false,false,'hr7'),
+  ('fp_2024','org_booklets','FY 2024','2024-01-01','2024-12-31',false,false,'hr7'),
+  ('fp_2025','org_booklets','FY 2025','2025-01-01','2025-12-31',false,false,'hr7');
+COMMIT;
+```
+
+Coverage check after: dated receipts span 2023-12-22 → 2025-12-24 → fully covered by fp_2023..fp_2025. Periods stay OPEN until reconciliation completes; closing/locking is a later Raj action. Sequencing stays HR-5 → HR-6 → HR-7 → S1b run.
