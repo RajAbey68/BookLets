@@ -19,3 +19,31 @@ This version has breaking changes — APIs, conventions, and file structure may 
   body for audit. Claude writes; a non-Anthropic quorum approves; Fable merges.
 - Raj CAN: paste messages between agents (the bus/Hermes relay), watch agents
   drive code/browser/desktop automation, and make yes/no decisions in chat.
+
+# Long-loop operating model: Orchestrator / Best-Fit-Worker (Raj, 2026-07-13)
+
+For any multi-step or long-running assignment in this repo (migrations, audits,
+multi-PR rollouts, agent loops):
+
+1. **One frontier model orchestrates.** It plans, decomposes, resolves
+   conflicts, makes judgment calls, and is accountable for the final report.
+   It does NOT do routine execution itself when a better-fit worker exists.
+2. **Every subtask goes to whoever is actually best for it — not a default:**
+   - Mechanical / high-volume / well-specified work → a fast, cheap model or a
+     plain script. Don't spend frontier-model effort on it.
+   - Domain-specialized work → the tool/model best regarded for that domain.
+   - Verification, adversarial audit, or approval of the orchestrator's OWN
+     output → NEVER the same model family that produced it. Use an
+     independent vendor (see the external-LLM quorum above).
+3. **Parallelize independent subtasks.** Serial only when there's a real
+   dependency.
+4. **Keep a durable, append-only log** of decisions, worker outputs, and open
+   questions (this file's run-log pattern) so the loop survives context
+   resets and other agents/humans can resume mid-stream.
+5. **Escalate to the human only for genuine judgment calls** — authorization,
+   risk tolerance, ambiguous intent. Never for anything a model or script can
+   resolve on its own.
+6. **Before declaring anything done**, get an independent adversarial check —
+   not just a second look from the same model that built it.
+7. **Report status as**: what's proven (with evidence), what's assumed,
+   what's blocked, and exactly whose action unblocks it.
