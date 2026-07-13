@@ -272,6 +272,33 @@ joining this repo should read it before claiming scope here.
     `sourceId=<expense.id>` in `AutomationService` at creation time.
   - Pagination for large DRAFT queues (batch is capped at 50 per request).
 
+### fable5-builder-s6 (claude/s6-review-ui, round 2) — dedicated /review page + sidebar badge
+- **Started:** 2026-07-12
+- **Agent:** fable5-builder-s6
+- **Goal:** Finish S6 review-ui: a dedicated `/review` route (the queue
+  previously only lived inside `/approvals`) plus a sidebar "Review" link
+  with a server-computed DRAFT-count badge. No new approval machinery —
+  the page reuses `fetchDraftReviewQueue` / `DraftReviewQueue` and all
+  decisions still run through `decideDraftJournalEntry` /
+  `batchDecideDraftJournalEntries` (4-eyes per entry, per-row batch
+  isolation, checker = session user).
+- **Touching:**
+  - `src/app/(app)/review/page.tsx` (new — auth-gated by global middleware)
+  - `src/app/actions/approval.actions.ts` (add `fetchDraftReviewCount`;
+    cap `fetchDraftReviewQueue` at 100 newest-first with a `createdAt`
+    tiebreaker; decisions also `revalidatePath('/review')`)
+  - `src/components/Sidebar.tsx` (Review nav item + count badge),
+    `src/components/AppShell.tsx`, `src/app/(app)/layout.tsx` (badge wiring)
+  - `tests/unit/review-page-actions.test.ts` (new)
+- **NOT touching:**
+  - `decideDraftJournalEntry` / `batchDecideDraftJournalEntries` decision
+    logic, `src/lib/approval.service.ts`, schema, `/approvals` page
+- **Out of scope (followups):**
+  - True pagination past the newest-100 cap (deciding entries surfaces
+    the older remainder; fine at current volumes).
+  - Live badge updates without navigation (would need client polling —
+    deliberately skipped per S6 scope).
+
 ### Lead coordinator (claude/ui-and-page-wiring, PR #2) — UI/SSR/page-wiring
 - **LANDED (2026-07-12 reconciliation):** the design-system CSS primitives
   this entry tracked are on `main` via `1e1b1b9` ("feat(ui): add

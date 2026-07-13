@@ -282,6 +282,7 @@ export async function decideDraftJournalEntry(
   }
 
   revalidatePath('/approvals');
+  revalidatePath('/review');
   revalidatePath('/ledger');
   return { success: true };
 }
@@ -391,6 +392,24 @@ export interface DraftReviewItem {
   isOwnDraft: boolean;
 }
 
+/**
+ * S6 — DRAFT count for the sidebar "Review" badge. Degrades to 0 instead of
+ * throwing: a badge must never take down the app shell it renders in.
+ */
+export async function fetchDraftReviewCount(): Promise<number> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return 0;
+
+  const { organizationId } = resolved.context;
+
+  try {
+    return await prisma.journalEntry.count({ where: { organizationId, status: 'DRAFT' } });
+  } catch (error) {
+    console.error('[approval.actions] fetchDraftReviewCount failed:', error);
+    return 0;
+  }
+}
+
 /** Same calendar day in UTC — extraction dates carry no meaningful time. */
 function sameUtcDay(a: Date, b: Date): boolean {
   return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10);
@@ -410,7 +429,11 @@ function sameUtcDay(a: Date, b: Date): boolean {
  *    never written; uploads are OCR'd in-memory and discarded), so the UI
  *    shows a typed placeholder instead of pretending storage exists.
  */
-export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[] }> {
+export async function fetchDraftReviewQueue(
+  // /review passes its page cap; /approvals omits the option and keeps the
+  // full set — a shared cap would silently hide older drafts there.
+  options: { limit?: number } = {},
+): Promise<{ items: DraftReviewItem[] }> {
   const resolved = await resolveActiveContext();
   if (!resolved.ok) return { items: [] };
 
@@ -421,7 +444,10 @@ export async function fetchDraftReviewQueue(): Promise<{ items: DraftReviewItem[
     drafts = await prisma.journalEntry.findMany({
       where: { organizationId, status: 'DRAFT' },
       include: { lines: { include: { account: true } } },
-      orderBy: { date: 'desc' },
+      // Newest first, createdAt as the same-day tiebreaker so the order is
+      // stable for every caller; id breaks exact ties deterministically.
+      orderBy: [{ date: 'desc' }, { createdAt: 'desc' }, { id: 'desc' }],
+      ...(options.limit !== undefined ? { take: options.limit } : {}),
     });
   } catch (error) {
     console.error('[approval.actions] fetchDraftReviewQueue: draft load failed:', error);
