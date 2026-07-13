@@ -47,3 +47,23 @@ multi-PR rollouts, agent loops):
    not just a second look from the same model that built it.
 7. **Report status as**: what's proven (with evidence), what's assumed,
    what's blocked, and exactly whose action unblocks it.
+
+# Guiding principle: Control Plane vs. Data Plane (Raj, 2026-07-13)
+
+Portfolio-wide, not BookLets-specific. Full version:
+`docs/runs/CONTROL-PLANE-DATA-PLANE-PRINCIPLE.md`.
+
+**Never let coordination and knowledge share one system.**
+- **Control plane** — what happens next: task requests, approvals, status,
+  ownership. Small, structured, auditable. Lives in git (issues, PRs,
+  run-logs).
+- **Data plane** — what is already known: semantic retrieval over code,
+  docs, notes across projects. Large, fuzzy, similarity-based. Lives in a
+  vector store (Supabase pgvector).
+
+**Litmus test:** does this need an audit trail (→ control plane), or does it
+need to be found by meaning, not by name (→ data plane)?
+
+**Composition rule:** they interact but never merge. The control plane may
+reference the data plane; the data plane never holds live task state (an
+embedding is a snapshot, not a live query — embedded "TODO"s rot instantly).
