@@ -44,8 +44,8 @@ function withByteCap(request: Request, cap: number): Request {
   if (!request.body) return request;
   let total = 0;
   const guarded = request.body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
+    new TransformStream({
+      transform(chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>) {
         total += chunk.byteLength;
         if (total > cap) {
           controller.error(new UploadTooLargeError());
