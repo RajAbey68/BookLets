@@ -69,6 +69,14 @@ read-only to the app) and never invented into the ledger.
    (If the app connects as the table owner this is a no-op — verify, don't assume.)
 3. Org + seed accounts (9999, 1000) present for the target organization —
    verified live: 1 org, seeded.
+4. **FiscalPeriod coverage (added by adversarial audit, blocking finding #4)** —
+   `postEntry` throws `NoOpenFiscalPeriodError` for any entry date not inside an
+   open FiscalPeriod, and prod has exactly ONE period (`fp_2026`,
+   2026-01-01 → 2026-12-31). Any receipt whose `doc_date` falls outside FY2026
+   cannot import. Handling: the bridge parks such rows as `NO_FISCAL_PERIOD`
+   (no date fabrication — see §7) and excludes them from `remaining` so the
+   "re-invoke until remaining:0" loop terminates. Importing them later requires
+   Raj to create the covering FiscalPeriod(s) first, then re-invoke.
 
 ## 6. Acceptance evidence (🛑 checkpoint, four-eyes)
 - `SELECT count(*) FROM public."JournalEntry" WHERE source='OCR_RECEIPT'` = eligible-bucket count at run time (~179), all `status='DRAFT'`.
