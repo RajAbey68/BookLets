@@ -4,7 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { prisma, setRlsOrgContext } from '@/lib/prisma';
 import { resolveActiveContext } from '@/lib/auth-context';
 import { EvidenceLogService } from '@/lib/evidence-log.service';
-import { LedgerService } from '@/lib/ledger.service';
+import { LedgerService, OptimisticLockError } from '@/lib/ledger.service';
 import {
   assertNotSelfApproval,
   isSameIdentity,
@@ -287,6 +287,64 @@ export async function decideDraftJournalEntry(
   return { success: true };
 }
 
+// ─── RAJ-674 punch-list #3 — sandbox field editing ──────────────────────────
+
+export type UpdateDraftResult = { success: true } | { success: false; error: string };
+
+/**
+ * The server action behind the review-queue "Edit" form: lets a checker
+ * correct memo/date/amount on an automated DRAFT before deciding it.
+ *
+ * The organization is resolved from the SESSION, never client input. The
+ * entry lookup is org-scoped so a foreign-tenant id gives a clean "not
+ * found" instead of a raw Prisma error surfacing to the client. The actual
+ * guarded write — version+DRAFT-status check, and the two-equal-lines
+ * amount rule — lives entirely in LedgerService.updateDraftEntryFields;
+ * this action adds no separate enforcement, only session resolution and
+ * error shaping.
+ */
+export async function updateDraftJournalEntry(
+  entryId: string,
+  expectedVersion: number,
+  updates: { memo?: string; date?: Date; amount?: string },
+): Promise<UpdateDraftResult> {
+  const resolved = await resolveActiveContext();
+  if (!resolved.ok) return { success: false, error: resolved.error };
+
+  const { organizationId } = resolved.context;
+
+  let entry;
+  try {
+    entry = await prisma.journalEntry.findFirst({
+      where: { id: entryId, organizationId },
+    });
+  } catch (error) {
+    console.error('[approval.actions] updateDraftJournalEntry: lookup failed:', error);
+    return { success: false, error: 'Could not load the journal entry. Try again shortly.' };
+  }
+  if (!entry) return { success: false, error: 'Draft journal entry not found in your organisation.' };
+
+  try {
+    await LedgerService.updateDraftEntryFields(entryId, organizationId, expectedVersion, updates);
+  } catch (error) {
+    if (error instanceof OptimisticLockError) {
+      return {
+        success: false,
+        error: 'This draft was modified or decided by someone else — reload and try again.',
+      };
+    }
+    if (error instanceof Error) {
+      return { success: false, error: error.message };
+    }
+    console.error('[approval.actions] updateDraftJournalEntry: update failed:', error);
+    return { success: false, error: 'Failed to save the correction.' };
+  }
+
+  revalidatePath('/review');
+  revalidatePath('/approvals');
+  return { success: true };
+}
+
 // ─── S6 review-ui — batch decisions ─────────────────────────────────────────
 
 export interface BatchEntryResult {
@@ -376,6 +434,8 @@ export interface DraftReviewEvidence {
 
 export interface DraftReviewItem {
   id: string;
+  /** Optimistic-lock counter — threaded through edits via updateDraftJournalEntry. */
+  version: number;
   date: string;
   memo: string | null;
   makerIdentity: string | null;
@@ -536,6 +596,7 @@ export async function fetchDraftReviewQueue(
 
     return {
       id: entry.id,
+      version: entry.version,
       date: entry.date.toISOString(),
       memo: entry.memo,
       makerIdentity,
