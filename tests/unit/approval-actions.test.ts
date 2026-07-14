@@ -368,6 +368,28 @@ describe('decideDraftJournalEntry', () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
+  it('F9: approve is blocked when the draft has zero-amount lines — same invariant as a direct POST', async () => {
+    // A zero-amount draft BALANCES (0 debit − 0 credit = 0), so trial-balance
+    // passes; only the zero-line check catches it. Before F9 this path skipped
+    // that check, letting a 0.00 draft POST past the ledger's own compliance rule.
+    const { prisma } = setup({
+      entry: {
+        ...draftEntry,
+        lines: [
+          { accountId: 'acc-1', amount: '0.00', isDebit: true },
+          { accountId: 'acc-2', amount: '0.00', isDebit: false },
+        ],
+      },
+    });
+    const { decideDraftJournalEntry } = await importActions();
+
+    const result = await decideDraftJournalEntry('je-1', 'APPROVE');
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toMatch(/zero-amount lines/i);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
   it('returns an error when the entry is not found in the caller org', async () => {
     const { prisma } = setup({ entry: null });
     const { decideDraftJournalEntry } = await importActions();

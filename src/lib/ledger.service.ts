@@ -74,6 +74,24 @@ export class LedgerService {
   }
 
   /**
+   * Compliance invariant: a POSTED entry may not contain any zero-amount line.
+   *
+   * Extracted so BOTH the direct post (postEntry's POSTED branch) and the
+   * DRAFT→POSTED approval path enforce the SAME rule. Previously this check
+   * lived only inside postEntry, so a zero-amount DRAFT — which passes the
+   * trial-balance check (0 debit − 0 credit = 0) — could be approved straight
+   * past it into a POSTED entry that violates the invariant (F9).
+   *
+   * Throws (rather than returning a result) to match the fail-loud contract of
+   * the original inline check.
+   */
+  static assertNoZeroAmountLines(lines: readonly { amount: Decimal | string | number }[]): void {
+    if (lines.some((l) => new Decimal(l.amount.toString()).isZero())) {
+      throw new Error('CRITICAL LEDGER ERROR: Journal entries cannot contain zero-amount lines.');
+    }
+  }
+
+  /**
    * Checks if the given date falls within an open fiscal period for the organization.
    *
    * `db` defaults to the shared client; pass an open transaction client so
@@ -241,10 +259,9 @@ export class LedgerService {
         throw new Error(`CRITICAL LEDGER ERROR: ${validation.error}`);
       }
 
-      // Check for zero-amount lines (compliance)
-      if (lines.some(l => new Decimal(l.amount.toString()).isZero())) {
-        throw new Error('CRITICAL LEDGER ERROR: Journal entries cannot contain zero-amount lines.');
-      }
+      // Check for zero-amount lines (compliance) — shared with the approval
+      // path so DRAFT→POSTED enforces the same invariant (F9).
+      this.assertNoZeroAmountLines(lines);
     }
 
     // 2. Fiscal Period Check (Strict for all). In transaction-reuse mode the

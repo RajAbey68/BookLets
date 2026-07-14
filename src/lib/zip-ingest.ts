@@ -485,6 +485,21 @@ export async function ingestZip(
     }
 
     const { extraction } = ocrResult;
+
+    // F9: reject a non-positive extracted total BEFORE it becomes a 0.00 DRAFT.
+    // A malformed OCR response defaults totalAmount to 0 (gemini-ocr), and a
+    // zero-amount DRAFT balances (0=0) so it can be approved past the ledger's
+    // zero-line invariant. The single path and the staging bridge already guard
+    // this (throw / BAD_AMOUNT park); the ZIP path did not.
+    if (!Number.isFinite(extraction.totalAmount) || extraction.totalAmount <= 0) {
+      failures.push({
+        name: image.name,
+        stage: 'ledger',
+        error: `Non-positive extracted total (${extraction.totalAmount}) — receipt needs re-scanning or manual entry.`,
+      });
+      return;
+    }
+
     try {
       const entry = await deps.postEntry({
         organizationId: ctx.organizationId,
