@@ -1,78 +1,91 @@
--- S1b Sandbox Dedup Blocker (critical data integrity gate)
--- ─────────────────────────────────────────────────────
--- Prevents triple-counting of identical transactions re-imported across batches.
+-- S1b Sandbox Dedup Blocker — data-integrity groundwork (ADDITIVE ONLY)
+-- ─────────────────────────────────────────────────────────────────────
+-- Corrected 2026-07-14 after validating against the LIVE sandbox schema.
+-- The first draft of this migration assumed columns that DO NOT EXIST
+-- (organization_id, deleted_at) and a BIGINT id (it is UUID); it would have
+-- failed on apply. This version uses only real columns and is deliberately
+-- NON-DESTRUCTIVE: it adds a content hash + a diagnostics function so the
+-- existing duplicates can be SEEN and reviewed. It does NOT add a UNIQUE
+-- constraint, because sandbox.payment_entries already contains duplicate
+-- rows (the same 128 payments imported across ≥3 completed batches) and a
+-- UNIQUE index would fail immediately. Enforcing uniqueness is a SEPARATE,
+-- human-gated step (see NEXT STEPS below) that must run AFTER the existing
+-- duplicates are resolved.
 --
--- PROBLEM: sandbox.payment_entries contains 128 transactions imported 3+ times
--- across different batches (b101216d, dedb5fda, 8d3b8040). The current
--- idempotencyKey in ocr-bridge.ts is source_file-based only, which misses
--- identical transactions arriving in different files/batches.
---
--- SOLUTION (3-layer):
---  1. Add a content-based UNIQUE index to prevent re-insert of identical rows.
---  2. Add a UNIQUE FK on public.JournalLine → sandbox.payment_entry_id.
---  3. Add a pre-promotion check that halts if duplicates are found.
+-- REAL sandbox.payment_entries columns (verified):
+--   id uuid, amount numeric, bank_ref text, batch_id uuid, category_id uuid,
+--   created_at timestamptz, currency text, description text, entity_id uuid,
+--   is_labour bool, notes text, payment_date date, payment_method text,
+--   receipt_id uuid, source_ref text, source_type text, status text,
+--   updated_at timestamptz.
 
--- Layer 1: Add a deterministic content hash column to sandbox.payment_entries.
--- Hash = MD5(source_type || coalesce(source_ref,'') || payment_date || amount || description).
--- Any identical row (same source/date/amount) gets the same hash; re-import hits the UNIQUE.
+-- Layer 1 (additive): deterministic content hash.
+-- Uses ::text casts only (immutable) so the STORED generated column is legal.
+-- date::text and numeric::text are immutable; md5() is immutable.
 ALTER TABLE sandbox.payment_entries
-  ADD COLUMN content_hash TEXT GENERATED ALWAYS AS (
+  ADD COLUMN IF NOT EXISTS content_hash TEXT GENERATED ALWAYS AS (
     md5(
-      source_type || '|' ||
-      coalesce(source_ref, '') || '|' ||
-      to_char(payment_date, 'YYYY-MM-DD') || '|' ||
-      amount::text || '|' ||
+      coalesce(source_type, '') || '|' ||
+      coalesce(source_ref, '')  || '|' ||
+      coalesce(payment_date::text, '') || '|' ||
+      coalesce(amount::text, '') || '|' ||
       coalesce(description, '')
     )
   ) STORED;
 
--- Layer 1b: Create the UNIQUE index (must be partial because content_hash is NOT NULL).
-CREATE UNIQUE INDEX idx_sandbox_payment_entries_content_hash ON sandbox.payment_entries (content_hash)
-  WHERE deleted_at IS NULL;
+-- Non-unique index: fast duplicate detection now, and the future UNIQUE
+-- index (added post-cleanup) can be built CONCURRENTLY off this.
+CREATE INDEX IF NOT EXISTS idx_sandbox_payment_entries_content_hash
+  ON sandbox.payment_entries (content_hash);
 
--- Layer 2: Add FK from public.JournalLine to sandbox.payment_entry_id (tracks promotion source).
--- Mark as UNIQUE so a sandbox row can only promote to ONE journal entry (no multi-promotion).
-ALTER TABLE public.JournalLine
-  ADD COLUMN sandbox_payment_entry_id BIGINT UNIQUE REFERENCES sandbox.payment_entries(id)
-    ON DELETE SET NULL
-    ON UPDATE CASCADE;
-
--- Layer 3: Add a blocking check function (halts promotion if duplicates exist).
--- Call this BEFORE any promotion via ocr-bridge/zip-ingest to fail early.
-CREATE OR REPLACE FUNCTION check_sandbox_dedup(
-  org_id UUID
-)
+-- Diagnostics: list every content_hash that appears more than once, with the
+-- row ids and how many batches they span. NO organization filter — the table
+-- has no organization_id column (single-tenant staging owned by the import
+-- pipeline). Returns empty when the table is clean.
+CREATE OR REPLACE FUNCTION sandbox.find_payment_duplicates()
 RETURNS TABLE (
-  duplicate_content_hash TEXT,
-  count INTEGER,
-  entry_ids BIGINT[]
-) AS $$
+  content_hash TEXT,
+  copies       BIGINT,
+  batch_count  BIGINT,
+  entry_ids    UUID[],
+  sample_description TEXT,
+  total_amount NUMERIC
+)
+LANGUAGE sql STABLE AS $$
   SELECT
-    content_hash,
-    COUNT(*)::INTEGER as count,
-    ARRAY_AGG(id) as entry_ids
-  FROM sandbox.payment_entries
-  WHERE
-    organization_id = org_id
-    AND deleted_at IS NULL
-    AND sandbox_payment_entries.id NOT IN (
-      -- Exclude rows already promoted to public.JournalLine
-      SELECT sandbox_payment_entry_id
-      FROM public.JournalLine
-      WHERE sandbox_payment_entry_id IS NOT NULL
-    )
-  GROUP BY content_hash
-  HAVING COUNT(*) > 1;
-$$ LANGUAGE SQL STABLE;
+    pe.content_hash,
+    count(*)                        AS copies,
+    count(DISTINCT pe.batch_id)     AS batch_count,
+    array_agg(pe.id ORDER BY pe.created_at) AS entry_ids,
+    min(pe.description)             AS sample_description,
+    sum(pe.amount)                  AS total_amount
+  FROM sandbox.payment_entries pe
+  GROUP BY pe.content_hash
+  HAVING count(*) > 1;
+$$;
 
--- Layer 4: Idempotency guard for ingest jobs (prevents re-processing of completed batches).
--- The ingest_batches table already exists; add a UNIQUE constraint on (source, filename)
--- so a second import of the same source+filename is skipped (UPSERT, not INSERT).
-CREATE UNIQUE INDEX idx_import_batches_source_filename ON sandbox.import_batches (source, filename)
-  WHERE status = 'completed';
+COMMENT ON FUNCTION sandbox.find_payment_duplicates() IS
+  'Pre-promotion diagnostic: returns every duplicated content_hash in '
+  'sandbox.payment_entries with row ids, batch spread, and summed amount. '
+  'Empty result = no duplicates. Nothing here is destructive — a human '
+  'reviews the output and decides which rows to keep before any UNIQUE '
+  'constraint or promotion runs.';
 
--- Audit comment: the comment explains what each layer does and why duplicates matter.
-COMMENT ON FUNCTION check_sandbox_dedup(UUID) IS
-  'Pre-promotion check: halts if identical transactions (same date/amount/description) exist in sandbox. ' ||
-  'Must be called before ocr-bridge or zip-ingest promotes any row to public.JournalEntry. ' ||
-  'Returns (content_hash, count, entry_ids) for any hash with count > 1. Empty result = safe to promote.';
+-- ── NEXT STEPS (NOT run here — human/Hermes-gated, destructive) ───────────
+-- 1. Review duplicates:
+--      SELECT * FROM sandbox.find_payment_duplicates();
+-- 2. Keep the earliest row per hash, soft-mark or delete the rest, e.g.:
+--      DELETE FROM sandbox.payment_entries pe
+--      USING (
+--        SELECT id, row_number() OVER (
+--          PARTITION BY content_hash ORDER BY created_at
+--        ) AS rn
+--        FROM sandbox.payment_entries
+--      ) d
+--      WHERE pe.id = d.id AND d.rn > 1;
+-- 3. Only AFTER the table is clean, enforce uniqueness going forward:
+--      CREATE UNIQUE INDEX CONCURRENTLY uq_sandbox_payment_entries_content_hash
+--        ON sandbox.payment_entries (content_hash);
+-- 4. Guard batch re-imports (also needs dedup of completed batches first):
+--      CREATE UNIQUE INDEX CONCURRENTLY uq_import_batches_source_filename
+--        ON sandbox.import_batches (source, filename) WHERE status = 'completed';
