@@ -60,6 +60,52 @@ jobs:
         # merge. Full dependency remediation is tracked in RAJ-401.
         run: npm audit --omit=dev --audit-level=critical
 
+  integration:
+    name: Real-Postgres Integration Tests
+    runs-on: ubuntu-latest
+    # RAJ-674 Tier 1 — separate lane from `build`'s mocked-Prisma unit tests.
+    # These execute the DB-level controls (fiscal-lock trigger, posted-delete
+    # trigger, amount>0 CHECK, RLS policy state) against a REAL Postgres,
+    # converting tests/unit/db-integrity-triggers.test.ts's migration-SQL-TEXT
+    # regex assertions into actual proof. See vitest.integration.config.ts and
+    # tests/integration/*.integration.test.ts.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: booklets_test
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Apply schema (prisma db push) + raw-SQL trigger/RLS migrations
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:55432/booklets_test
+        run: |
+          npx prisma db push --accept-data-loss
+          psql "$DATABASE_URL" -f prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql
+          psql "$DATABASE_URL" -f prisma/migrations/20260712_rls_org_isolation/migration.sql
+
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgresql://postgres:test@localhost:55432/booklets_test
+        run: npx vitest run --config vitest.integration.config.ts
+
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest
