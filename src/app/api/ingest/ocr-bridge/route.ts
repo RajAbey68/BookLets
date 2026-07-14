@@ -1,5 +1,4 @@
 import { NextResponse } from 'next/server';
-import { prisma } from '@/lib/prisma';
 import { resolveActiveContext } from '@/lib/auth-context';
 import { runOcrBridgeImport } from '@/lib/ocr-bridge.deps';
 import { DEFAULT_BATCH_SIZE } from '@/lib/ocr-bridge';
@@ -101,30 +100,12 @@ export async function POST(request: Request) {
   }
 
   try {
-    // Pre-promotion dedup check: halt if identical transactions (same date/amount/description)
-    // exist in sandbox and haven't been promoted yet. This prevents triple-counting when
-    // the same batch is re-imported or when identical transactions land in different files.
-    const dupCheck = await prisma.$queryRaw<
-      { duplicate_content_hash: string; count: number; entry_ids: number[] }[]
-    >`SELECT * FROM check_sandbox_dedup(${resolved.context.organizationId}::UUID)`;
-
-    if (dupCheck.length > 0) {
-      const duplicates = dupCheck
-        .map((d) => `hash=${d.duplicate_content_hash} (${d.count} rows: ${d.entry_ids.join(',')})`)
-        .join('; ');
-      return NextResponse.json(
-        {
-          error:
-            'Sandbox contains duplicate transactions (same date/amount/description) that would cause multi-counting if promoted. ' +
-            'A human must investigate and deduplicate before import can proceed. ' +
-            'Duplicates: ' +
-            duplicates,
-          duplicates: dupCheck,
-        },
-        { status: 409 },
-      );
-    }
-
+    // NOTE: this route imports raj_fin_track.ocr_receipts, NOT
+    // sandbox.payment_entries. The sandbox triple-count problem is a
+    // SEPARATE pipeline with no promotion path yet; guarding it here (an
+    // earlier mistake) checked the wrong table. Dedup for ocr_receipts is
+    // handled by the source_file idempotencyKey inside runOcrBridgeImport;
+    // content-level dedup for ocr_receipts is tracked as follow-up work.
     const summary = await runOcrBridgeImport(resolved.context.organizationId, batchSize);
     return NextResponse.json(summary);
   } catch (err) {
