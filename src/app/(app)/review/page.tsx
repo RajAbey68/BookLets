@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { fetchDraftReviewQueue } from '@/app/actions/approval.actions';
 import DraftReviewQueue from '@/components/DraftReviewQueue';
+import ZipUploader from '@/components/ZipUploader';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -34,6 +35,8 @@ export default async function ReviewPage() {
           Entries you made yourself must be decided by a different checker.
         </p>
       </div>
+
+      <ZipUploader />
 
       <h2 style={{ fontSize: '1.125rem', marginBottom: '1rem' }}>
         Drafts awaiting decision
