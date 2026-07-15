@@ -13,19 +13,26 @@
 ## 1 — Supabase setup
 
 1. Create a new project (note your database password).
-2. Copy the **Transaction** connection string from  
+2. In **SQL Editor**, create the schema the runtime expects — confirmed by reading
+   `src/lib/prisma.ts` directly: the pg adapter is constructed with the hardcoded
+   `options: '-c search_path=booklets,public'`, so the app always tries `booklets`
+   first.
+   ```sql
+   CREATE SCHEMA IF NOT EXISTS booklets;
+   ```
+   **Do this before step 4.** `prisma/schema.prisma` has no `@@schema` mapping, so
+   unqualified `CREATE TABLE` from `db push`/`migrate` lands in whichever schema in
+   `search_path` exists first. Skip this step and Postgres silently falls through to
+   `public` instead — which is what happened to this project's own existing database
+   (see `prisma/migrations/20260712_rls_org_isolation/migration.sql`'s header, which
+   documents finding tables in `public` and had to auto-detect it). If you're pointing
+   at that *existing* database rather than a fresh one, confirm which schema your
+   tables are actually in (`\dt` or `SELECT schemaname FROM pg_tables WHERE tablename =
+   'Organization'`) before assuming this step applies — don't create a second, empty
+   `booklets` schema alongside data that's already live in `public`.
+3. Copy the **Transaction** connection string from  
    Settings → Database → Connection string → Transaction mode  
    (port **6543**, not 5432).
-
-> **Schema note (verify against your project before relying on this):** `src/lib/prisma.ts`
-> documents the intent that all tables live in a `booklets` Postgres schema, reached by
-> setting `search_path` via the connection. However `prisma/schema.prisma` has no
-> `@@schema` mapping, so a plain `prisma db push`/`migrate deploy` creates tables in
-> whichever schema your connection's `search_path` resolves to first — `public` by
-> default. Do **not** pre-create an empty `booklets` schema and assume the app uses it;
-> confirm with `\dt` (or `SELECT schemaname, tablename FROM pg_tables WHERE tablename =
-> 'Organization'`) which schema your tables actually land in after step 4, and set
-> `search_path` accordingly if you need `booklets` specifically.
 
 ---
 
@@ -78,8 +85,18 @@ npx prisma db push
 #    constraint, and the RLS org-isolation policies. Get psql from your
 #    Supabase connection string (Settings → Database → Connection string →
 #    psql), or use the SQL Editor and paste each file's contents.
-psql "$DATABASE_URL" -f prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql
-psql "$DATABASE_URL" -f prisma/migrations/20260712_rls_org_isolation/migration.sql
+#
+#    IMPORTANT: `schema=` is a Prisma-only URL parameter — plain psql/libpq
+#    rejects it outright ("invalid URI query parameter: schema"), so DO NOT
+#    reuse $DATABASE_URL as-is for psql. Strip that one parameter and set the
+#    schema via PGOPTIONS instead — both migration files use
+#    `SET search_path FROM CURRENT`, so they target whichever schema is
+#    active on THIS connection (drop the PGOPTIONS line if you're
+#    deliberately targeting an existing public-schema database instead).
+PSQL_URL=$(echo "$DATABASE_URL" | sed -E 's/[?&]schema=[^&]*//')
+export PGOPTIONS='-c search_path=booklets,public'
+psql "$PSQL_URL" -f prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql
+psql "$PSQL_URL" -f prisma/migrations/20260712_rls_org_isolation/migration.sql
 ```
 
 > This exact two-step procedure is proven against a real Postgres container in
@@ -104,12 +121,12 @@ npm run db:seed
 
 1. Open your Vercel URL and sign in with Google.
 2. You'll be redirected back to `/` — but the dashboard will be empty because your user has no org membership yet.
-3. In Supabase **SQL Editor**, run (schema-qualify `"Membership"`/`"User"`/`"Organization"`
-   with whichever schema step 1 confirmed your tables actually landed in — omit the
-   prefix entirely if that's `public`, since it's on the default `search_path`):
+3. In Supabase **SQL Editor**, run (schema-qualified for a fresh deploy that followed
+   step 1's `CREATE SCHEMA booklets`; drop the `booklets.` prefix if you're pointing at
+   the project's existing, already-drifted database where tables live in `public`):
 
 ```sql
-INSERT INTO "Membership" (id, "userId", "organizationId", role, "createdAt", "updatedAt")
+INSERT INTO booklets."Membership" (id, "userId", "organizationId", role, "createdAt", "updatedAt")
 SELECT
   gen_random_uuid(),
   u.id,
@@ -117,7 +134,7 @@ SELECT
   'OWNER',
   now(),
   now()
-FROM "User" u, "Organization" o
+FROM booklets."User" u, booklets."Organization" o
 WHERE u.email = '<your-google-email>'
   AND o.slug   = 'default';
 ```
