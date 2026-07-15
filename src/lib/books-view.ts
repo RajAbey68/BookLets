@@ -4,6 +4,7 @@
  * with the covering FiscalPeriod rendered as an open/closed badge per month.
  * Shared single authority between books.actions.ts and its unit tests.
  */
+import { Decimal } from 'decimal.js';
 import { parseDraftEvidence } from './draft-evidence';
 
 /** /books shows at most this many most-recent months — the page stays bounded. */
@@ -83,9 +84,12 @@ function vendorishOf(entry: BooksEntryInput): string {
 }
 
 export function toBookRow(entry: BooksEntryInput): BookRow {
+  // Sum in Decimal (never float): ledger amounts are numeric(19,4) and
+  // Number(l.amount) can drop cents on large/high-precision values. Round
+  // only at the final display-string conversion.
   const debitTotal = entry.lines
     .filter((l) => l.isDebit)
-    .reduce((sum, l) => sum + Number(l.amount), 0);
+    .reduce((sum, l) => sum.plus(new Decimal(l.amount.toString())), new Decimal(0));
 
   return {
     id: entry.id,

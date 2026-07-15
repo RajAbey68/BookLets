@@ -13,11 +13,25 @@ export interface BooksViewData {
   months: BooksMonth[];
   /** True when POSTED entries exist before the month window — the page notes the cap. */
   truncated: boolean;
+  /**
+   * True only when the ledger could NOT be read (DB error). Distinguishes a
+   * genuine outage from a successful query that simply found no POSTED entries
+   * — the page must not render a DB failure as "nothing posted yet", which
+   * would hide an outage as valid financial state.
+   */
+  unavailable: boolean;
 }
 
-const EMPTY_BOOKS_VIEW: { months: BooksMonth[]; truncated: false } = {
+const EMPTY_BOOKS_VIEW: BooksViewData = {
   months: [],
   truncated: false,
+  unavailable: false,
+};
+
+const UNAVAILABLE_BOOKS_VIEW: BooksViewData = {
+  months: [],
+  truncated: false,
+  unavailable: true,
 };
 
 /**
@@ -61,9 +75,13 @@ export async function fetchBooksView(): Promise<BooksViewData> {
       prisma.fiscalPeriod.findMany({ where: { organizationId } }),
     ]);
 
-    return { months: buildBooksMonths(entries, periods), truncated: olderCount > 0 };
+    return {
+      months: buildBooksMonths(entries, periods),
+      truncated: olderCount > 0,
+      unavailable: false,
+    };
   } catch (error) {
     console.error('[books.actions] fetchBooksView failed:', error);
-    return EMPTY_BOOKS_VIEW;
+    return UNAVAILABLE_BOOKS_VIEW;
   }
 }

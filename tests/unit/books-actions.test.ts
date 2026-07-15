@@ -235,7 +235,7 @@ describe('fetchBooksView', () => {
 
     const view = await fetchBooksView();
 
-    expect(view).toEqual({ months: [], truncated: false });
+    expect(view).toEqual({ months: [], truncated: false, unavailable: false });
     expect(prisma.journalEntry.findMany).not.toHaveBeenCalled();
   });
 
@@ -245,14 +245,20 @@ describe('fetchBooksView', () => {
 
     const view = await fetchBooksView();
 
-    expect(view).toEqual({ months: [], truncated: false });
+    expect(view).toEqual({ months: [], truncated: false, unavailable: false });
     expect(prisma.journalEntry.findFirst).not.toHaveBeenCalled();
   });
 
-  it('degrades to an empty view instead of throwing when the DB is down', async () => {
+  it('flags the view unavailable (not empty) instead of throwing when the DB is down', async () => {
     setup({ dbError: true });
     const { fetchBooksView } = await importBooks();
 
-    await expect(fetchBooksView()).resolves.toEqual({ months: [], truncated: false });
+    // A DB outage must NOT look like "nothing posted" — the page renders a
+    // degraded state off `unavailable`, never a false empty ledger.
+    await expect(fetchBooksView()).resolves.toEqual({
+      months: [],
+      truncated: false,
+      unavailable: true,
+    });
   });
 });

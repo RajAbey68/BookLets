@@ -23,7 +23,7 @@ const formatAmount = (amount: string, currency: string) => {
  * to the most recent months. Org-scoped server-side via fetchBooksView.
  */
 export default async function BooksPage() {
-  const { months, truncated } = await fetchBooksView();
+  const { months, truncated, unavailable } = await fetchBooksView();
 
   return (
     <>
@@ -40,7 +40,13 @@ export default async function BooksPage() {
 
       <SandboxBooksTabs active="books" />
 
-      {months.length === 0 ? (
+      {unavailable ? (
+        <div className="glass-card" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)' }}>
+          The books are temporarily unavailable — the ledger could not be loaded. This is a
+          system issue, not an empty ledger. Please retry shortly; if it persists, check the
+          database connection.
+        </div>
+      ) : months.length === 0 ? (
         <div className="glass-card" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-secondary)' }}>
           Nothing posted yet. Upload receipts in the Sandbox and approve them to fill the books.
         </div>
