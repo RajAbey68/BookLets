@@ -1,6 +1,7 @@
-import { prisma } from './prisma';
+import { prisma, setRlsOrgContext } from './prisma';
 import { LedgerService } from './ledger.service';
-import { JournalStatus } from './types';
+import { gateAutomatedJournalEntry } from './approval.service';
+import { AUTOMATION_MAKER_IDENTITY } from './maker-identity';
 import { fetchWithTimeout } from './http';
 import { extractReceipt } from './gemini-ocr';
 
@@ -8,7 +9,9 @@ export interface AutomationResult {
   expenseId: string;
   journalEntryId: string;
   confidence: number;
-  status: 'SUCCESS' | 'HIL_REQUIRED';
+  // Automated extraction is always human-in-the-loop (D3): no SUCCESS
+  // status exists — DRAFT→POSTED happens only via 4-eyes sign-off.
+  status: 'HIL_REQUIRED';
 }
 
 export class AutomationService {
@@ -62,7 +65,7 @@ export class AutomationService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-maker-identity': 'booklets-automation-service',
+          'x-maker-identity': AUTOMATION_MAKER_IDENTITY,
           'x-tenant-id': organizationId,
           'x-agent-confidence': '1.0',
         },
@@ -82,6 +85,25 @@ export class AutomationService {
       categorySuggestion = extraction.categorySuggestion;
       confidence = extraction.confidence;
       console.log(`[Middleware Agent] SymbiOS fallback succeeded — vendor="${vendorName}" confidence=${confidence}`);
+    }
+
+    // D3 conf-gate: machine-extracted entries ALWAYS land as DRAFT — no
+    // confidence score (including exactly 1.0) authorises auto-posting.
+    // DRAFT→POSTED happens only via human 4-eyes sign-off in
+    // decideDraftJournalEntry. Runs BEFORE any writes: vendor/category
+    // resolution below can create persistent rows outside the transaction,
+    // so an out-of-contract confidence (NaN / outside [0, 1]) must fail here.
+    const gate = gateAutomatedJournalEntry(confidence);
+
+    // A missing/unparseable amount is normalised to 0 by extraction. The
+    // zero-amount-line check in LedgerService only guards POSTED entries,
+    // so a zero-value DRAFT could later be approved into the ledger.
+    // Reject it up front — the receipt needs re-scanning or manual entry.
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+      throw new Error(
+        `Extraction returned a non-positive total (${totalAmount}) for vendor "${vendorName}" — ` +
+        'cannot create a journal draft without a real amount. Re-scan the receipt or enter it manually.'
+      );
     }
 
     // 2. Resolve/Create Vendor
@@ -127,8 +149,13 @@ export class AutomationService {
       (await prisma.account.findFirst({ where: { organizationId, name: { contains: 'Cash' } } }));
     const bankAccountId = bankAccount?.id ?? suspenseAccount.id;
 
-    // 4. Record the Expense and Journal Entry
+    // 4. Record the Expense and Journal Entry — ONE transaction: the expense
+    // row and the journal entry commit or roll back together (postEntry is
+    // handed this tx below instead of opening its own).
     return await prisma.$transaction(async (tx) => {
+      // S3 (rls-lock): transaction-local RLS org context — explicit org id
+      // (review finding #1: never rely on an ambient scope being open).
+      await setRlsOrgContext(tx, organizationId);
       // Create Expense Record
       const expense = await tx.expense.create({
         data: {
@@ -142,27 +169,38 @@ export class AutomationService {
         }
       });
 
-      // Create Ledger Entry — status driven by extraction confidence score
+      // Create Ledger Entry — ALWAYS DRAFT for automated extraction (D3).
+      // The confidence score is recorded for the audit trail but never
+      // decides the status; see gateAutomatedJournalEntry.
+      // The open transaction client is passed through (review finding #2):
+      // postEntry writes inside THIS transaction, making expense + journal
+      // entry atomic and reusing the RLS org context set above.
       const entry = await LedgerService.postEntry({
         organizationId,
         date: new Date(date),
         memo: `AUTOMATED: Receipt for ${vendorName}`,
-        status: confidence > 0.9 ? JournalStatus.POSTED : JournalStatus.DRAFT,
-        // 4-Eyes governance metadata passed through for audit trail
-        makerIdentity: 'booklets-automation-service',
+        status: gate.status,
+        // 4-Eyes governance metadata passed through for audit trail.
+        // E5: the OCR pipeline is an AUTOMATED maker — the service
+        // identity is correct here (the uploading user did not author the
+        // extracted figures). Human-initiated paths pass the session
+        // user id instead; see src/lib/maker-identity.ts.
+        makerIdentity: AUTOMATION_MAKER_IDENTITY,
         tenantId: organizationId,
         agentConfidence: confidence,
         lines: [
           { accountId: expenseAccountId, amount: totalAmount, isDebit: true },
           { accountId: bankAccountId, amount: totalAmount, isDebit: false },
         ]
-      });
+      }, tx);
 
       return {
         expenseId: expense.id,
         journalEntryId: entry.id,
         confidence,
-        status: confidence > 0.9 ? 'SUCCESS' : 'HIL_REQUIRED'
+        // Human-in-the-loop is unconditional for automated entries (D3):
+        // the DRAFT sits in the 4-eyes queue until a checker decides it.
+        status: 'HIL_REQUIRED'
       };
     });
   }
