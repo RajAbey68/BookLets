@@ -40,10 +40,12 @@ docker exec "$CONTAINER_NAME" psql -U postgres -d booklets_test \
 echo "[test-integration-setup] prisma db push (schema baseline)..."
 npx prisma db push --accept-data-loss >/dev/null
 
-echo "[test-integration-setup] applying raw-SQL migrations (triggers, RLS)..."
+echo "[test-integration-setup] applying raw-SQL migrations (triggers, RLS, single-tenant lock)..."
 docker exec -i "$CONTAINER_NAME" psql -U postgres -d booklets_test \
   < prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql >/dev/null
 docker exec -i "$CONTAINER_NAME" psql -U postgres -d booklets_test \
   < prisma/migrations/20260712_rls_org_isolation/migration.sql >/dev/null
+docker exec -i "$CONTAINER_NAME" psql -U postgres -d booklets_test \
+  < prisma/migrations/20260716_single_tenant_lock/migration.sql >/dev/null
 
 echo "[test-integration-setup] ready: $DATABASE_URL"
