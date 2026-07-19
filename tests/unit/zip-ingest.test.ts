@@ -571,7 +571,13 @@ describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)',
     const deps = makeDeps();
     await expect(
       ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
-    ).rejects.toMatchObject({ name: 'ZipIngestError', code: 'TOO_MANY_IMAGES' });
+    ).rejects.toMatchObject({
+      name: 'ZipIngestError',
+      code: 'TOO_MANY_IMAGES',
+      // Structured payload so the UI can render a precise message without
+      // parsing prose (peer-review enhancement).
+      meta: { limit: 2, actual: 3 },
+    });
   });
 
   it('trips the cap BEFORE any OCR spend or ledger write', async () => {

@@ -135,7 +135,7 @@ export async function POST(request: Request) {
         `[ingest/zip] rejected: ${encodeURIComponent(err.code)} org=${encodeURIComponent(organizationId)} bytes=${zipBuffer.length}`,
       );
       return NextResponse.json(
-        { error: err.message, code: err.code },
+        { error: err.message, code: err.code, ...(err.meta ? { meta: err.meta } : {}) },
         { status: GUARD_HTTP_STATUS[err.code] },
       );
     }

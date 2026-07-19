@@ -99,11 +99,14 @@ export type ZipIngestGuardCode =
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
+  /** Optional structured payload (e.g. { limit, actual }) for precise UI copy. */
+  readonly meta?: Record<string, number>;
 
-  constructor(code: ZipIngestGuardCode, message: string) {
+  constructor(code: ZipIngestGuardCode, message: string, meta?: Record<string, number>) {
     super(message);
     this.name = 'ZipIngestError';
     this.code = code;
+    this.meta = meta;
   }
 }
 
@@ -499,7 +502,8 @@ export async function ingestZip(
     throw new ZipIngestError(
       'TOO_MANY_IMAGES',
       `This export has ${fresh.length} new receipt images; the maximum per upload is ${maxImages}. ` +
-        `Split it into smaller exports and upload them one at a time.`,
+        `Export smaller date ranges (e.g. 1-2 weeks at a time) and upload them one at a time.`,
+      { limit: maxImages, actual: fresh.length },
     );
   }
 
