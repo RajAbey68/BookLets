@@ -16,7 +16,7 @@
  * in journal-optimistic-lock.test.ts (updateMany where id+organizationId+
  * version+status, count===0 → OptimisticLockError).
  */
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Decimal } from 'decimal.js';
 
 describe('LedgerService.updateDraftEntryFields', () => {
