@@ -69,6 +69,7 @@ WhatsApp .zip ─POST /api/ingest/zip─► ingestZip()
 ```
 - **DRAFT-only**: `gateAutomatedJournalEntry` forces DRAFT regardless of OCR confidence (auto-POST abolished — canon §4).
 - UI entry point: dashboard **"Import WhatsApp export (.zip)"** (`WhatsappZipUploader.tsx`, shipped PR #99).
+- **Stopgap limits (PR #101, shipped 2026-07-19):** max **30 fresh (non-duplicate) images per upload** (`MAX_INGEST_IMAGES`, 422 `TOO_MANY_IMAGES` with `meta {limit, actual}` before any OCR spend); route `maxDuration=60`; dirty-OCR guard (0/negative/NaN amounts → `ocr`-stage failures, never ledger inputs). These bridge to the async-queue re-architecture (ingest-resilience issue) — batch orchestration still runs inline in one invocation until that lands.
 
 ## 6. External service dependency register  ⚠️ **read if you own one of these**
 
