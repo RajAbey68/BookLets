@@ -13,10 +13,23 @@
 ## 1 — Supabase setup
 
 1. Create a new project (note your database password).
-2. In **SQL Editor**, ensure the `booklets` schema exists:
+2. In **SQL Editor**, create the schema the runtime expects — confirmed by reading
+   `src/lib/prisma.ts` directly: the pg adapter is constructed with the hardcoded
+   `options: '-c search_path=booklets,public'`, so the app always tries `booklets`
+   first.
    ```sql
    CREATE SCHEMA IF NOT EXISTS booklets;
    ```
+   **Do this before step 4.** `prisma/schema.prisma` has no `@@schema` mapping, so
+   unqualified `CREATE TABLE` from `db push`/`migrate` lands in whichever schema in
+   `search_path` exists first. Skip this step and Postgres silently falls through to
+   `public` instead — which is what happened to this project's own existing database
+   (see `prisma/migrations/20260712_rls_org_isolation/migration.sql`'s header, which
+   documents finding tables in `public` and had to auto-detect it). If you're pointing
+   at that *existing* database rather than a fresh one, confirm which schema your
+   tables are actually in (`\dt` or `SELECT schemaname FROM pg_tables WHERE tablename =
+   'Organization'`) before assuming this step applies — don't create a second, empty
+   `booklets` schema alongside data that's already live in `public`.
 3. Copy the **Transaction** connection string from  
    Settings → Database → Connection string → Transaction mode  
    (port **6543**, not 5432).
@@ -56,19 +69,51 @@ Click **Deploy**. The `postinstall` hook runs `prisma generate` automatically.
 
 ---
 
-## 4 — Run the database migration + seed
+## 4 — Run the database migration
 
 From your local machine with `DATABASE_URL` in your environment:
 
 ```bash
-# Push the schema to Supabase (first deploy only)
+# 1. Schema baseline. `prisma migrate deploy` alone FAILS against a fresh
+#    database — this repo's migration history has no baseline migration (the
+#    earliest one ALTERs columns on tables it never created), so the tables
+#    must exist first via db push.
 npx prisma db push
 
-# Seed demo data: 3 properties, 11 bookings, 10 journal entries
-npm run db:seed
+# 2. Raw-SQL migrations `prisma db push` cannot express — the fiscal-period
+#    lock trigger, the posted-entry-immutability trigger, the amount>0 CHECK
+#    constraint, and the RLS org-isolation policies. Get psql from your
+#    Supabase connection string (Settings → Database → Connection string →
+#    psql), or use the SQL Editor and paste each file's contents.
+#
+#    IMPORTANT: `schema=` is a Prisma-only URL parameter — plain psql/libpq
+#    rejects it outright ("invalid URI query parameter: schema"), so DO NOT
+#    reuse $DATABASE_URL as-is for psql. Strip that one parameter and set the
+#    schema via PGOPTIONS instead — both migration files use
+#    `SET search_path FROM CURRENT`, so they target whichever schema is
+#    active on THIS connection (drop the PGOPTIONS line if you're
+#    deliberately targeting an existing public-schema database instead).
+PSQL_URL=$(echo "$DATABASE_URL" | sed -E 's/[?&]schema=[^&]*//')
+export PGOPTIONS='-c search_path=booklets,public'
+psql "$PSQL_URL" -f prisma/migrations/20260703_fiscal_lock_and_posted_delete_triggers/migration.sql
+psql "$PSQL_URL" -f prisma/migrations/20260712_rls_org_isolation/migration.sql
 ```
 
-> `db:seed` is defined in `package.json` as `npx prisma db seed`.
+> This exact two-step procedure is proven against a real Postgres container in
+> `scripts/test-integration-setup.sh` (RAJ-674) — it is not a guess.
+
+```bash
+# 3. Structural scaffolding the app cannot run without: an Organization,
+#    chart of accounts, fiscal period, and channels. Safe to run against
+#    production ONLY as of PR #87 (RAJ-674) — before that PR merges,
+#    prisma/seed.ts ALSO creates demo properties/bookings/POSTED journal
+#    entries that will show up on the dashboard as if they were genuine
+#    activity. That is exactly how the "Marina Suite / Temple Bar Loft /
+#    Coastal Cottage" incident happened. Confirm #87 is merged before
+#    running this against a real deploy; if it isn't, create the
+#    Organization/Account/FiscalPeriod/Channel rows by hand instead.
+npm run db:seed
+```
 
 ---
 
@@ -76,7 +121,9 @@ npm run db:seed
 
 1. Open your Vercel URL and sign in with Google.
 2. You'll be redirected back to `/` — but the dashboard will be empty because your user has no org membership yet.
-3. In Supabase **SQL Editor**, run:
+3. In Supabase **SQL Editor**, run (schema-qualified for a fresh deploy that followed
+   step 1's `CREATE SCHEMA booklets`; drop the `booklets.` prefix if you're pointing at
+   the project's existing, already-drifted database where tables live in `public`):
 
 ```sql
 INSERT INTO booklets."Membership" (id, "userId", "organizationId", role, "createdAt", "updatedAt")
@@ -92,7 +139,10 @@ WHERE u.email = '<your-google-email>'
   AND o.slug   = 'default';
 ```
 
-4. Refresh the app — the dashboard now shows your organisation name and seeded metrics.
+4. Refresh the app — the dashboard now shows your organisation name. Property and
+   booking data populates as real activity is created or synced (Hostaway, receipt
+   upload, manual entry) — the seed step above intentionally creates no demo
+   properties/bookings as of PR #87.
 
 ---
 
@@ -104,12 +154,18 @@ cp .env.example .env.local
 
 npm ci
 npx prisma generate
-npx prisma db push      # or db:migrate once migrations exist
+npx prisma db push
 npm run db:seed
 npm run dev
 ```
 
 App runs at [http://localhost:3000](http://localhost:3000).
+
+> This gives you a working app, but **without** the fiscal-lock/posted-delete triggers
+> or RLS policies from step 4 above — those are optional for local development, but if
+> you're testing anything that depends on them, apply the same two `psql -f` commands
+> against your local database, or run `npm run test:integration:setup` (RAJ-674) which
+> does this automatically against an ephemeral Docker Postgres.
 
 ---
 
