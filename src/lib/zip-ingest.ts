@@ -523,6 +523,20 @@ export async function ingestZip(
     }
 
     const { extraction } = ocrResult;
+
+    // Dirty-OCR guard (harness-review finding): a zero/negative/NaN/Infinite
+    // totalAmount must never reach the ledger as a "balanced" garbage entry
+    // (0 debit = 0 credit passes a naive balance check). Record it as an OCR
+    // failure so the operator sees WHICH receipt needs manual entry.
+    if (!Number.isFinite(extraction.totalAmount) || extraction.totalAmount <= 0) {
+      failures.push({
+        name: image.name,
+        stage: 'ocr',
+        error: `OCR returned an unusable amount (${String(extraction.totalAmount)}). Enter this receipt manually.`,
+      });
+      return;
+    }
+
     try {
       const entry = await deps.postEntry({
         organizationId: ctx.organizationId,

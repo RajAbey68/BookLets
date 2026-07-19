@@ -608,3 +608,87 @@ describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)',
     expect(report.deduped).toBe(2);
   });
 });
+
+// Harness-review additions (4-model peer panel, 2026-07-19): the suite asserted
+// line COUNTS and isDebit flags but never the double-entry balance, the OCR
+// date propagation, ledger-stage failure isolation, or dirty-OCR handling.
+describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
+  const oneImageZip = () => buildZip([{ name: 'r.jpg', data: jpeg() }]);
+
+  it('every DRAFT is balanced: debit sum === credit sum === OCR totalAmount', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs.length).toBeGreaterThan(0);
+    for (const input of deps.postedInputs) {
+      const debits = input.lines.filter((l) => l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      const credits = input.lines.filter((l) => !l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      expect(debits).toBe(credits);
+      expect(debits).toBe(OCR_RESULT.extraction.totalAmount);
+    }
+  });
+
+  it('uses the OCR receipt date, not the upload date', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+    expect(deps.postedInputs[0].date.toISOString()).toBe('2026-07-01T00:00:00.000Z');
+  });
+
+  it('falls back to now (not epoch/garbage) when the OCR date is unparseable', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, date: 'not-a-date' },
+    }));
+    const deps = makeDeps({ ocr });
+    const before = Date.now();
+    await ingestZip(oneImageZip(), CTX, deps);
+    const d = deps.postedInputs[0].date.getTime();
+    expect(d).toBeGreaterThanOrEqual(before - 1000);
+    expect(d).toBeLessThanOrEqual(Date.now() + 1000);
+  });
+
+  it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
+    let call = 0;
+    const postEntry = vi.fn(async (input: JournalEntryInput) => {
+      call += 1;
+      if (call === 2) throw new Error('db connection dropped');
+      return { id: `je_${call}` };
+    });
+    const deps = makeDeps({ postEntry });
+    const report = await ingestZip(
+      buildZip([
+        { name: 'a.jpg', data: jpeg() },
+        { name: 'b.jpg', data: jpeg() },
+      ]),
+      CTX,
+      deps,
+    );
+    expect(report.created).toBe(1);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].stage).toBe('ledger');
+  });
+});
+
+describe('S5 zip-ingest — dirty OCR results must not become ledger inputs', () => {
+  const badAmounts: Array<[string, number]> = [
+    ['zero', 0],
+    ['negative', -450],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ];
+
+  for (const [label, amount] of badAmounts) {
+    it(`records an ocr-stage failure (never a DRAFT) when totalAmount is ${label}`, async () => {
+      const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+        extraction: { ...OCR_RESULT.extraction, totalAmount: amount },
+      }));
+      const deps = makeDeps({ ocr });
+      const report = await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps);
+
+      expect(deps.postEntry).not.toHaveBeenCalled();
+      expect(report.created).toBe(0);
+      expect(report.failures).toHaveLength(1);
+      expect(report.failures[0].stage).toBe('ocr');
+    });
+  }
+});
+
