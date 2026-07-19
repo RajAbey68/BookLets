@@ -9,6 +9,10 @@ import {
 import { buildDefaultZipIngestDeps } from '@/lib/zip-ingest.deps';
 
 export const dynamic = 'force-dynamic';
+// Raise the serverless timeout budget for the inline OCR batch. Paired with the
+// MAX_INGEST_IMAGES cap in zip-ingest.ts as a stopgap until ingest is moved to
+// an async worker. Vercel clamps this to the plan maximum if lower.
+export const maxDuration = 60;
 
 /**
  * S5 — POST /api/ingest/zip
@@ -30,6 +34,7 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   TOTAL_SIZE_EXCEEDED: 413,
   PATH_TRAVERSAL: 422,
   ZIP_BOMB: 422,
+  TOO_MANY_IMAGES: 422,
 };
 
 class UploadTooLargeError extends Error {}
@@ -130,7 +135,7 @@ export async function POST(request: Request) {
         `[ingest/zip] rejected: ${encodeURIComponent(err.code)} org=${encodeURIComponent(organizationId)} bytes=${zipBuffer.length}`,
       );
       return NextResponse.json(
-        { error: err.message, code: err.code },
+        { error: err.message, code: err.code, ...(err.meta ? { meta: err.meta } : {}) },
         { status: GUARD_HTTP_STATUS[err.code] },
       );
     }

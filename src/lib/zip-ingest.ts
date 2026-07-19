@@ -34,6 +34,22 @@ import type { GeminiOcrResult } from './gemini-ocr';
 /** Hard cap on the number of entries in one archive. */
 export const MAX_ZIP_ENTRIES = 1000;
 
+/**
+ * Per-request OCR-image cap — a stopgap for the inline serverless-batch timeout.
+ * A WhatsApp export OCRs every receipt image inside ONE POST invocation; a large
+ * batch can exceed Vercel's function timeout mid-loop and leave ghost DRAFTs.
+ * Until ingest moves to an async worker, reject batches larger than this BEFORE
+ * any OCR spend so the operator splits them.
+ *
+ * Sized conservatively: 30 ÷ OCR_CONCURRENCY_LIMIT (5) = 6 sequential OCR rounds;
+ * at a pessimistic ~10s/image that is ~60s, at the route's maxDuration ceiling.
+ * We have no measured gamma OCR p95, so 30 is the defensible choice — the cost of
+ * too-low is one extra split; the cost of too-high is the ghost DRAFTs this cap
+ * exists to prevent. The REAL fix is async processing off the request path
+ * (see the ingest-resilience issue); this is only a bridge to that.
+ */
+export const MAX_INGEST_IMAGES = 30;
+
 /** Hard cap on the total uncompressed payload of one archive: 200 MB. */
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
 
@@ -78,15 +94,19 @@ export type ZipIngestGuardCode =
   | 'TOO_MANY_ENTRIES'
   | 'TOTAL_SIZE_EXCEEDED'
   | 'PATH_TRAVERSAL'
-  | 'ZIP_BOMB';
+  | 'ZIP_BOMB'
+  | 'TOO_MANY_IMAGES';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
+  /** Optional structured payload (e.g. { limit, actual }) for precise UI copy. */
+  readonly meta?: Record<string, number>;
 
-  constructor(code: ZipIngestGuardCode, message: string) {
+  constructor(code: ZipIngestGuardCode, message: string, meta?: Record<string, number>) {
     super(message);
     this.name = 'ZipIngestError';
     this.code = code;
+    this.meta = meta;
   }
 }
 
@@ -97,6 +117,8 @@ export interface ZipIngestLimits {
   maxTotalUncompressedBytes: number;
   maxEntryCompressionRatio: number;
   ratioGuardMinBytes: number;
+  /** Max OCR-bound (fresh) images processed in one request. See MAX_INGEST_IMAGES. */
+  maxImages: number;
 }
 
 const DEFAULT_LIMITS: ZipIngestLimits = {
@@ -104,6 +126,7 @@ const DEFAULT_LIMITS: ZipIngestLimits = {
   maxTotalUncompressedBytes: MAX_TOTAL_UNCOMPRESSED_BYTES,
   maxEntryCompressionRatio: MAX_ENTRY_COMPRESSION_RATIO,
   ratioGuardMinBytes: RATIO_GUARD_MIN_BYTES,
+  maxImages: MAX_INGEST_IMAGES,
 };
 
 export interface ZipFileEntry {
@@ -469,6 +492,21 @@ export async function ingestZip(
   // Deduped counts BOTH intra-archive duplicates and already-ingested keys.
   const deduped = validImages.length - fresh.length;
 
+  // Serverless-timeout stopgap (see MAX_INGEST_IMAGES): OCRing many images
+  // inside this one request can exceed Vercel's function timeout and leave
+  // ghost DRAFTs. Reject an oversized batch BEFORE any OCR spend so the operator
+  // splits it, rather than getting a half-import. The real fix is async
+  // processing off the request path.
+  const maxImages = limits.maxImages ?? DEFAULT_LIMITS.maxImages;
+  if (fresh.length > maxImages) {
+    throw new ZipIngestError(
+      'TOO_MANY_IMAGES',
+      `This export has ${fresh.length} new receipt images; the maximum per upload is ${maxImages}. ` +
+        `Export smaller date ranges (e.g. 1-2 weeks at a time) and upload them one at a time.`,
+      { limit: maxImages, actual: fresh.length },
+    );
+  }
+
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 
   await mapWithConcurrency(fresh, OCR_CONCURRENCY_LIMIT, async ({ image, idempotencyKey }) => {
@@ -485,6 +523,20 @@ export async function ingestZip(
     }
 
     const { extraction } = ocrResult;
+
+    // Dirty-OCR guard (harness-review finding): a zero/negative/NaN/Infinite
+    // totalAmount must never reach the ledger as a "balanced" garbage entry
+    // (0 debit = 0 credit passes a naive balance check). Record it as an OCR
+    // failure so the operator sees WHICH receipt needs manual entry.
+    if (!Number.isFinite(extraction.totalAmount) || extraction.totalAmount <= 0) {
+      failures.push({
+        name: image.name,
+        stage: 'ocr',
+        error: `OCR returned an unusable amount (${String(extraction.totalAmount)}). Enter this receipt manually.`,
+      });
+      return;
+    }
+
     try {
       const entry = await deps.postEntry({
         organizationId: ctx.organizationId,

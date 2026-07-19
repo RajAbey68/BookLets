@@ -176,3 +176,52 @@ describe('RLS org-isolation policy — real Postgres (documents the CURRENT stat
     },
   );
 });
+
+describe('zip-ingest idempotency backstop under REAL concurrency — @@unique(organizationId, idempotencyKey)', () => {
+  // Harness-review finding (4-model panel, 2026-07-19): the unit suite proves
+  // application-level dedup with mocks, but the race — two uploads inserting
+  // the same key between SELECT and INSERT — is only survivable because of the
+  // DB unique constraint. Prove the constraint does its job under genuine
+  // concurrency (separate connections; a single pg Client would serialize).
+  it('5 concurrent inserts of the same (org, idempotencyKey): exactly 1 wins, 4 reject on the constraint', async () => {
+    const key = `race-proof-${process.pid}-${Math.random().toString(36).slice(2)}`;
+    const racers = await Promise.all(
+      Array.from({ length: 5 }, async () => {
+        const c = new Client({ connectionString: DATABASE_URL });
+        await c.connect();
+        return c;
+      }),
+    );
+    try {
+      const results = await Promise.allSettled(
+        racers.map((c) =>
+          c.query(
+            `INSERT INTO "JournalEntry" (id, "organizationId", date, memo, status, "idempotencyKey", "makerIdentity", "createdBy", "updatedAt")
+             VALUES (gen_random_uuid()::text, $1, '2026-06-20', 'race proof', 'DRAFT', $2, 'test', 'test', now())`,
+            [orgId, key],
+          ),
+        ),
+      );
+      const wins = results.filter((r) => r.status === 'fulfilled');
+      const losses = results.filter((r) => r.status === 'rejected');
+      expect(wins).toHaveLength(1);
+      expect(losses).toHaveLength(4);
+      for (const loss of losses) {
+        expect(String((loss as PromiseRejectedResult).reason)).toMatch(/duplicate key|unique/i);
+      }
+      const count = await client.query(
+        `SELECT count(*)::int AS n FROM "JournalEntry" WHERE "organizationId" = $1 AND "idempotencyKey" = $2`,
+        [orgId, key],
+      );
+      expect(count.rows[0].n).toBe(1);
+    } finally {
+      await Promise.all(racers.map((c) => c.end()));
+    }
+  });
+
+  it('NULL idempotencyKey rows never collide (constraint permits unlimited NULLs for manual entries)', async () => {
+    const a = await insertJournalEntry({ status: 'DRAFT', date: '2026-06-21' });
+    const b = await insertJournalEntry({ status: 'DRAFT', date: '2026-06-21' });
+    expect(a).not.toBe(b);
+  });
+});

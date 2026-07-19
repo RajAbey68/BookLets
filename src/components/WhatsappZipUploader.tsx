@@ -5,6 +5,7 @@ import Link from 'next/link';
 import {
   summarizeZipUploadResponse,
   preflightZipFile,
+  MAX_ZIP_IMAGES,
   type ZipUploadResult,
 } from '../lib/zip-upload-result';
 
@@ -151,6 +152,8 @@ export const WhatsappZipUploader: React.FC = () => {
             </label>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.75rem' }}>
               In WhatsApp: open the chat → Export Chat → <strong>Attach Media</strong> → save the .zip.
+              Max {MAX_ZIP_IMAGES} new receipts per upload — for a big backlog, export smaller
+              date ranges (1–2 weeks at a time).
             </p>
           </>
         )}
