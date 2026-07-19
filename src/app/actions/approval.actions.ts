@@ -336,7 +336,12 @@ export async function updateDraftJournalEntry(
     if (error instanceof Error) {
       return { success: false, error: error.message };
     }
-    console.error('[approval.actions] updateDraftJournalEntry: update failed:', error);
+    // Structured logging (CodeQL js/log-injection): the caught error may carry
+    // the user-controlled entry id; pass it as structured data rather than
+    // concatenating it into the log message so it cannot forge log lines.
+    console.error('[approval.actions] updateDraftJournalEntry: update failed', {
+      cause: error instanceof Error ? error.message : String(error),
+    });
     return { success: false, error: 'Failed to save the correction.' };
   }
 

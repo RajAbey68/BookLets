@@ -520,9 +520,13 @@ export class LedgerService {
             payload: { entryId: id, organizationId, expectedVersion },
           });
         } catch (logErr) {
+          // Structured logging (CodeQL js/tainted-format-string + js/log-injection):
+          // the user-controlled entry id must never sit in the format-string
+          // position, and is passed as structured data, not concatenated into
+          // the message, so it cannot forge log lines or inject format specifiers.
           console.error(
-            `[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence for entry ${id}:`,
-            logErr,
+            '[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence',
+            { entryId: id, cause: logErr instanceof Error ? logErr.message : String(logErr) },
           );
         }
       }
@@ -633,9 +637,13 @@ export class LedgerService {
             payload: { entryId: id, organizationId, expectedVersion },
           });
         } catch (logErr) {
+          // Structured logging (CodeQL js/tainted-format-string + js/log-injection):
+          // the user-controlled entry id must never sit in the format-string
+          // position, and is passed as structured data, not concatenated into
+          // the message, so it cannot forge log lines or inject format specifiers.
           console.error(
-            `[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence for entry ${id}:`,
-            logErr,
+            '[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence',
+            { entryId: id, cause: logErr instanceof Error ? logErr.message : String(logErr) },
           );
         }
       }
