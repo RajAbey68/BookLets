@@ -64,7 +64,12 @@ export async function fetchPortfolioMetrics(): Promise<PropertyMetric[]> {
 
     const adr = totalNights > 0 ? totalRevenue.div(totalNights) : new Decimal(0);
     const revpar = adr.mul(occupancyRate).div(100);
-    const yieldBand = totalRevenue.gt(10000) ? '8.2%' : totalRevenue.gt(5000) ? '5.4%' : '3.1%';
+    // RAJ-674: a real yield is annual net income / property value. The
+    // Property model has no valuation/cost-basis field anywhere in the
+    // schema, so it cannot be computed — report 'N/A' rather than a
+    // plausible-looking number keyed off revenue alone (that was not a
+    // yield calculation, just a fabricated display value).
+    const yieldBand = 'N/A';
 
     return {
       id: prop.id,
