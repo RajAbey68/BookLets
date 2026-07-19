@@ -39,11 +39,16 @@ export const MAX_ZIP_ENTRIES = 1000;
  * A WhatsApp export OCRs every receipt image inside ONE POST invocation; a large
  * batch can exceed Vercel's function timeout mid-loop and leave ghost DRAFTs.
  * Until ingest moves to an async worker, reject batches larger than this BEFORE
- * any OCR spend so the operator splits them. Conservative: ~40 images at
- * OCR_CONCURRENCY_LIMIT (5) ≈ 8 sequential OCR rounds, which fits the route's
- * 60s maxDuration at typical receipt-OCR latency. Far below the zip-bomb entry cap.
+ * any OCR spend so the operator splits them.
+ *
+ * Sized conservatively: 30 ÷ OCR_CONCURRENCY_LIMIT (5) = 6 sequential OCR rounds;
+ * at a pessimistic ~10s/image that is ~60s, at the route's maxDuration ceiling.
+ * We have no measured gamma OCR p95, so 30 is the defensible choice — the cost of
+ * too-low is one extra split; the cost of too-high is the ghost DRAFTs this cap
+ * exists to prevent. The REAL fix is async processing off the request path
+ * (see the ingest-resilience issue); this is only a bridge to that.
  */
-export const MAX_INGEST_IMAGES = 40;
+export const MAX_INGEST_IMAGES = 30;
 
 /** Hard cap on the total uncompressed payload of one archive: 200 MB. */
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
