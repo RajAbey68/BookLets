@@ -37,6 +37,13 @@ const IconBook = () => (
   </svg>
 );
 
+const IconReceipt = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M4 2v20l3-2 3 2 3-2 3 2 3-2V2H4z" />
+    <path d="M8 7h8" /><path d="M8 11h8" /><path d="M8 15h5" />
+  </svg>
+);
+
 const IconDownload = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -77,6 +84,7 @@ const NAV_ITEMS = [
   { href: '/',           label: 'Dashboard',  Icon: IconDashboard },
   { href: '/properties', label: 'Properties', Icon: IconBuilding  },
   { href: '/bookings',   label: 'Bookings',   Icon: IconCalendar  },
+  { href: '/expenses',   label: 'Expenses',   Icon: IconReceipt   },
   { href: '/ledger',     label: 'Ledger',     Icon: IconBook      },
   { href: '/sandbox',    label: 'Sandbox',    Icon: IconInbox     },
   { href: '/books',      label: 'Books',      Icon: IconBookOpen  },
