@@ -648,7 +648,7 @@ describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
 
   it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
     let call = 0;
-    const postEntry = vi.fn(async (input: JournalEntryInput) => {
+    const postEntry = vi.fn(async () => {
       call += 1;
       if (call === 2) throw new Error('db connection dropped');
       return { id: `je_${call}` };
