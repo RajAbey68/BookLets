@@ -7,6 +7,7 @@ const IconTrendingUp = () => (
 
 import Link from 'next/link';
 import { ReceiptUploader } from '@/components/ReceiptUploader';
+import { WhatsappZipUploader } from '@/components/WhatsappZipUploader';
 import { getDashboardMetrics, getRevenueTrend } from '@/app/actions/portfolio.actions';
 import { drilldownHref } from '@/lib/metric-drilldown';
 import { getDefaultUploadContext } from '@/app/actions/context.actions';
@@ -125,6 +126,10 @@ export default async function Home() {
             </p>
           </div>
         )}
+      </div>
+
+      <div style={{ marginBottom: '2.5rem' }}>
+        <WhatsappZipUploader />
       </div>
 
       <div className="dashboard-grid">
