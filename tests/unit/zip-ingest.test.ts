@@ -352,6 +352,30 @@ describe('S5 zip-ingest — checkpoint 4b: text/image split on a 5-file sample',
     expect(report.skipped.map((s) => s.name)).toEqual(['voicenote.opus']);
   });
 
+  it('F9: rejects a non-positive extracted total instead of posting a zero-amount DRAFT', async () => {
+    // A malformed OCR response defaults totalAmount to 0. A zero-amount DRAFT
+    // balances (0=0) and could be approved past the ledger's zero-line rule,
+    // so the ZIP path must refuse to create it (parity with the single path).
+    const zeroOcr: GeminiOcrResult = {
+      extraction: {
+        vendorName: 'Broken Receipt',
+        date: '2026-07-01',
+        totalAmount: 0,
+        categorySuggestion: 'Other',
+        confidence: 0.9,
+      },
+    };
+    const deps = makeDeps({ ocr: vi.fn(async () => zeroOcr) });
+    const report = await ingestZip(buildZip([{ name: 'receipt.jpg', data: jpeg() }]), CTX, deps);
+
+    expect(deps.ocr).toHaveBeenCalledTimes(1);
+    expect(deps.postEntry).not.toHaveBeenCalled();
+    expect(report.created).toBe(0);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].name).toBe('receipt.jpg');
+    expect(report.failures[0].error).toMatch(/non-positive/i);
+  });
+
   it('parses the chat text and records it as evidence metadata', async () => {
     const deps = makeDeps();
     const report = await ingestZip(fiveFileZip(), CTX, deps);

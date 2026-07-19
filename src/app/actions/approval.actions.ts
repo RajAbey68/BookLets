@@ -230,6 +230,17 @@ export async function decideDraftJournalEntry(
     if (!validation.isValid) {
       return { success: false, error: `Cannot post: ${validation.error}` };
     }
+    // F9: enforce the same zero-amount-line invariant a directly-POSTED entry
+    // must pass. Without this, a zero-amount DRAFT (which balances 0=0) could be
+    // approved straight past the ledger's compliance rule into a POSTED entry.
+    try {
+      LedgerService.assertNoZeroAmountLines(entry.lines);
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? `Cannot post: ${error.message}` : 'Zero-amount line check failed.',
+      };
+    }
     try {
       await LedgerService.checkFiscalPeriod(organizationId, entry.date);
     } catch (error) {

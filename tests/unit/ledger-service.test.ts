@@ -38,6 +38,47 @@ describe('LedgerService.validateTrialBalance', () => {
     expect(result.isValid).toBe(true);
     expect(result.balance.isZero()).toBe(true);
   });
+});
+
+// ─── assertNoZeroAmountLines (F9) ─────────────────────────────────────────────
+
+describe('LedgerService.assertNoZeroAmountLines', () => {
+  it('throws when any line has a zero amount', () => {
+    expect(() =>
+      LedgerService.assertNoZeroAmountLines([
+        { amount: new Decimal('0.00') },
+        { amount: new Decimal('0.00') },
+      ]),
+    ).toThrowError(/zero-amount lines/);
+  });
+
+  it('throws when only one of several lines is zero', () => {
+    expect(() =>
+      LedgerService.assertNoZeroAmountLines([
+        { amount: new Decimal('100.00') },
+        { amount: new Decimal('0') },
+      ]),
+    ).toThrowError(/zero-amount lines/);
+  });
+
+  it('passes when every line is non-zero', () => {
+    expect(() =>
+      LedgerService.assertNoZeroAmountLines([
+        { amount: new Decimal('500.00') },
+        { amount: new Decimal('500.00') },
+      ]),
+    ).not.toThrow();
+  });
+
+  it('accepts string and number amounts, not just Decimal', () => {
+    expect(() => LedgerService.assertNoZeroAmountLines([{ amount: '0.00' }])).toThrowError(
+      /zero-amount lines/,
+    );
+    expect(() => LedgerService.assertNoZeroAmountLines([{ amount: 0 }])).toThrowError(
+      /zero-amount lines/,
+    );
+    expect(() => LedgerService.assertNoZeroAmountLines([{ amount: '12.50' }])).not.toThrow();
+  });
 
   it('returns invalid when debits exceed credits', () => {
     const result = LedgerService.validateTrialBalance([
