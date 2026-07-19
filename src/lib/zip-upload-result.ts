@@ -25,6 +25,12 @@ const MB_LIMIT_HINT = 'That file is over the 100 MB limit.';
 /** Mirror of the server's MAX_ZIP_UPLOAD_BYTES so we can reject before uploading. */
 export const MAX_ZIP_BYTES = 100 * 1024 * 1024;
 
+/**
+ * Mirror of the server's MAX_INGEST_IMAGES (zip-ingest.ts) for client copy.
+ * Kept here because this module is client-bundle-safe; zip-ingest.ts is not.
+ */
+export const MAX_ZIP_IMAGES = 30;
+
 const NO_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
 
 /**

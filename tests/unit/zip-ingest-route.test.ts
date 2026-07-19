@@ -136,6 +136,20 @@ describe('POST /api/ingest/zip — request validation', () => {
 });
 
 describe('POST /api/ingest/zip — guard mapping', () => {
+  it('maps an over-cap image batch to 422 with TOO_MANY_IMAGES and a structured meta payload', async () => {
+    // 31 fresh images > MAX_INGEST_IMAGES (30) default → guard trips BEFORE OCR.
+    const zip = new AdmZip();
+    for (let i = 0; i < 31; i += 1) zip.addFile(`IMG-${i}.jpg`, jpeg());
+    const res = await POST(multipartRequest(zip.toBuffer()));
+
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.code).toBe('TOO_MANY_IMAGES');
+    expect(body.meta).toEqual({ limit: 30, actual: 31 });
+    expect(mockDeps.ocr).not.toHaveBeenCalled();
+    expect(mockDeps.postEntry).not.toHaveBeenCalled();
+  });
+
   it('maps a path-traversal zip to 422 with the guard code', async () => {
     const res = await POST(multipartRequest(traversalZip()));
     expect(res.status).toBe(422);

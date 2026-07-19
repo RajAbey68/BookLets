@@ -25,6 +25,7 @@ import AdmZip from 'adm-zip';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   MAX_ZIP_ENTRIES,
+  MAX_INGEST_IMAGES,
   MAX_TOTAL_UNCOMPRESSED_BYTES,
   MAX_ENTRY_COMPRESSION_RATIO,
   OCR_CONCURRENCY_LIMIT,
@@ -551,3 +552,143 @@ describe('S5 zip-ingest — chat text parser', () => {
     expect(parsed.messageCount).toBe(2);
   });
 });
+
+// Stopgap for the inline serverless batch timeout (RAJ resilience issue): a
+// large export OCRs every image inside one request and can blow past Vercel's
+// function timeout, leaving ghost DRAFTs. Until ingest is moved off to an async
+// worker, reject an export whose OCR-bound image count exceeds a safe cap
+// BEFORE any OCR spend, so the user splits it instead of getting a half-import.
+describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)', () => {
+  const images = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ name: `IMG-${i}.jpg`, data: jpeg() }));
+
+  it('exposes a positive image cap that is stricter than the zip-entry cap', () => {
+    expect(MAX_INGEST_IMAGES).toBeGreaterThan(0);
+    expect(MAX_INGEST_IMAGES).toBeLessThan(MAX_ZIP_ENTRIES);
+  });
+
+  it('rejects a zip whose OCR-bound image count exceeds maxImages (TOO_MANY_IMAGES)', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toMatchObject({
+      name: 'ZipIngestError',
+      code: 'TOO_MANY_IMAGES',
+      // Structured payload so the UI can render a precise message without
+      // parsing prose (peer-review enhancement).
+      meta: { limit: 2, actual: 3 },
+    });
+  });
+
+  it('trips the cap BEFORE any OCR spend or ledger write', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toBeInstanceOf(ZipIngestError);
+    expect(deps.ocr).not.toHaveBeenCalled();
+    expect(deps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('accepts exactly maxImages (boundary)', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(buildZip(images(2)), CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(2);
+  });
+
+  it('counts only fresh (non-duplicate) images against the cap', async () => {
+    // 3 images, but 2 already ingested → only 1 fresh → under a cap of 2.
+    const entries = images(3);
+    const built = buildZip(entries);
+    const firstTwoKeys = new Set(
+      entries.slice(0, 2).map((e) => computeEntryIdempotencyKey(CTX.organizationId, sha256(e.data))),
+    );
+    const deps = makeDeps({ findExistingIdempotencyKeys: vi.fn(async () => firstTwoKeys) });
+    const report = await ingestZip(built, CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(2);
+  });
+});
+
+// Harness-review additions (4-model peer panel, 2026-07-19): the suite asserted
+// line COUNTS and isDebit flags but never the double-entry balance, the OCR
+// date propagation, ledger-stage failure isolation, or dirty-OCR handling.
+describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
+  const oneImageZip = () => buildZip([{ name: 'r.jpg', data: jpeg() }]);
+
+  it('every DRAFT is balanced: debit sum === credit sum === OCR totalAmount', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs.length).toBeGreaterThan(0);
+    for (const input of deps.postedInputs) {
+      const debits = input.lines.filter((l) => l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      const credits = input.lines.filter((l) => !l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      expect(debits).toBe(credits);
+      expect(debits).toBe(OCR_RESULT.extraction.totalAmount);
+    }
+  });
+
+  it('uses the OCR receipt date, not the upload date', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+    expect(deps.postedInputs[0].date.toISOString()).toBe('2026-07-01T00:00:00.000Z');
+  });
+
+  it('falls back to now (not epoch/garbage) when the OCR date is unparseable', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, date: 'not-a-date' },
+    }));
+    const deps = makeDeps({ ocr });
+    const before = Date.now();
+    await ingestZip(oneImageZip(), CTX, deps);
+    const d = deps.postedInputs[0].date.getTime();
+    expect(d).toBeGreaterThanOrEqual(before - 1000);
+    expect(d).toBeLessThanOrEqual(Date.now() + 1000);
+  });
+
+  it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
+    let call = 0;
+    const postEntry = vi.fn(async () => {
+      call += 1;
+      if (call === 2) throw new Error('db connection dropped');
+      return { id: `je_${call}` };
+    });
+    const deps = makeDeps({ postEntry });
+    const report = await ingestZip(
+      buildZip([
+        { name: 'a.jpg', data: jpeg() },
+        { name: 'b.jpg', data: jpeg() },
+      ]),
+      CTX,
+      deps,
+    );
+    expect(report.created).toBe(1);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].stage).toBe('ledger');
+  });
+});
+
+describe('S5 zip-ingest — dirty OCR results must not become ledger inputs', () => {
+  const badAmounts: Array<[string, number]> = [
+    ['zero', 0],
+    ['negative', -450],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ];
+
+  for (const [label, amount] of badAmounts) {
+    it(`records an ocr-stage failure (never a DRAFT) when totalAmount is ${label}`, async () => {
+      const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+        extraction: { ...OCR_RESULT.extraction, totalAmount: amount },
+      }));
+      const deps = makeDeps({ ocr });
+      const report = await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps);
+
+      expect(deps.postEntry).not.toHaveBeenCalled();
+      expect(report.created).toBe(0);
+      expect(report.failures).toHaveLength(1);
+      expect(report.failures[0].stage).toBe('ocr');
+    });
+  }
+});
+
