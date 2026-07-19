@@ -4,6 +4,12 @@
 **Scope:** BookLets (double-entry books), the shared ingestion capability, ocr-microservice, and every future consumer (WhatsApp task app, etc.).
 **Rule zero:** No agent or developer may assert "feature X is missing" or build against this ecosystem without reading this document first.
 
+> **This file is the target DESIGN.** For what is actually deployed, wired, and
+> configured right now — live service endpoints, env config, current gaps
+> (incl. the OCR/DevServer wiring) — see the companion
+> [`RUNTIME-SERVICE-MAP.md`](./RUNTIME-SERVICE-MAP.md). Known design-vs-as-built
+> drift is tracked there in §8.
+
 ---
 
 ## 1. Services & ownership
