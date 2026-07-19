@@ -14,6 +14,28 @@ export interface AutomationResult {
   status: 'HIL_REQUIRED';
 }
 
+/**
+ * RAJ-674 — org-safe resolution of a shared ExpenseCategory's mapped
+ * Account. ExpenseCategory has no organization column (deliberately shared
+ * reference data), so its accountId may belong to whichever org created that
+ * category row first. Using it unconditionally would carry a foreign org's
+ * GL account onto this org's journal line — a real cross-tenant leak, since
+ * Account IS org-scoped. Falls back to this org's own Suspense account
+ * whenever the mapped account is missing or does not belong to `organizationId`.
+ */
+async function resolveOrgSafeAccountId(
+  mappedAccountId: string | null,
+  organizationId: string,
+  suspenseAccountId: string,
+): Promise<string> {
+  if (!mappedAccountId) return suspenseAccountId;
+  const ownedAccount = await prisma.account.findFirst({
+    where: { id: mappedAccountId, organizationId },
+    select: { id: true },
+  });
+  return ownedAccount?.id ?? suspenseAccountId;
+}
+
 export class AutomationService {
   private static SYMBIOS_URL = process.env.SYMBIOS_URL || 'http://localhost:8080';
 
@@ -127,21 +149,30 @@ export class AutomationService {
       throw new Error('Automation Setup Error: Suspense account (code 9999) is not seeded for this organization.');
     }
 
+    // Resolve/create the category row for the Expense record's label FK —
+    // ExpenseCategory is intentionally shared/global reference data (no
+    // organization column), so this name match is fine on its own.
     let category = await prisma.expenseCategory.findFirst({
       where: { name: { contains: categorySuggestion } }
     });
-
     if (!category) {
       category = await prisma.expenseCategory.create({
-        data: {
-          name: categorySuggestion,
-          // Default to the Suspense account if no mapping exists
-          accountId: suspenseAccount.id,
-        }
+        data: { name: categorySuggestion, accountId: suspenseAccount.id }
       });
     }
 
-    const expenseAccountId = category.accountId || suspenseAccount.id;
+    // RAJ-674: the category row is shared across orgs, but its accountId is
+    // org-scoped. A name match against a category some OTHER org created (and
+    // therefore pointed at ITS OWN account) must never carry that foreign
+    // Account onto this org's journal line — verify the mapped account
+    // actually belongs to THIS organization before using it (same guard
+    // src/lib/ocr-bridge.deps.ts resolveExpenseAccountId already applies for
+    // the newer S1b path; this backports it here).
+    const expenseAccountId = await resolveOrgSafeAccountId(
+      category.accountId,
+      organizationId,
+      suspenseAccount.id,
+    );
 
     // Resolve Bank Account by code, fall back to name match, then Suspense.
     const bankAccount =
