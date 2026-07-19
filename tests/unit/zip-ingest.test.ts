@@ -25,6 +25,7 @@ import AdmZip from 'adm-zip';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   MAX_ZIP_ENTRIES,
+  MAX_INGEST_IMAGES,
   MAX_TOTAL_UNCOMPRESSED_BYTES,
   MAX_ENTRY_COMPRESSION_RATIO,
   OCR_CONCURRENCY_LIMIT,
@@ -549,5 +550,55 @@ describe('S5 zip-ingest — chat text parser', () => {
       '12/07/2026, 10:15 - Kumar: line one\nthis is a continuation\n12/07/2026, 10:16 - Kumar: two',
     );
     expect(parsed.messageCount).toBe(2);
+  });
+});
+
+// Stopgap for the inline serverless batch timeout (RAJ resilience issue): a
+// large export OCRs every image inside one request and can blow past Vercel's
+// function timeout, leaving ghost DRAFTs. Until ingest is moved off to an async
+// worker, reject an export whose OCR-bound image count exceeds a safe cap
+// BEFORE any OCR spend, so the user splits it instead of getting a half-import.
+describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)', () => {
+  const images = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ name: `IMG-${i}.jpg`, data: jpeg() }));
+
+  it('exposes a positive image cap that is stricter than the zip-entry cap', () => {
+    expect(MAX_INGEST_IMAGES).toBeGreaterThan(0);
+    expect(MAX_INGEST_IMAGES).toBeLessThan(MAX_ZIP_ENTRIES);
+  });
+
+  it('rejects a zip whose OCR-bound image count exceeds maxImages (TOO_MANY_IMAGES)', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toMatchObject({ name: 'ZipIngestError', code: 'TOO_MANY_IMAGES' });
+  });
+
+  it('trips the cap BEFORE any OCR spend or ledger write', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toBeInstanceOf(ZipIngestError);
+    expect(deps.ocr).not.toHaveBeenCalled();
+    expect(deps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('accepts exactly maxImages (boundary)', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(buildZip(images(2)), CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(2);
+  });
+
+  it('counts only fresh (non-duplicate) images against the cap', async () => {
+    // 3 images, but 2 already ingested → only 1 fresh → under a cap of 2.
+    const entries = images(3);
+    const built = buildZip(entries);
+    const firstTwoKeys = new Set(
+      entries.slice(0, 2).map((e) => computeEntryIdempotencyKey(CTX.organizationId, sha256(e.data))),
+    );
+    const deps = makeDeps({ findExistingIdempotencyKeys: vi.fn(async () => firstTwoKeys) });
+    const report = await ingestZip(built, CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(2);
   });
 });

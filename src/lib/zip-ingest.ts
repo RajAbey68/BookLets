@@ -34,6 +34,17 @@ import type { GeminiOcrResult } from './gemini-ocr';
 /** Hard cap on the number of entries in one archive. */
 export const MAX_ZIP_ENTRIES = 1000;
 
+/**
+ * Per-request OCR-image cap — a stopgap for the inline serverless-batch timeout.
+ * A WhatsApp export OCRs every receipt image inside ONE POST invocation; a large
+ * batch can exceed Vercel's function timeout mid-loop and leave ghost DRAFTs.
+ * Until ingest moves to an async worker, reject batches larger than this BEFORE
+ * any OCR spend so the operator splits them. Conservative: ~40 images at
+ * OCR_CONCURRENCY_LIMIT (5) ≈ 8 sequential OCR rounds, which fits the route's
+ * 60s maxDuration at typical receipt-OCR latency. Far below the zip-bomb entry cap.
+ */
+export const MAX_INGEST_IMAGES = 40;
+
 /** Hard cap on the total uncompressed payload of one archive: 200 MB. */
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
 
@@ -78,7 +89,8 @@ export type ZipIngestGuardCode =
   | 'TOO_MANY_ENTRIES'
   | 'TOTAL_SIZE_EXCEEDED'
   | 'PATH_TRAVERSAL'
-  | 'ZIP_BOMB';
+  | 'ZIP_BOMB'
+  | 'TOO_MANY_IMAGES';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
@@ -97,6 +109,8 @@ export interface ZipIngestLimits {
   maxTotalUncompressedBytes: number;
   maxEntryCompressionRatio: number;
   ratioGuardMinBytes: number;
+  /** Max OCR-bound (fresh) images processed in one request. See MAX_INGEST_IMAGES. */
+  maxImages: number;
 }
 
 const DEFAULT_LIMITS: ZipIngestLimits = {
@@ -104,6 +118,7 @@ const DEFAULT_LIMITS: ZipIngestLimits = {
   maxTotalUncompressedBytes: MAX_TOTAL_UNCOMPRESSED_BYTES,
   maxEntryCompressionRatio: MAX_ENTRY_COMPRESSION_RATIO,
   ratioGuardMinBytes: RATIO_GUARD_MIN_BYTES,
+  maxImages: MAX_INGEST_IMAGES,
 };
 
 export interface ZipFileEntry {
@@ -468,6 +483,20 @@ export async function ingestZip(
   const fresh = keyed.filter((k) => !existingKeys.has(k.idempotencyKey));
   // Deduped counts BOTH intra-archive duplicates and already-ingested keys.
   const deduped = validImages.length - fresh.length;
+
+  // Serverless-timeout stopgap (see MAX_INGEST_IMAGES): OCRing many images
+  // inside this one request can exceed Vercel's function timeout and leave
+  // ghost DRAFTs. Reject an oversized batch BEFORE any OCR spend so the operator
+  // splits it, rather than getting a half-import. The real fix is async
+  // processing off the request path.
+  const maxImages = limits.maxImages ?? DEFAULT_LIMITS.maxImages;
+  if (fresh.length > maxImages) {
+    throw new ZipIngestError(
+      'TOO_MANY_IMAGES',
+      `This export has ${fresh.length} new receipt images; the maximum per upload is ${maxImages}. ` +
+        `Split it into smaller exports and upload them one at a time.`,
+    );
+  }
 
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 

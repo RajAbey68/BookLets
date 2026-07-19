@@ -151,6 +151,7 @@ export const WhatsappZipUploader: React.FC = () => {
             </label>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.75rem' }}>
               In WhatsApp: open the chat → Export Chat → <strong>Attach Media</strong> → save the .zip.
+              Very large exports are processed in one pass — split a big backlog into smaller uploads.
             </p>
           </>
         )}
