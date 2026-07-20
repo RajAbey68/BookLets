@@ -12,12 +12,12 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
-      // Coverage ratchet (RAJ-279). Target is 80%, but actual coverage today is
-      // lines 8.41% / branches 71.33% / functions 41.55% (denominator includes
-      // untested UI components, Next.js routes, and server actions). Gates are
-      // set at (current floor - 2%, rounded down) so the pipeline is green now
-      // and any regression fails CI. Raise these as coverage grows — never lower.
-      thresholds: { lines: 6, statements: 6, branches: 69, functions: 39 },
+      // Coverage ratchet (RAJ-539). Floors of actual coverage, NO buffer
+      // (measured 2026-07-04 on main: lines/statements 22.58%, branches 83.69%,
+      // functions 63.77%; denominator includes untested UI components, Next.js
+      // routes, and server actions). Any regression fails CI. Thresholds may
+      // only be raised — scripts/coverage-ratchet.mjs enforces that on PRs.
+      thresholds: { lines: 22, statements: 22, branches: 83, functions: 63 },
     },
   },
   resolve: {
