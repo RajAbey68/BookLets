@@ -1,0 +1,48 @@
+name: LLM Quorum Review — external four-eyes (Z.AI)
+
+# Raj's mandate (AGENTS.md "Operator constraints", 2026-07-13): PR approval
+# comes from a non-Anthropic LLM review signed by the machine account
+# HermesBot (GitHub login RajAbeyBot) — never from Raj personally.
+# This workflow is that mandate, automated:
+#   diff -> Z.AI GLM verdict (PASS/FAIL + rationale) -> on PASS, RajAbeyBot
+#   submits the APPROVE review with the verdict embedded for audit.
+#
+# Required repository secrets (set via `gh secret set <NAME>`):
+#   ZAI_API_KEY       — Z.AI API key (never appears in logs)
+#   RAJABEYBOT_TOKEN  — PAT of the RajAbeyBot account (repo scope)
+# Optional repository variables (Settings -> Variables, or `gh variable set`):
+#   ZAI_BASE_URL — default https://api.z.ai/api/paas/v4
+#   ZAI_MODEL    — default glm-4.6
+#
+# The job SKIPS silently (neutral, no approval, no failure) when secrets are
+# missing, when the PR is a draft, or when the PR head is not in this repo —
+# it must never block merging on its own; it only ever ADDS an approval.
+
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  zai-review:
+    runs-on: ubuntu-latest
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Z.AI verdict + RajAbeyBot approval
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          RAJABEYBOT_TOKEN: ${{ secrets.RAJABEYBOT_TOKEN }}
+          ZAI_BASE_URL: ${{ vars.ZAI_BASE_URL }}
+          ZAI_MODEL: ${{ vars.ZAI_MODEL }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/llm-quorum-review.mjs
