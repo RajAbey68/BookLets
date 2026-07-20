@@ -3,6 +3,8 @@ import {
   summarizeZipUploadResponse,
   preflightZipFile,
   MAX_ZIP_BYTES,
+  describeProgress,
+  splitNdjson,
 } from '@/lib/zip-upload-result';
 import type { ZipIngestReport } from '@/lib/zip-ingest';
 
@@ -145,5 +147,31 @@ describe('preflightZipFile', () => {
     const result = preflightZipFile('huge.zip', MAX_ZIP_BYTES + 1);
     expect(result?.ok).toBe(false);
     expect(result?.message).toContain('100 MB');
+  });
+});
+
+describe('describeProgress — number-by-number line (no spinner)', () => {
+  it('renders done/total/name plus running created and failed', () => {
+    expect(
+      describeProgress({ done: 12, total: 40, name: 'IMG-12.jpg', created: 9, failed: 3 }),
+    ).toBe('Processing 12 of 40 — IMG-12.jpg · 9 created · 3 need review');
+  });
+  it('omits zero counts', () => {
+    expect(describeProgress({ done: 1, total: 5, name: 'a.jpg', created: 1, failed: 0 })).toBe(
+      'Processing 1 of 5 — a.jpg · 1 created',
+    );
+  });
+});
+
+describe('splitNdjson — stream line accumulator', () => {
+  it('parses complete lines and keeps a partial remainder for the next chunk', () => {
+    const { events, rest } = splitNdjson('{"type":"progress","done":1}\n{"type":"done"}\n{"partial":');
+    expect(events).toEqual([{ type: 'progress', done: 1 }, { type: 'done' }]);
+    expect(rest).toBe('{"partial":');
+  });
+  it('returns no events when the buffer has only a partial line', () => {
+    const { events, rest } = splitNdjson('{"type":"pro');
+    expect(events).toEqual([]);
+    expect(rest).toBe('{"type":"pro');
   });
 });

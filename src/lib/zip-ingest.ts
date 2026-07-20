@@ -439,11 +439,22 @@ function ocrDateOrNow(isoDate: string): Date {
  * chat + summary evidence. Per-image OCR/ledger failures are reported in
  * `failures`, never fatal for the rest of the archive.
  */
+/** Emitted once per fresh image so callers can stream a live number-by-number count. */
+export interface ZipIngestProgress {
+  done: number;
+  total: number;
+  name: string;
+  created: number;
+  failed: number;
+}
+export type ZipIngestOnProgress = (p: ZipIngestProgress) => void;
+
 export async function ingestZip(
   zipBuffer: Buffer,
   ctx: ZipIngestContext,
   deps: ZipIngestDeps,
   limits: Partial<ZipIngestLimits> = {},
+  onProgress?: ZipIngestOnProgress,
 ): Promise<ZipIngestReport> {
   const inspected = inspectZip(zipBuffer, limits);
   const makerIdentity = `${ZIP_INGEST_SOURCE}:${ctx.userId}`;
@@ -509,7 +520,13 @@ export async function ingestZip(
 
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 
-  await mapWithConcurrency(fresh, OCR_CONCURRENCY_LIMIT, async ({ image, idempotencyKey }) => {
+  const processFreshImage = async ({
+    image,
+    idempotencyKey,
+  }: {
+    image: ZipFileEntry;
+    idempotencyKey: string;
+  }) => {
     let ocrResult: GeminiOcrResult;
     try {
       ocrResult = await deps.ocr(image.data.toString('base64'));
@@ -561,6 +578,24 @@ export async function ingestZip(
         name: image.name,
         stage: 'ledger',
         error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  // Run the OCR fan-out, emitting one progress event per image (whatever the
+  // outcome) so the route can stream a live count — no spinners.
+  let completed = 0;
+  await mapWithConcurrency(fresh, OCR_CONCURRENCY_LIMIT, async (item) => {
+    try {
+      await processFreshImage(item);
+    } finally {
+      completed += 1;
+      onProgress?.({
+        done: completed,
+        total: fresh.length,
+        name: item.image.name,
+        created: journalEntryIds.length,
+        failed: failures.length,
       });
     }
   });
