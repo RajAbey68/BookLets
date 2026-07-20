@@ -38,7 +38,7 @@ jobs:
             echo "::notice title=Snyk inactive::SNYK_TOKEN secret is not set — whole-repo dependency + SAST scan skipped. Add the secret to enable it."
           fi
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         if: steps.token.outputs.present == 'true'
         with:
           node-version: '22'
