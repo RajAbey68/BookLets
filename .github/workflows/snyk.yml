@@ -1,0 +1,61 @@
+name: Snyk Security
+
+# Whole-repo security scanning: dependency vulnerabilities (snyk test) and
+# static analysis / SAST (snyk code test). Intended to be a REQUIRED merge gate
+# alongside CodeQL and CodeRabbit.
+#
+# Activation: this workflow is inert until the SNYK_TOKEN repository secret is
+# set (Settings → Secrets and variables → Actions). Without it the job succeeds
+# with a notice so it never blocks merges before it is wired. Once the token is
+# present it scans for real and fails on high/critical findings. Only add "Snyk"
+# to branch-protection required checks AFTER the token is set and the first real
+# run is green (severity threshold triaged) — requiring a skipped check would be
+# a false sense of security.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  Snyk:
+    name: Snyk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect SNYK_TOKEN
+        id: token
+        run: |
+          if [ -n "${{ secrets.SNYK_TOKEN }}" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Snyk inactive::SNYK_TOKEN secret is not set — whole-repo dependency + SAST scan skipped. Add the secret to enable it."
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.token.outputs.present == 'true'
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        if: steps.token.outputs.present == 'true'
+        run: npm ci
+
+      - name: Snyk Open Source (dependency vulnerabilities, whole repo)
+        if: steps.token.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: npx --yes snyk test --all-projects --severity-threshold=high
+
+      - name: Snyk Code (SAST, whole repo)
+        if: steps.token.outputs.present == 'true'
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: npx --yes snyk code test --severity-threshold=high
