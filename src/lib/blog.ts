@@ -1,11 +1,22 @@
 import fs from "fs";
 import path from "path";
 import matter from "gray-matter";
-import { remark } from "remark";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
 import remarkGfm from "remark-gfm";
-import remarkHtml from "remark-html";
+import remarkRehype from "remark-rehype";
+import rehypeSanitize from "rehype-sanitize";
+import rehypeStringify from "rehype-stringify";
 
 export const BLOG_DIR = path.join(process.cwd(), "content/blog");
+
+/**
+ * Slugs come from filenames on disk, which CodeQL (correctly) treats as an
+ * untrusted store. Constraining them to a kebab charset means a slug can
+ * never carry a `javascript:`/`data:` payload or path segment into an href
+ * or a route param — anything outside this shape is dropped, not rendered.
+ */
+const SAFE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export interface BlogPostMeta {
   slug: string;
@@ -41,7 +52,8 @@ export function getPostSlugs(dir: string = BLOG_DIR): string[] {
   return fs
     .readdirSync(dir)
     .filter((file) => file.endsWith(".md") && file.toLowerCase() !== "readme.md")
-    .map((file) => file.replace(/\.md$/, ""));
+    .map((file) => file.replace(/\.md$/, ""))
+    .filter((slug) => SAFE_SLUG.test(slug));
 }
 
 function readPostFile(
@@ -70,14 +82,18 @@ function toPostMeta(slug: string, data: Record<string, unknown>, content: string
 }
 
 export function getPostBySlug(slug: string, dir: string = BLOG_DIR): BlogPost | null {
+  // `slug` reaches this from the [slug] route param — reject anything that
+  // isn't a plain kebab slug before it touches the filesystem, so it can
+  // never traverse out of the blog directory.
+  if (!SAFE_SLUG.test(slug)) return null;
   const file = readPostFile(slug, dir);
   if (!file) return null;
   return { ...toPostMeta(slug, file.data, file.content), content: file.content };
 }
 
 /**
- * Drafts are excluded by default — the generator script writes new posts
- * with `draft: true` so a human reviews content before it goes public.
+ * Drafts are excluded by default — the blog-population skills write new
+ * posts with `draft: true` so a human reviews content before it goes public.
  */
 export function getAllPosts({
   includeDrafts = false,
@@ -94,7 +110,20 @@ export function getAllPosts({
   return posts.sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
+/**
+ * Renders post Markdown to HTML for `dangerouslySetInnerHTML`. rehype-sanitize
+ * (GitHub's default schema) runs in the pipeline, so even a malicious or
+ * mistaken `.md` file can't inject `<script>`, event handlers, or
+ * `javascript:` URLs into a rendered page — the draft-review gate is the
+ * first line of defense, this is the second.
+ */
 export async function markdownToHtml(markdown: string): Promise<string> {
-  const result = await remark().use(remarkGfm).use(remarkHtml).process(markdown);
+  const result = await unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkRehype)
+    .use(rehypeSanitize)
+    .use(rehypeStringify)
+    .process(markdown);
   return result.toString();
 }

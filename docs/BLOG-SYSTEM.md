@@ -3,14 +3,15 @@
 A reusable pipeline for populating `/blog` with on-brand posts, inspired by
 the "Claude Cowork for marketing" pattern (skills + a content-repurposing
 orchestrator + a draft-review gate) but adapted to run inside this repo with
-only what's actually available here: the Anthropic API directly, and
-`WebSearch`/`WebFetch` in place of paid connectors (Firecrawl, Semrush).
+only what's actually available here: Claude Skills triggered in a Claude
+Code / Cowork session, and `WebSearch`/`WebFetch` in place of paid
+connectors (Firecrawl, Semrush).
 
 ## Architecture
 
 ```
 content/blog/*.md          ← the posts (frontmatter + Markdown body)
-src/lib/blog.ts            ← reads/parses/sorts posts, renders Markdown → HTML
+src/lib/blog.ts            ← reads/parses/sorts posts, renders (sanitized) Markdown → HTML
 src/app/blog/               ← list page, [slug] detail page
 src/app/blog/rss.xml/        ← RSS feed
 src/app/sitemap.ts          ← Next.js native sitemap (App Router file convention)
@@ -18,34 +19,33 @@ src/app/sitemap.ts          ← Next.js native sitemap (App Router file conventi
 .claude/skills/blog-post/            ← voice + structure rules, writes one post
 .claude/skills/content-repurposing/  ← gathers a source, hands off to blog-post
 .claude/skills/seo-brief/            ← keyword/gap brief via WebSearch (no Semrush)
-
-scripts/blog/generate-post.ts        ← standalone CLI, same voice rules, no editor needed
 ```
 
-The CLI script and the `blog-post` skill share one source of truth: the
-script reads `.claude/skills/blog-post/SKILL.md` at runtime and uses its body
-as the system prompt for the Anthropic API call. Edit the skill file once —
-both the interactive Claude Code/Cowork flow and the CLI pick up the change.
+The three skills are the reusable "customization" — the same trigger-a-skill
+pattern the source video demonstrates. Editing a skill's `SKILL.md` changes
+how every future post in that mode is written.
 
 ## How to populate the blog
 
-**Interactively, inside Claude Code:**
+Inside a Claude Code / Cowork session (the skills auto-trigger from the
+descriptions, or invoke them explicitly):
 - `/blog-post write about <topic>` — one post, in the house voice.
 - `/content-repurposing <PR, doc path, URL, or pasted text>` — gathers the
   source, then hands off to `blog-post`.
 - `/seo-brief <topic or existing post>` — keyword ideas and a content-gap
   check via `WebSearch`, not a Semrush-grade report.
 
-**Headless, from the CLI (CI, cron, or your own terminal):**
-```bash
-ANTHROPIC_API_KEY=sk-... npm run blog:generate -- --topic "why hosts should reconcile monthly"
-ANTHROPIC_API_KEY=sk-... npm run blog:generate -- --topic "..." --source-file changelog-notes.txt
-ANTHROPIC_API_KEY=sk-... npm run blog:generate -- --topic "..." --source-url https://example.com/release-notes
-```
-Every run writes a new `content/blog/YYYY-MM-DD-slug.md` with `draft: true`.
+Each writes a new `content/blog/YYYY-MM-DD-slug.md` with `draft: true`.
 Nothing is ever auto-published — flip `draft` to `false` by hand after
-reading the post (see `content/blog/README.md` for the full frontmatter
-schema).
+reading the post (see `content/blog/README.md` for the frontmatter schema).
+
+> An earlier revision of this branch also shipped a standalone
+> `scripts/blog/generate-post.ts` CLI that called the Anthropic API directly.
+> It was removed: sending file content to an API and writing the response
+> back to disk is an inherent CodeQL taint pattern (untrusted-network→file,
+> file→outbound-request) that this repo's fail-on-alert security gate blocks,
+> and the skills already cover the same job without it. Regenerate via the
+> skills instead.
 
 ## Why the draft gate
 
@@ -53,8 +53,19 @@ The video this system is modeled on treats email drafts as sacrosanct
 ("never send, reply, modify, or delete") but is looser about publishing
 generated blog/social copy straight to a scheduler. We didn't carry that
 part over: a wrong claim about a shipped feature is worse in a public blog
-post than in a Slack draft, so every generated post — from the skill or the
-CLI — lands as a draft file for a human to read before it's public.
+post than in a Slack draft, so every generated post lands as a `draft: true`
+file for a human to read before it's public. Drafts are excluded from the
+index, RSS, and sitemap, and 404 outside local dev.
+
+## Rendering safety
+
+Post Markdown is rendered to HTML through a `unified` pipeline with
+`rehype-sanitize` (GitHub's default schema) before it reaches
+`dangerouslySetInnerHTML`, and slugs are constrained to a kebab charset
+(`^[a-z0-9]+(?:-[a-z0-9]+)*$`) at both listing and lookup so a filename can't
+become a `javascript:` href or traverse out of `content/blog/`. The
+draft-review gate is the first line of defense against bad content; these are
+the second, for content that slips through or is authored by hand.
 
 ## What was reused vs. adapted from the video
 
@@ -68,10 +79,13 @@ CLI — lands as a draft file for a human to read before it's public.
 
 ## Research: state of the art (reviewed 2026-07-20)
 
-- **Content layer**: `gray-matter` + `remark`/`remark-html`/`remark-gfm` is
-  exactly the stack used by the official
-  [`vercel/next.js/examples/blog-starter`](https://github.com/vercel/next.js/tree/canary/examples/blog-starter).
-  No change needed. If frontmatter correctness ever becomes a real pain
+- **Content layer**: `gray-matter` + a `remark`/`rehype` pipeline is the same
+  stack as the official
+  [`vercel/next.js/examples/blog-starter`](https://github.com/vercel/next.js/tree/canary/examples/blog-starter)
+  (which uses `remark-html`). We render through `remark-rehype` +
+  `rehype-sanitize` + `rehype-stringify` instead of `remark-html` so the
+  output is sanitized before `dangerouslySetInnerHTML` — the one deliberate
+  deviation from the starter. If frontmatter correctness ever becomes a real pain
   point (e.g. a missing `date` silently defaulting instead of failing the
   build), [Velite](https://github.com/zce/velite) is the current
   actively-maintained option for compile-time-validated frontmatter via Zod

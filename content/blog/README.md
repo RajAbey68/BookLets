@@ -28,6 +28,7 @@ draft: false
 
 ## Generating a new post
 
-See `docs/BLOG-SYSTEM.md` and `scripts/blog/generate-post.ts` — or, inside a
-Claude Code / Cowork session, trigger the `blog-post` or `content-repurposing`
-skill under `.claude/skills/`.
+Inside a Claude Code / Cowork session, trigger the `blog-post` or
+`content-repurposing` skill under `.claude/skills/` (e.g. `/blog-post write
+about ...`). Each writes a `draft: true` file here for you to review. See
+`docs/BLOG-SYSTEM.md` for the full workflow.

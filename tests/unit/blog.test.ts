@@ -100,6 +100,12 @@ describe('blog content loading', () => {
     expect(getPostBySlug('does-not-exist', blogDir)).toBeNull();
   });
 
+  it('rejects path-traversal / non-kebab slugs before touching the filesystem', () => {
+    expect(getPostBySlug('../secret', blogDir)).toBeNull();
+    expect(getPostBySlug('a/b', blogDir)).toBeNull();
+    expect(getPostBySlug('Not_A_Slug', blogDir)).toBeNull();
+  });
+
   it('excludes drafts from getAllPosts by default and sorts newest first', () => {
     const posts = getAllPosts({ dir: blogDir });
     expect(posts.map((p) => p.slug)).toEqual([
@@ -126,5 +132,14 @@ describe('markdownToHtml', () => {
     const html = await markdownToHtml('# Title\n\n- one\n- two\n');
     expect(html).toContain('<h1>Title</h1>');
     expect(html).toContain('<li>one</li>');
+  });
+
+  it('sanitizes dangerous HTML embedded in markdown', async () => {
+    const html = await markdownToHtml(
+      'Hello <script>alert(1)</script>\n\n[x](javascript:alert(1))\n'
+    );
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('javascript:');
+    expect(html).toContain('Hello');
   });
 });
