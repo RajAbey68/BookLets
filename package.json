@@ -46,7 +46,7 @@
     "pg": "^8.20.0",
     "tsx": "^4.22.0",
     "typescript": "^5",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.10"
   },
   "overrides": {
     "postcss": "^8.5.10",
