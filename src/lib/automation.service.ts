@@ -48,7 +48,7 @@ export class AutomationService {
     imageBase64: string,
     metadata: { source: 'WEB' | 'MOBILE' } = { source: 'WEB' }
   ): Promise<AutomationResult> {
-    console.log(`[Middleware Agent] Processing receipt from ${metadata.source} for Org: ${organizationId}`);
+    console.log('[Middleware Agent] Processing receipt', { source: metadata.source, org: organizationId });
 
     // Pre-flight: surface bad context up-front instead of failing partway
     // through with a foreign-key error inside the ledger transaction.

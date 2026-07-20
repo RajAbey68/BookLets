@@ -79,7 +79,7 @@ export const ReceiptUploader: React.FC<ReceiptUploaderProps> = ({
       setTimeout(() => setStatus('IDLE'), 3000);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to process receipt';
-      console.error('[ReceiptUploader]', err);
+      console.error('[ReceiptUploader]', { message });
       setError(message);
       setStatus('ERROR');
     }
