@@ -175,3 +175,42 @@ describe('splitNdjson — stream line accumulator', () => {
     expect(rest).toBe('{"type":"pro');
   });
 });
+
+describe('summarizeZipUploadResponse — explicit counts (owner: "how many did it see?")', () => {
+  it('states receipts SEEN and surfaces the reason when a receipt cannot be read', () => {
+    const body = {
+      report: report({
+        imageCount: 1,
+        created: 0,
+        deduped: 0,
+        failures: [{ name: 'r.jpg', stage: 'ocr', error: 'Gemini OCR: GEMINI_API_KEY is not set' }],
+        skipped: [{ name: 'x.vcf', reason: 'contact card' }],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.seen).toBe(1);
+    expect(res.ok).toBe(false); // receipts found but none imported → surfaced as a problem, not a bland "nothing new"
+    expect(res.message).toContain('Saw 1 receipt');
+    expect(res.message).toContain('0 imported');
+    expect(res.message).toContain('OCR service');
+    expect(res.message).toContain('1 non-receipt file skipped');
+  });
+
+  it('distinguishes "already in your books" from new and failed', () => {
+    const body = { report: report({ imageCount: 3, created: 1, deduped: 2, failures: [], skipped: [] }) };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.seen).toBe(3);
+    expect(res.ok).toBe(true);
+    expect(res.message).toContain('Saw 3 receipts');
+    expect(res.message).toContain('1 imported');
+    expect(res.message).toContain('2 already in your books');
+  });
+
+  it('says NO receipts found when the archive is chat-text only', () => {
+    const body = { report: report({ imageCount: 0, created: 0, deduped: 0, failures: [], skipped: [] }) };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.seen).toBe(0);
+    expect(res.title.toLowerCase()).toContain('no receipts');
+    expect(res.message.toLowerCase()).toMatch(/chat text|attach media/);
+  });
+});
