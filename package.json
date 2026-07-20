@@ -18,7 +18,8 @@
     "postinstall": "prisma generate",
     "db:migrate": "prisma migrate deploy",
     "db:seed": "prisma db seed",
-    "db:setup": "prisma db push && prisma db seed"
+    "db:setup": "prisma db push && prisma db seed",
+    "reconcile:kolake": "tsx scripts/reconcile-kolake.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.11.2",
