@@ -8,7 +8,7 @@ export default defineConfig({
     // RAJ-674: real-Postgres integration tests live in their own config
     // (vitest.integration.config.ts) with their own lane/script — this fast
     // unit lane must never try to run them (no live DB in this config).
-    exclude: ['**/node_modules/**', 'tests/integration/**'],
+    exclude: ['**/node_modules/**', 'tests/integration/**', 'tests/smoke/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
