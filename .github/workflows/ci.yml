@@ -43,7 +43,7 @@ jobs:
         # Adopted from independent review (RAJ-279): keep the lcov report
         # inspectable even when the coverage gate fails.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
