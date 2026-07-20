@@ -40,7 +40,7 @@ export default function BlogIndexPage() {
               }}
             >
               <Link
-                href={`/blog/${post.slug}`}
+                href={`/blog/${encodeURIComponent(post.slug)}`}
                 style={{ color: "#3b82f6", fontSize: 22, fontWeight: 700, textDecoration: "none" }}
               >
                 {post.title}
