@@ -1,4 +1,4 @@
-import type { ZipIngestReport } from './zip-ingest';
+import type { ZipIngestReport, IngestFailure } from './zip-ingest';
 
 /**
  * Turns the raw HTTP response from POST /api/ingest/zip into a single,
@@ -12,6 +12,8 @@ export interface ZipUploadResult {
   title: string;
   /** One-line plain-language summary. */
   message: string;
+  /** Receipt images seen in the archive (created + already-in-books + failed). */
+  seen?: number;
   created: number;
   deduped: number;
   skipped: number;
@@ -122,50 +124,60 @@ function extractReport(body: unknown): ZipIngestReport | null {
   return null;
 }
 
-function pluralEntries(n: number): string {
-  return `${n} draft ${n === 1 ? 'entry' : 'entries'} created`;
+/** Friendly, specific reason for a batch of failures (surfaced so "1 failed" isn't a blank). */
+function topFailureReason(failures: IngestFailure[]): string {
+  if (failures.some((f) => f.stage === 'ocr')) return 'OCR service could not read them';
+  if (failures.some((f) => f.stage === 'ledger')) return 'could not save to the ledger';
+  return '';
 }
 
 function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
   const created = r.created ?? 0;
   const deduped = r.deduped ?? 0;
   const skipped = Array.isArray(r.skipped) ? r.skipped.length : 0;
-  const failed = Array.isArray(r.failures) ? r.failures.length : 0;
+  const failures = Array.isArray(r.failures) ? r.failures : [];
+  const failed = failures.length;
+  // Receipt images the archive actually contained.
+  const seen = typeof r.imageCount === 'number' ? r.imageCount : created + deduped + failed;
 
-  const extras: string[] = [];
-  if (deduped > 0) extras.push(`${deduped} duplicate${deduped === 1 ? '' : 's'} skipped`);
-  if (skipped > 0) extras.push(`${skipped} file${skipped === 1 ? '' : 's'} skipped`);
-  if (failed > 0) extras.push(`${failed} failed`);
-  const tail = extras.length ? ` · ${extras.join(' · ')}` : '';
+  const base = { seen, created, deduped, skipped, failed };
+  const skippedNote = skipped > 0 ? ` · ${skipped} non-receipt file${skipped === 1 ? '' : 's'} skipped` : '';
 
-  if (created === 0) {
-    // Valid upload, but nothing new landed in the sandbox.
-    const message =
-      deduped > 0
-        ? `No new entries — all ${deduped} were duplicates already in your books.`
-        : 'Nothing new to import from this archive.';
+  // 1) No receipts at all in the archive.
+  if (seen === 0) {
     return {
+      ...base,
       ok: true,
-      title: 'Nothing new to import',
-      message: message + (skipped > 0 || failed > 0 ? tail : ''),
-      created,
-      deduped,
-      skipped,
-      failed,
+      title: 'No receipts found',
+      message:
+        'No receipt images in this archive — chat text only. In WhatsApp, use Export Chat → ' +
+        `Attach Media so the photos are included.${skippedNote}`,
       showReviewLink: false,
     };
   }
 
-  return {
-    ok: true,
-    title: 'Import complete',
-    message: `${pluralEntries(created)}${tail}. Review them before posting.`,
-    created,
-    deduped,
-    skipped,
-    failed,
-    showReviewLink: true,
-  };
+  // Always state, explicitly, what happened to the receipts it saw.
+  const parts = [`${created} imported`, `${deduped} already in your books`];
+  if (failed > 0) {
+    const reason = topFailureReason(failures);
+    parts.push(`${failed} couldn't be read${reason ? ` (${reason})` : ''}`);
+  }
+  const headline = `Saw ${seen} receipt${seen === 1 ? '' : 's'}`;
+  const message = `${headline}: ${parts.join(' · ')}${skippedNote}.`;
+
+  // 2) Receipts found but none imported AND some failed → surface as a problem,
+  //    not a bland "nothing new" (this is what a broken OCR looks like).
+  if (created === 0 && failed > 0) {
+    return { ...base, ok: false, title: "Couldn't import these receipts", message, showReviewLink: false };
+  }
+
+  // 3) Nothing new but no failures (all duplicates) → benign.
+  if (created === 0) {
+    return { ...base, ok: true, title: 'Already imported', message, showReviewLink: false };
+  }
+
+  // 4) At least one new draft landed.
+  return { ...base, ok: true, title: 'Import complete', message: `${message} Review them before posting.`, showReviewLink: true };
 }
 
 const EMPTY_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
