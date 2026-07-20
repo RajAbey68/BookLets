@@ -160,6 +160,45 @@ describe('POST /api/ingest/zip — guard mapping', () => {
   });
 });
 
+describe('POST /api/ingest/zip — NDJSON streaming progress', () => {
+  it('streams one progress event per image then a done event with the report', async () => {
+    const zip = new AdmZip();
+    zip.addFile('a.jpg', jpeg());
+    zip.addFile('b.jpg', jpeg());
+    const req = new Request('http://localhost/api/ingest/zip', {
+      method: 'POST',
+      headers: { 'content-type': 'application/zip', accept: 'application/x-ndjson' },
+      body: new Uint8Array(zip.toBuffer()),
+    });
+    const res = await POST(req);
+    expect(res.headers.get('content-type')).toContain('application/x-ndjson');
+    const events = (await res.text()).trim().split('\n').map((l) => JSON.parse(l));
+    const progress = events.filter((e) => e.type === 'progress');
+    const done = events.find((e) => e.type === 'done');
+    expect(progress).toHaveLength(2);
+    expect(progress.map((e) => e.done)).toEqual([1, 2]);
+    expect(done.report.created).toBe(2);
+  });
+
+  it('emits a terminal error EVENT (200 stream, not an HTTP error) for a guard rejection', async () => {
+    const zip = new AdmZip();
+    for (let i = 0; i < 31; i += 1) zip.addFile(`IMG-${i}.jpg`, jpeg());
+    const req = new Request('http://localhost/api/ingest/zip', {
+      method: 'POST',
+      headers: { 'content-type': 'application/zip', accept: 'application/x-ndjson' },
+      body: new Uint8Array(zip.toBuffer()),
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(200);
+    const events = (await res.text()).trim().split('\n').map((l) => JSON.parse(l));
+    const err = events.find((e) => e.type === 'error');
+    expect(err.status).toBe(422);
+    expect(err.code).toBe('TOO_MANY_IMAGES');
+    expect(err.meta).toEqual({ limit: 30, actual: 31 });
+    expect(mockDeps.postEntry).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /api/ingest/zip — happy path', () => {
   it('processes a multipart upload and returns the ingest report', async () => {
     const res = await POST(multipartRequest(goodZip()));

@@ -5,18 +5,22 @@ import Link from 'next/link';
 import {
   summarizeZipUploadResponse,
   preflightZipFile,
+  describeProgress,
+  splitNdjson,
   MAX_ZIP_IMAGES,
   type ZipUploadResult,
+  type ZipProgress,
 } from '../lib/zip-upload-result';
 
-/** Hard cap so a stuck request never leaves the UI on "Importing…" forever. */
+/** Hard cap so a stuck request never leaves the UI hanging forever. */
 const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
 /**
  * Uploads a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
- * images) to POST /api/ingest/zip. The endpoint creates DRAFT journal entries
- * only — nothing posts to the ledger until it is approved in the review queue.
- * Result mapping lives in the pure `summarizeZipUploadResponse` (unit-tested).
+ * images) to POST /api/ingest/zip. The endpoint STREAMS NDJSON progress — one
+ * event per image — so this shows a live number-by-number count (never a
+ * spinner: a spinner can't tell a slow import from a stuck one). Every entry is
+ * DRAFT; nothing posts to the ledger until approved in the review queue.
  */
 
 type UploaderStatus = 'IDLE' | 'UPLOADING' | 'DONE' | 'ERROR';
@@ -51,25 +55,31 @@ const NETWORK_ERROR: ZipUploadResult = {
 const TIMEOUT_ERROR: ZipUploadResult = {
   ok: false,
   title: 'Upload timed out',
-  message: 'The import took too long and was cancelled. Try a smaller export or check your connection.',
+  message: 'The import took too long and was cancelled. Re-upload the same export — already-imported receipts are skipped.',
   ...EMPTY_COUNTS,
 };
+
+function interruptedResult(last: ZipProgress | null): ZipUploadResult {
+  const where = last ? ` at ${last.done} of ${last.total}` : '';
+  return {
+    ok: false,
+    title: 'Import interrupted',
+    message: `The import stopped early${where}. Re-upload the same export to resume — already-imported receipts are skipped.`,
+    ...EMPTY_COUNTS,
+  };
+}
 
 export const WhatsappZipUploader: React.FC = () => {
   const [status, setStatus] = useState<UploaderStatus>('IDLE');
   const [result, setResult] = useState<ZipUploadResult | null>(null);
+  const [progress, setProgress] = useState<ZipProgress | null>(null);
 
-  const cardClass = [
-    'glass-card',
-    status === 'UPLOADING' ? 'is-analyzing' : '',
-    status === 'DONE' ? 'is-success' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
+  const cardClass = ['glass-card', status === 'DONE' ? 'is-success' : ''].filter(Boolean).join(' ');
 
   const reset = () => {
     setStatus('IDLE');
     setResult(null);
+    setProgress(null);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -88,6 +98,7 @@ export const WhatsappZipUploader: React.FC = () => {
 
     setStatus('UPLOADING');
     setResult(null);
+    setProgress(null);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
@@ -97,19 +108,66 @@ export const WhatsappZipUploader: React.FC = () => {
       const res = await fetch('/api/ingest/zip', {
         method: 'POST',
         body: form,
+        headers: { accept: 'application/x-ndjson' },
         signal: controller.signal,
       });
 
-      let body: unknown = {};
-      try {
-        body = await res.json();
-      } catch {
-        // non-JSON body (e.g. gateway error page) — summarizer falls back on status
+      // Auth (401) / byte-cap (413) return a plain status + JSON, no stream.
+      if (!res.ok || !res.body) {
+        let body: unknown = {};
+        try {
+          body = await res.json();
+        } catch {
+          // non-JSON error page — summarizer falls back on the status code
+        }
+        const summary = summarizeZipUploadResponse(res.status, body);
+        setResult(summary);
+        setStatus(summary.ok ? 'DONE' : 'ERROR');
+        return;
       }
 
-      const summary = summarizeZipUploadResponse(res.status, body);
-      setResult(summary);
-      setStatus(summary.ok ? 'DONE' : 'ERROR');
+      // NDJSON stream: progress ticks, then a terminal done/error event.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let last: ZipProgress | null = null;
+      let settled = false;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { events, rest } = splitNdjson(buffer);
+        buffer = rest;
+        for (const raw of events) {
+          const ev = raw as Record<string, unknown>;
+          if (ev.type === 'progress') {
+            last = ev as unknown as ZipProgress;
+            setProgress(last);
+          } else if (ev.type === 'done') {
+            const summary = summarizeZipUploadResponse(200, { report: ev.report });
+            setResult(summary);
+            setStatus(summary.ok ? 'DONE' : 'ERROR');
+            settled = true;
+          } else if (ev.type === 'error') {
+            const summary = summarizeZipUploadResponse(Number(ev.status) || 500, {
+              error: ev.message,
+              code: ev.code,
+              meta: ev.meta,
+            });
+            setResult(summary);
+            setStatus('ERROR');
+            settled = true;
+          }
+        }
+      }
+
+      // Stream ended with no terminal event → the request was cut off mid-batch
+      // (e.g. a serverless timeout). Show exactly how far it got.
+      if (!settled) {
+        setResult(interruptedResult(last));
+        setStatus('ERROR');
+      }
     } catch (err) {
       console.error('[WhatsappZipUploader]', err);
       setResult(err instanceof DOMException && err.name === 'AbortError' ? TIMEOUT_ERROR : NETWORK_ERROR);
@@ -122,7 +180,7 @@ export const WhatsappZipUploader: React.FC = () => {
   return (
     <div className={cardClass}>
       <div className="uploader">
-        <div className={`uploader-icon ${status === 'UPLOADING' ? 'pulsing' : ''}`}>
+        <div className="uploader-icon">
           {status === 'DONE' ? <IconCheck /> : status === 'ERROR' ? <IconAlert /> : <IconArchive />}
         </div>
 
@@ -132,10 +190,11 @@ export const WhatsappZipUploader: React.FC = () => {
           {(status === 'DONE' || status === 'ERROR') && result?.title}
         </h3>
 
-        <p className="uploader-body">
+        <p className="uploader-body" aria-live="polite">
           {status === 'IDLE' &&
             'Upload a WhatsApp chat export (.zip). Receipt images and messages become DRAFT entries for you to review — nothing posts automatically.'}
-          {status === 'UPLOADING' && 'Reading the archive and extracting receipts…'}
+          {status === 'UPLOADING' &&
+            (progress ? describeProgress(progress) : 'Reading the archive…')}
           {(status === 'DONE' || status === 'ERROR') && result?.message}
         </p>
 
@@ -175,12 +234,6 @@ export const WhatsappZipUploader: React.FC = () => {
           </button>
         )}
       </div>
-
-      {status === 'UPLOADING' && (
-        <div className="uploader-progress">
-          <div className="uploader-progress-bar" />
-        </div>
-      )}
     </div>
   );
 };

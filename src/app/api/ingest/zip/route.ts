@@ -119,12 +119,51 @@ export async function POST(request: Request) {
     );
   }
 
+  const deps = buildDefaultZipIngestDeps();
+
+  // Streaming mode: when the client asks for NDJSON, emit one progress line per
+  // image (live number-by-number count — no spinner) then a terminal `done` or
+  // `error` event. Auth (401) and the byte cap (413) already ran above as real
+  // HTTP statuses; guard rejections inside ingestZip surface as `error` events
+  // because the 200 stream is already open by the time they can fire.
+  if ((request.headers.get('accept') ?? '').includes('application/x-ndjson')) {
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const write = (obj: unknown) => controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`));
+        try {
+          const report = await ingestZip(zipBuffer, { organizationId, userId }, deps, {}, (p) =>
+            write({ type: 'progress', ...p }),
+          );
+          write({ type: 'done', report });
+        } catch (err) {
+          if (err instanceof ZipIngestError) {
+            console.warn(
+              `[ingest/zip] rejected: ${encodeURIComponent(err.code)} org=${encodeURIComponent(organizationId)} bytes=${zipBuffer.length}`,
+            );
+            write({
+              type: 'error',
+              status: GUARD_HTTP_STATUS[err.code],
+              code: err.code,
+              message: err.message,
+              ...(err.meta ? { meta: err.meta } : {}),
+            });
+          } else {
+            console.error('[ingest/zip] ingestion failed:', err);
+            write({ type: 'error', status: 500, message: 'Zip ingestion failed.' });
+          }
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+
   try {
-    const report = await ingestZip(
-      zipBuffer,
-      { organizationId, userId },
-      buildDefaultZipIngestDeps(),
-    );
+    const report = await ingestZip(zipBuffer, { organizationId, userId }, deps);
     return NextResponse.json({ report });
   } catch (err) {
     if (err instanceof ZipIngestError) {

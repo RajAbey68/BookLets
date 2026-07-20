@@ -31,6 +31,39 @@ export const MAX_ZIP_BYTES = 100 * 1024 * 1024;
  */
 export const MAX_ZIP_IMAGES = 30;
 
+/** One streamed progress tick (mirrors ZipIngestProgress from the server). */
+export interface ZipProgress {
+  done: number;
+  total: number;
+  name: string;
+  created: number;
+  failed: number;
+}
+
+/** Number-by-number progress line — deliberately NOT a spinner. */
+export function describeProgress(p: ZipProgress): string {
+  const extras: string[] = [];
+  if (p.created > 0) extras.push(`${p.created} created`);
+  if (p.failed > 0) extras.push(`${p.failed} need review`);
+  const tail = extras.length ? ` · ${extras.join(' · ')}` : '';
+  return `Processing ${p.done} of ${p.total} — ${p.name}${tail}`;
+}
+
+/**
+ * Split an NDJSON stream buffer into complete parsed events plus the trailing
+ * partial line to carry into the next chunk. Pure so the uploader's stream
+ * reader stays testable in the node-only env.
+ */
+export function splitNdjson(buffer: string): { events: unknown[]; rest: string } {
+  const parts = buffer.split('\n');
+  const rest = parts.pop() ?? '';
+  const events = parts
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as unknown);
+  return { events, rest };
+}
+
 const NO_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
 
 /**

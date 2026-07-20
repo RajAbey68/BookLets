@@ -612,6 +612,44 @@ describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)',
 // Harness-review additions (4-model peer panel, 2026-07-19): the suite asserted
 // line COUNTS and isDebit flags but never the double-entry balance, the OCR
 // date propagation, ledger-stage failure isolation, or dirty-OCR handling.
+// Number-by-number progress (owner feedback: "spinners are shit — I want
+// number-by-number, real-time feedback"). ingestZip must emit one progress
+// event per fresh image so the route can stream a live count.
+describe('S5 zip-ingest — onProgress streaming callback', () => {
+  it('emits exactly one event per fresh image, with monotonic done up to total', async () => {
+    const deps = makeDeps();
+    const entries = Array.from({ length: 3 }, (_, i) => ({ name: `IMG-${i}.jpg`, data: jpeg() }));
+    const events: Array<{ done: number; total: number; name: string; created: number; failed: number }> = [];
+    await ingestZip(buildZip(entries), CTX, deps, {}, (p) => events.push(p));
+
+    expect(events).toHaveLength(3);
+    expect(events.map((e) => e.done)).toEqual([1, 2, 3]);
+    expect(events.every((e) => e.total === 3)).toBe(true);
+    expect(events.map((e) => e.name).sort()).toEqual(['IMG-0.jpg', 'IMG-1.jpg', 'IMG-2.jpg']);
+    expect(events[2].created).toBe(3);
+  });
+
+  it('advances the count for a failed image too (created stays, failed climbs)', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, totalAmount: 0 },
+    }));
+    const deps = makeDeps({ ocr });
+    const events: Array<{ done: number; created: number; failed: number }> = [];
+    await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps, {}, (p) => events.push(p));
+
+    expect(events).toHaveLength(1);
+    expect(events[0].done).toBe(1);
+    expect(events[0].created).toBe(0);
+    expect(events[0].failed).toBe(1);
+  });
+
+  it('is optional — omitting onProgress leaves behaviour unchanged', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps);
+    expect(report.created).toBe(1);
+  });
+});
+
 describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
   const oneImageZip = () => buildZip([{ name: 'r.jpg', data: jpeg() }]);
 
