@@ -209,6 +209,18 @@ describe('statement-report-summary — details', () => {
     expect(texts[2]).toMatch(/accounting year|fiscal|period/i);
   });
 
+  it('never leaks an UNKNOWN skip code — plain-English fallback instead', () => {
+    // parkReasonLabel echoes unknown codes back verbatim; the summary must
+    // not inherit that behavior for a user-facing surface.
+    const summary = summarizeStatementReport(
+      makeReport({ skipped: [{ row: 2, reason: 'SOME_FUTURE_CODE' }] }),
+    );
+    const line = summary.details.find((d) => d.text.startsWith('Row 2'));
+    expect(line).toBeDefined();
+    expect(line!.text).not.toContain('SOME_FUTURE_CODE');
+    expect(line!.text).toMatch(/unrecognised reason/);
+  });
+
   it('orders details: balance line, failures, collisions, skips', () => {
     const summary = summarizeStatementReport(
       makeReport({

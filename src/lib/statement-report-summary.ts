@@ -31,12 +31,18 @@ export interface StatementReportSummary {
 export const SUMMARY_DETAIL_CAP = 8;
 
 /**
- * ZERO_AMOUNT is statement-specific; the other skip reasons reuse the
- * park-reason wording so Raj reads identical language across the sandbox.
+ * ZERO_AMOUNT is statement-specific; the known park reasons reuse the shared
+ * wording so Raj reads identical language across the sandbox. The summary is
+ * user-facing, so an UNKNOWN reason must never surface as its raw code
+ * (parkReasonLabel echoes unknown codes back) — it gets a plain-English
+ * fallback instead.
  */
+const STATEMENT_SKIP_REASONS = new Set(['FX_UNSUPPORTED', 'NO_FISCAL_PERIOD']);
+
 function skipReasonLabel(reason: string): string {
   if (reason === 'ZERO_AMOUNT') return 'zero amount, nothing to book';
-  return parkReasonLabel(reason);
+  if (STATEMENT_SKIP_REASONS.has(reason)) return parkReasonLabel(reason);
+  return 'could not be imported for an unrecognised reason';
 }
 
 export function summarizeStatementReport(report: StatementIngestReport): StatementReportSummary {

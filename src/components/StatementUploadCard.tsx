@@ -106,6 +106,9 @@ export default function StatementUploadCard() {
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
+    // The file input is disabled while busy, but drops bypass it — ignore
+    // them too, or a second drop races the in-flight upload's state.
+    if (status === 'UPLOADING') return;
     const file = e.dataTransfer.files?.[0];
     if (file) void upload(file);
   };
