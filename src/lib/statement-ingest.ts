@@ -219,8 +219,23 @@ export function parseCsv(text: string): string[][] {
 
 // ─── header detection ─────────────────────────────────────────────────────────
 
-/** Header names accepted for the bank-transaction-ID column (normalized). */
-const ID_HEADER_NAMES = ['transferwise id', 'id', 'transaction id', 'reference'];
+/**
+ * Headers whose values are authoritative natural keys BY THEMSELVES
+ * (normalized). Deliberately narrow — an over-eager match here silently
+ * UNDER-counts, the worst failure mode this importer exists to prevent:
+ *   - 'reference' is NEVER accepted: free-text reference columns carry
+ *     recurring text (RENT / SALARY / invoice numbers), so every row sharing
+ *     the text — including the same payment in NEXT month's upload — would
+ *     collapse to one key, bypassing the collision guard (which only fires on
+ *     the hash path). It is not folded into the hash either; the description
+ *     already covers row content.
+ *   - a bare 'id' is authoritative ONLY in a positively-detected Wise export
+ *     (Wise IDs are globally unique). Generic 'id' columns are routinely
+ *     1,2,3 row numbers that collide ACROSS files — June's row 1 would
+ *     silently swallow July's.
+ */
+const AUTHORITATIVE_ID_HEADERS = ['transferwise id', 'transaction id'];
+const WISE_ONLY_ID_HEADER = 'id';
 
 /**
  * Map header cells to columns. The Wise export format (ID + Date + Amount +
@@ -239,7 +254,8 @@ export function detectColumns(header: readonly string[]): StatementColumnMap {
     return null;
   };
 
-  const id = indexOf(...ID_HEADER_NAMES);
+  const authoritativeId = indexOf(...AUTHORITATIVE_ID_HEADERS);
+  const bareId = indexOf(WISE_ONLY_ID_HEADER);
   const date = indexOf('date');
   const amount = indexOf('amount');
   const currency = indexOf('currency');
@@ -254,7 +270,11 @@ export function detectColumns(header: readonly string[]): StatementColumnMap {
   }
 
   const isWise =
-    id !== null && currency !== null && runningBalance !== null;
+    (authoritativeId !== null || bareId !== null) && currency !== null && runningBalance !== null;
+  // Bare 'id' is only trusted inside the full Wise column signature; a
+  // generic export's id column falls through to the hash path (where the
+  // collision-warning guard applies) instead of keying rows.
+  const id = authoritativeId ?? (isWise ? bareId : null);
 
   return {
     format: isWise ? 'wise' : 'generic',
@@ -528,10 +548,11 @@ export async function ingestStatement(
     }
 
     // LKR-only books (same policy as ocr-bridge FX_UNSUPPORTED): a missing
-    // Currency column means a local-bank export and is taken as LKR; a
-    // present column must literally say LKR.
-    const currency =
-      columns.currency === null ? 'LKR' : cell(columns.currency).trim().toUpperCase();
+    // Currency column — or a blank cell in one (many exports only populate
+    // currency on FX rows) — means a local transaction and is taken as LKR;
+    // a populated cell must literally say LKR.
+    const currencyRaw = columns.currency === null ? '' : cell(columns.currency).trim();
+    const currency = currencyRaw === '' ? 'LKR' : currencyRaw.toUpperCase();
     if (currency !== 'LKR') {
       skipped.push({ row: rowNumber, reason: 'FX_UNSUPPORTED' });
       continue;
