@@ -92,6 +92,25 @@ safe:
   present, silent collapse remains correct (identical balances = the same
   snapshot repeated).
 
+- **Authoritative-ID restriction (over-dedup guard).** Only `TransferWise ID`
+  and `Transaction ID` headers are authoritative natural keys by themselves. A
+  bare `ID` header is authoritative only when the file positively matches the
+  Wise column signature (Wise IDs are globally unique); a generic export's `id`
+  column is routinely 1,2,3 row numbers, which would collide ACROSS uploads
+  (June's row 1 silently swallowing July's). `Reference` is never accepted —
+  free-text references (RENT / SALARY / invoice numbers) recur across genuinely
+  distinct payments, and keying on them would dedupe recurring transactions
+  away silently while bypassing the collision guard (which only fires on the
+  hash path). It is not folded into the hash either; description already covers
+  row content. Rows without an authoritative ID use the hash path, where the
+  collision warning applies.
+
+- **Blank currency cells.** A Currency column that exists but has a blank or
+  whitespace-only cell is treated like an absent column: the row is a local
+  (LKR) transaction, since many exports only populate currency on FX rows.
+  Populated values are trimmed/uppercased and non-LKR still skips
+  `FX_UNSUPPORTED`.
+
 - **Balance reconciliation invariant (catch-all detector).** When the export has
   a Running Balance column, `report.reconciliation` compares the signed sum of
   ALL parsed row amounts (created, deduped and skipped alike — only unparseable
