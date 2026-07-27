@@ -6,6 +6,16 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 # Go-live operating facts (BookLets)
 
+- **External LLM reviews (Grok/K3/Gemini/GLM) go through OpenRouter.** Raj HAS
+  an OpenRouter key — it lives in his Mac's keychain, used by the
+  `openrouter-fusion` plugin (enabled on his account, runs in his LOCAL Cowork
+  sessions). Cloud/CCR sessions cannot reach the Mac keychain: to call
+  OpenRouter from a cloud session, `OPENROUTER_API_KEY` must be set in the
+  Claude Code environment settings. NEVER claim "no API keys exist" — the
+  correct statement is "the key isn't available in this cloud environment
+  yet"; the fallbacks are (a) env var, (b) run the packet through the local
+  openrouter-fusion session, (c) CodeRabbit on the PR.
+
 - **Properties are intentionally empty.** Raj does NOT want mock/demo data
   seeded. There are **8 real Ko Lake units** that will be pulled in due
   course. An empty dashboard + hidden receipt uploader is EXPECTED until the
