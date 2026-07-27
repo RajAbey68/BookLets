@@ -95,17 +95,16 @@ function makeDeps(overrides: Partial<StatementIngestDeps> = {}): StatementIngest
  */
 function makePersistentDeps() {
   const seen = new Set<string>();
-  let n = 0;
-  return makeDeps({
-    postEntry: vi.fn(async (input: JournalEntryInput) => {
-      seen.add(input.idempotencyKey as string);
-      n += 1;
-      return { id: `je_${n}` };
-    }),
-    findExistingIdempotencyKeys: vi.fn(async (_org: string, keys: string[]) => {
-      return new Set(keys.filter((k) => seen.has(k)));
-    }),
+  const deps = makeDeps();
+  const record = deps.postEntry;
+  deps.postEntry = vi.fn(async (input: JournalEntryInput) => {
+    seen.add(input.idempotencyKey as string);
+    return record(input);
   });
+  deps.findExistingIdempotencyKeys = vi.fn(async (_org: string, keys: string[]) => {
+    return new Set(keys.filter((k) => seen.has(k)));
+  });
+  return deps;
 }
 
 // ─── guard constants ──────────────────────────────────────────────────────────
