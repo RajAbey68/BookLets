@@ -75,7 +75,7 @@ function makeDeps(overrides: Partial<StatementIngestDeps> = {}): StatementIngest
     postEntry: vi.fn(async (input: JournalEntryInput) => {
       postedInputs.push(input);
       n += 1;
-      return { id: `je_${n}` };
+      return { entryId: `je_${n}`, created: true };
     }),
     findExistingIdempotencyKeys: vi.fn(async () => new Set<string>()),
     resolveStatementAccounts: vi.fn(async () => ({
@@ -162,6 +162,19 @@ describe('statement-ingest — CSV parser', () => {
   it('drops rows that are entirely empty', () => {
     expect(parseCsv('a,b\n\n , \nc,d')).toEqual([
       ['a', 'b'],
+      ['c', 'd'],
+    ]);
+  });
+
+  it('treats a mid-field quote in an unquoted field as a literal character', () => {
+    // RFC-4180 practice: a quote only opens quoted mode at the START of a
+    // field; mid-field it must not swallow the delimiter.
+    expect(parseCsv('a"b,c')).toEqual([['a"b', 'c']]);
+  });
+
+  it('does not let a mid-field quote swallow the row boundary', () => {
+    expect(parseCsv('a"b\nc,d')).toEqual([
+      ['a"b'],
       ['c', 'd'],
     ]);
   });
@@ -574,6 +587,29 @@ describe('statement-ingest — dedup layers', () => {
     expect(deps.postEntry).toHaveBeenCalledTimes(1);
   });
 
+  it('counts a postEntry idempotent race recovery (created:false) as deduped, not created', async () => {
+    // The production postEntry path can RECOVER a lost unique-constraint
+    // race by returning the already-persisted entry instead of throwing —
+    // no new row was written, so the report must not claim one.
+    let call = 0;
+    const deps = makeDeps({
+      postEntry: vi.fn(async () => {
+        call += 1;
+        return { entryId: `je_${call}`, created: call !== 1 };
+      }),
+    });
+    const report = await ingestStatement(buf(GENERIC_CSV), CTX, deps);
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(1);
+    expect(report.failures).toEqual([]);
+    // Row 1 (-2500.50, the recovered race) is excluded from the totals.
+    expect(report.outflowTotal).toBe('0.00');
+    expect(report.inflowTotal).toBe('10000.00');
+    expect(
+      report.created + report.deduped + report.skipped.length + report.failures.length,
+    ).toBe(report.totalRows);
+  });
+
   it('a postEntry unique-constraint race lands in failures, not a double-create', async () => {
     // Layers (a)+(b) missed the race loser; the DB unique index throws inside
     // postEntry. The row must surface as a failure — never a second entry.
@@ -670,7 +706,7 @@ describe('statement-ingest — skips and failures', () => {
       postEntry: vi.fn(async () => {
         call += 1;
         if (call === 1) throw new Error('boom');
-        return { id: `je_${call}` };
+        return { entryId: `je_${call}`, created: true };
       }),
     });
     const report = await ingestStatement(buf(GENERIC_CSV), CTX, deps);
@@ -956,6 +992,18 @@ describe('statement-ingest — file guards', () => {
       expect((err as StatementIngestError).code).toBe('FILE_TOO_LARGE');
     }
     expect(deps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('renders sub-MB byte caps sensibly in the guard message (never "0 MB")', async () => {
+    const deps = makeDeps();
+    try {
+      await ingestStatement(buf(GENERIC_CSV), CTX, deps, { maxUploadBytes: 16 });
+      expect.unreachable('expected FILE_TOO_LARGE');
+    } catch (err) {
+      expect(err).toBeInstanceOf(StatementIngestError);
+      expect((err as StatementIngestError).message).not.toMatch(/\b0 MB\b/);
+      expect((err as StatementIngestError).message).toMatch(/16 bytes/);
+    }
   });
 
   it('rejects a statement with more data rows than the cap (TOO_MANY_ROWS)', async () => {

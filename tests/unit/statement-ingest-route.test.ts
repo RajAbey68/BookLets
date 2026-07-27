@@ -17,7 +17,7 @@ vi.mock('@/lib/auth-context', () => ({
 // Replace the prisma-backed default deps with inert mocks: unit tests must
 // never touch a live database.
 const mockDeps = {
-  postEntry: vi.fn(async () => ({ id: 'je_1' })),
+  postEntry: vi.fn(async () => ({ entryId: 'je_1', created: true })),
   findExistingIdempotencyKeys: vi.fn(async () => new Set<string>()),
   resolveStatementAccounts: vi.fn(async () => ({
     bankAccountId: 'acct_bank',
