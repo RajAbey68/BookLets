@@ -604,6 +604,212 @@ describe('statement-ingest — skips and failures', () => {
   });
 });
 
+// ─── collision warnings (under-count guard) ───────────────────────────────────
+
+describe('statement-ingest — collision warnings', () => {
+  it('warns when identical rows collide on a hash key with no running balance', async () => {
+    // No ID column, no Running Balance column: two genuinely separate but
+    // identical-looking payments CANNOT be told apart. The collapse still
+    // happens (one entry), but never silently — the report must flag it.
+    const csv = [
+      'Date,Description,Amount',
+      '2026-07-01,Coffee,-500.00',
+      '2026-07-01,Coffee,-500.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(1);
+    expect(report.collisionWarnings).toHaveLength(1);
+    const warning = report.collisionWarnings[0];
+    expect(warning.row).toBe(3);
+    expect(warning.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(warning.reason).toMatch(/row 2/i);
+    expect(warning.reason).toMatch(/running-balance/i);
+    expect(warning.reason).toMatch(/transaction-ID/i);
+  });
+
+  it('warns per collapsed row when the same indistinct row appears three times', async () => {
+    const csv = [
+      'Date,Description,Amount',
+      '2026-07-01,Coffee,-500.00',
+      '2026-07-01,Coffee,-500.00',
+      '2026-07-01,Coffee,-500.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(2);
+    expect(report.collisionWarnings.map((w) => w.row)).toEqual([3, 4]);
+  });
+
+  it('collapses silently when a bank transaction ID carried the key', async () => {
+    const csv = [
+      '"TransferWise ID",Date,Amount,Currency,Description,"Running Balance"',
+      'TRANSFER-1001,01-07-2026,-4500.00,LKR,Cement,95500.00',
+      'TRANSFER-1001,01-07-2026,-4500.00,LKR,Cement,95500.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.deduped).toBe(1);
+    expect(report.collisionWarnings).toEqual([]);
+  });
+
+  it('collapses silently when the hash key included a running balance', async () => {
+    // Identical balances mean the file repeated the SAME snapshot — a true
+    // duplicate, not two indistinguishable payments.
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Coffee,-500.00,1000.00',
+      '2026-07-01,Coffee,-500.00,1000.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.deduped).toBe(1);
+    expect(report.collisionWarnings).toEqual([]);
+  });
+
+  it('warns when the Running Balance column exists but the cells are empty', async () => {
+    // A present-but-unfilled balance column gives the hash key no
+    // disambiguating component — same exposure as no column at all.
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Coffee,-500.00,',
+      '2026-07-01,Coffee,-500.00,',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.deduped).toBe(1);
+    expect(report.collisionWarnings).toHaveLength(1);
+    expect(report.collisionWarnings[0].row).toBe(3);
+  });
+
+  it('does not warn when distinct running balances keep identical rows apart', async () => {
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Coffee,-500.00,1000.00',
+      '2026-07-01,Coffee,-500.00,500.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.created).toBe(2);
+    expect(report.deduped).toBe(0);
+    expect(report.collisionWarnings).toEqual([]);
+  });
+
+  it('reports an empty warnings array on a clean ingest', async () => {
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(WISE_CSV), CTX, deps);
+    expect(report.collisionWarnings).toEqual([]);
+  });
+});
+
+// ─── balance reconciliation invariant ─────────────────────────────────────────
+
+describe('statement-ingest — balance reconciliation', () => {
+  it('is null when the export has no Running Balance column', async () => {
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(GENERIC_CSV), CTX, deps);
+    expect(report.reconciliation).toBeNull();
+  });
+
+  it('matches on a consistent chronological (balance-after) statement', async () => {
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(WISE_CSV), CTX, deps);
+    // Sum of ALL parsed amounts: -4500 + 120000 = 115500, and the balance
+    // column walks 95500 → 215500 with the first row's own -4500 applied.
+    expect(report.reconciliation).toEqual({
+      available: true,
+      expectedDelta: '115500.00',
+      parsedSum: '115500.00',
+      matches: true,
+    });
+  });
+
+  it('matches on a newest-first (descending) statement too', async () => {
+    const csv = [
+      '"TransferWise ID",Date,Amount,Currency,Description,"Running Balance"',
+      'TRANSFER-2002,02-07-2026,120000.00,LKR,Booking payout,215500.00',
+      'TRANSFER-2001,01-07-2026,-4500.00,LKR,Cement,95500.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.reconciliation).toMatchObject({
+      available: true,
+      parsedSum: '115500.00',
+      matches: true,
+    });
+  });
+
+  it('includes skipped rows in the parsed sum (zero-amount rows still move nothing)', async () => {
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Opening charge,-100.00,900.00',
+      '2026-07-02,Zero notice,0.00,900.00',
+      '2026-07-03,Deposit,50.00,950.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.skipped).toEqual([{ row: 3, reason: 'ZERO_AMOUNT' }]);
+    expect(report.reconciliation).toEqual({
+      available: true,
+      expectedDelta: '-50.00',
+      parsedSum: '-50.00',
+      matches: true,
+    });
+  });
+
+  it('flags a mismatch when the balance column contradicts the amounts', async () => {
+    const csv = [
+      '"TransferWise ID",Date,Amount,Currency,Description,"Running Balance"',
+      'TRANSFER-1001,01-07-2026,-4500.00,LKR,Cement,95500.00',
+      'TRANSFER-1002,02-07-2026,120000.00,LKR,Booking payout,999999.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.reconciliation).toMatchObject({
+      available: true,
+      parsedSum: '115500.00',
+      matches: false,
+    });
+    expect(report.reconciliation!.expectedDelta).not.toBe(report.reconciliation!.parsedSum);
+  });
+
+  it('catches a repeated-snapshot duplicate through the balance walk', async () => {
+    // The silent-collapse case (same balance twice) is exactly what the
+    // independent invariant is for: the collapse is silent, the mismatch not.
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Coffee,-500.00,1000.00',
+      '2026-07-01,Coffee,-500.00,1000.00',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.collisionWarnings).toEqual([]);
+    expect(report.reconciliation).toMatchObject({ available: true, matches: false });
+  });
+
+  it('is unavailable when the boundary balances cannot be parsed', async () => {
+    const csv = [
+      'Date,Description,Amount,Running Balance',
+      '2026-07-01,Charge,-10.00,n/a',
+      '2026-07-02,Charge,-20.00,n/a',
+    ].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.reconciliation).toMatchObject({ available: false, matches: false });
+    expect(report.reconciliation!.parsedSum).toBe('-30.00');
+  });
+
+  it('is unavailable when no rows parsed at all', async () => {
+    const csv = ['Date,Description,Amount,Running Balance', 'garbage,Bad,-x,100.00'].join('\n');
+    const deps = makeDeps();
+    const report = await ingestStatement(buf(csv), CTX, deps);
+    expect(report.failures).toHaveLength(1);
+    expect(report.reconciliation).toMatchObject({ available: false, matches: false });
+  });
+});
+
 // ─── decimal precision ────────────────────────────────────────────────────────
 
 describe('statement-ingest — decimal precision', () => {
@@ -704,6 +910,8 @@ describe('statement-ingest — evidence', () => {
       deduped: 0,
       skipped: [],
       failures: [],
+      collisionWarnings: [],
+      reconciliation: { available: true, matches: true },
       inflowTotal: '120000.00',
       outflowTotal: '4500.00',
     });
