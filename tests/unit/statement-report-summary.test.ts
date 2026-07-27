@@ -213,7 +213,11 @@ describe('statement-report-summary — details', () => {
     // parkReasonLabel echoes unknown codes back verbatim; the summary must
     // not inherit that behavior for a user-facing surface.
     const summary = summarizeStatementReport(
-      makeReport({ skipped: [{ row: 2, reason: 'SOME_FUTURE_CODE' }] }),
+      makeReport({
+        // Deliberately outside the StatementSkipReason union — the point is
+        // exactly a code this version doesn't know about.
+        skipped: [{ row: 2, reason: 'SOME_FUTURE_CODE' as never }],
+      }),
     );
     const line = summary.details.find((d) => d.text.startsWith('Row 2'));
     expect(line).toBeDefined();
