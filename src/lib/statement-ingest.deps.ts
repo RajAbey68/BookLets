@@ -14,7 +14,14 @@ import type { ResolvedStatementAccounts, StatementIngestDeps } from './statement
 
 export function buildDefaultStatementIngestDeps(): StatementIngestDeps {
   return {
-    postEntry: (input) => LedgerService.postEntry(input),
+    async postEntry(input) {
+      // postEntryWithOutcome reports the REAL outcome: `created` is false
+      // both when the key was already visible up front and when this call
+      // lost a concurrent race (P2002 recovery) — so race losers are counted
+      // as deduped by the core, never as created.
+      const { entry, created } = await LedgerService.postEntryWithOutcome(input);
+      return { entryId: entry.id, created };
+    },
 
     async findExistingIdempotencyKeys(organizationId, keys) {
       if (keys.length === 0) return new Set<string>();

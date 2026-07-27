@@ -147,7 +147,12 @@ export interface ResolvedStatementAccounts {
  * buildDefaultStatementIngestDeps() (prisma + LedgerService backed).
  */
 export interface StatementIngestDeps {
-  postEntry: (input: JournalEntryInput) => Promise<{ id: string }>;
+  /**
+   * Persist one DRAFT entry. `created: false` means the idempotency key was
+   * already persisted (an idempotent race recovery inside the ledger) — the
+   * row counts as deduped, not created. Same shape as ocr-bridge's postEntry.
+   */
+  postEntry: (input: JournalEntryInput) => Promise<{ entryId: string; created: boolean }>;
   /** Application-level idempotency pre-check: which keys already exist? */
   findExistingIdempotencyKeys: (organizationId: string, keys: string[]) => Promise<Set<string>>;
   resolveStatementAccounts: (organizationId: string) => Promise<ResolvedStatementAccounts>;
@@ -188,7 +193,10 @@ export function parseCsv(text: string): string[][] {
       }
       continue;
     }
-    if (ch === '"') {
+    if (ch === '"' && field === '') {
+      // RFC-4180: a quote opens quoted mode only at the START of a field;
+      // mid-field ('a"b,c') it is a literal character and must not swallow
+      // the delimiter or the row boundary.
       inQuotes = true;
     } else if (ch === ',') {
       row.push(field);
@@ -414,6 +422,18 @@ interface RowCandidate {
   idempotencyKey: string;
 }
 
+/**
+ * Human-readable byte cap for guard messages. maxUploadBytes is publicly
+ * overridable, so sub-MB caps must not floor to "0 MB".
+ */
+function formatByteCap(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1) return Number.isInteger(mb) ? `${mb} MB` : `${mb.toFixed(1)} MB`;
+  const kb = bytes / 1024;
+  if (kb >= 1) return Number.isInteger(kb) ? `${kb} KB` : `${kb.toFixed(1)} KB`;
+  return `${bytes} bytes`;
+}
+
 interface ParsedRowForReconciliation {
   amount: Decimal;
   runningBalanceRaw: string;
@@ -487,7 +507,7 @@ export async function ingestStatement(
   if (csvBuffer.length > cfg.maxUploadBytes) {
     throw new StatementIngestError(
       'FILE_TOO_LARGE',
-      `Statement exceeds the ${Math.floor(cfg.maxUploadBytes / (1024 * 1024))} MB upload limit.`,
+      `Statement exceeds the ${formatByteCap(cfg.maxUploadBytes)} upload limit.`,
     );
   }
 
@@ -609,8 +629,9 @@ export async function ingestStatement(
     candidates.map((candidate) => candidate.idempotencyKey),
   );
   const fresh = candidates.filter((candidate) => !existingKeys.has(candidate.idempotencyKey));
-  // Deduped counts BOTH in-file duplicates and already-ingested keys.
-  const deduped = inFileDuplicates + (candidates.length - fresh.length);
+  // Deduped counts in-file duplicates, already-ingested keys AND idempotent
+  // race recoveries reported by postEntry below (created: false).
+  let deduped = inFileDuplicates + (candidates.length - fresh.length);
 
   // Fiscal-period gate on fresh rows only (deduped rows already booked once).
   // Memoized per UTC day; dates are NEVER clamped into a period — the row
@@ -650,7 +671,7 @@ export async function ingestStatement(
     const creditAccountId = isOutflow ? accounts!.bankAccountId : accounts!.suspenseAccountId;
 
     try {
-      await deps.postEntry({
+      const outcome = await deps.postEntry({
         organizationId: ctx.organizationId,
         date: candidate.date,
         memo: `STATEMENT-INGEST: ${candidate.description.trim() || '(no description)'}`,
@@ -668,9 +689,16 @@ export async function ingestStatement(
           { accountId: creditAccountId, amount: magnitude, isDebit: false, currency: 'LKR' },
         ],
       });
-      created += 1;
-      if (isOutflow) outflowTotal = outflowTotal.plus(magnitude);
-      else inflowTotal = inflowTotal.plus(magnitude);
+      if (outcome.created) {
+        created += 1;
+        if (isOutflow) outflowTotal = outflowTotal.plus(magnitude);
+        else inflowTotal = inflowTotal.plus(magnitude);
+      } else {
+        // Idempotent race recovery: the ledger returned the entry another
+        // writer already persisted — nothing new was booked, so the row is
+        // deduped and stays out of the created totals.
+        deduped += 1;
+      }
     } catch (err) {
       failures.push({
         row: candidate.rowNumber,

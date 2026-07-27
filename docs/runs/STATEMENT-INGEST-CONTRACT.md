@@ -15,8 +15,10 @@ per-transaction idempotency a property of the write path, not of operator care.
 ## §2 Key construction
 
 - **Natural key** (per row): the bank's own transaction ID when the export has an
-  ID column and the cell is non-empty (Wise `TransferWise ID` / `ID`, generic
-  `Transaction ID` / `Reference`). Otherwise:
+  authoritative ID column and the cell is non-empty. Authoritative headers are
+  `TransferWise ID` and `Transaction ID`; a bare `ID` header counts only when the
+  file positively matches the Wise column signature; `Reference` is never
+  accepted (see §6). Otherwise:
 
   `sha256( dateIso | amount | currency | normalizedDescription | runningBalance )`
 
