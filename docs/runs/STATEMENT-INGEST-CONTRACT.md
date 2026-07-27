@@ -71,7 +71,44 @@ Suspense / credit Bank (1000), inflow = debit Bank / credit Suspense, always at
 the absolute amount (decimal.js end-to-end — money never touches `Number`). A
 human recategorizes the Suspense leg during draft review.
 
-## §6 Guards and route mapping
+## §6 Failure modes and guards
+
+**Byte-canonicality is NOT assumed.** The natural key is built from *normalized*
+fields (canonical date/amount forms, whitespace-collapsed lowercased description),
+so two byte-different renderings of the same transaction dedupe correctly — and,
+conversely, two genuinely distinct transactions can render byte-identically in a
+weak export. Normalization plus the two guards below are how both directions stay
+safe:
+
+- **Collision warnings (under-count guard).** When a row's key falls back to the
+  hash AND has no disambiguating component (no bank transaction ID and no
+  running balance — column absent or cell empty), two legitimately identical
+  same-day payments collide to one key. The collapse still happens (the DB
+  unique index would reject the second entry anyway), but each collapsed row is
+  surfaced in `report.collisionWarnings[{row, key, reason}]`: "row N looked
+  identical to row M and was skipped — if these are genuinely two separate
+  payments, they cannot be distinguished without a running-balance or
+  transaction-ID column; fix the export." With a bank ID or a running balance
+  present, silent collapse remains correct (identical balances = the same
+  snapshot repeated).
+
+- **Balance reconciliation invariant (catch-all detector).** When the export has
+  a Running Balance column, `report.reconciliation` compares the signed sum of
+  ALL parsed row amounts (created, deduped and skipped alike — only unparseable
+  rows are excluded, and those already sit in `failures[]`) against the balance
+  walk across the file, Decimal throughout. Balances are balance-AFTER values
+  and files arrive in either order, so the walk is checked in both orientations
+  with the boundary row's own amount added back (a naive `last − first` would
+  false-alarm on every valid file). Shape:
+  `{available, expectedDelta, parsedSum, matches} | null` — null without the
+  column; `available:false` when the boundary balances don't parse. **A
+  mismatch means rows were mis-parsed or the file is internally inconsistent —
+  a human must investigate before trusting the import.** This check is
+  independent of the key layer, so it catches key-drift and collision errors
+  regardless of cause (e.g. a repeated-snapshot duplicate that collapses
+  silently still fails the walk).
+
+## §7 Guards and route mapping
 
 Core guards: 5 MB byte cap (`FILE_TOO_LARGE` → 413), 10,000 data rows
 (`TOO_MANY_ROWS` → 422), parseable CSV (`INVALID_CSV` → 400), header with at
