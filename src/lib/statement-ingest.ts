@@ -93,6 +93,19 @@ export interface StatementColumnMap {
 
 export type StatementSkipReason = 'ZERO_AMOUNT' | 'FX_UNSUPPORTED' | 'NO_FISCAL_PERIOD';
 
+/**
+ * Balance-walk reconciliation (only possible when the export carries a
+ * Running Balance column; null otherwise). `matches` is meaningful only when
+ * `available` is true — unavailable means the boundary balances (or every
+ * row) failed to parse, and a human must inspect the file either way.
+ */
+export interface StatementReconciliation {
+  available: boolean;
+  expectedDelta: string;
+  parsedSum: string;
+  matches: boolean;
+}
+
 export interface StatementIngestReport {
   /** sha256 hex of the uploaded file bytes. */
   statementHash: string;
@@ -104,6 +117,16 @@ export interface StatementIngestReport {
   /** Row numbers are spreadsheet-style: the header is row 1. */
   skipped: { row: number; reason: StatementSkipReason }[];
   failures: { row: number; error: string }[];
+  /**
+   * Under-count guard: rows collapsed as in-file duplicates whose hash key
+   * had NO disambiguating component (no bank ID, no running balance). Two
+   * genuinely separate identical payments would collide to one key — the
+   * collapse still happens (the DB unique index forbids both), but never
+   * silently. `key` is the shared natural key.
+   */
+  collisionWarnings: { row: number; key: string; reason: string }[];
+  /** Balance-walk cross-check; null when no Running Balance column exists. */
+  reconciliation: StatementReconciliation | null;
   /** Sums over CREATED entries only, as 2dp strings (Decimal, never Number). */
   inflowTotal: string;
   outflowTotal: string;
@@ -371,6 +394,62 @@ interface RowCandidate {
   idempotencyKey: string;
 }
 
+interface ParsedRowForReconciliation {
+  amount: Decimal;
+  runningBalanceRaw: string;
+}
+
+/**
+ * Independent catch-all detector: with a Running Balance column present, the
+ * signed sum of ALL parsed row amounts (created, deduped and skipped alike —
+ * only unparseable rows are excluded, and those already sit in failures[])
+ * must equal the balance walk across the file. This catches key-drift,
+ * collision under-counts and mis-parsed rows regardless of cause; a mismatch
+ * means a human must investigate before trusting the import.
+ *
+ * Bank exports carry balance-AFTER-transaction values and come in both
+ * chronological and newest-first order, so the walk is checked in both
+ * orientations: the boundary row whose own amount is already folded into its
+ * balance gets it added back (naive last-minus-first would false-alarm on
+ * every valid file by exactly the first row's amount).
+ */
+function buildReconciliation(
+  hasBalanceColumn: boolean,
+  rows: readonly ParsedRowForReconciliation[],
+): StatementReconciliation | null {
+  if (!hasBalanceColumn) return null;
+
+  const parsedSum = rows.reduce((acc, row) => acc.plus(row.amount), new Decimal(0));
+  const unavailable: StatementReconciliation = {
+    available: false,
+    expectedDelta: '0.00',
+    parsedSum: parsedSum.toFixed(2),
+    matches: false,
+  };
+  if (rows.length === 0) return unavailable;
+
+  const first = rows[0];
+  const last = rows[rows.length - 1];
+  const firstBalance = parseStatementAmount(first.runningBalanceRaw);
+  const lastBalance = parseStatementAmount(last.runningBalanceRaw);
+  if (!firstBalance || !lastBalance) return unavailable;
+
+  const forwardDelta = lastBalance.minus(firstBalance).plus(first.amount);
+  const backwardDelta = firstBalance.minus(lastBalance).plus(last.amount);
+  const matches = parsedSum.equals(forwardDelta) || parsedSum.equals(backwardDelta);
+  // Report the orientation that matched; on mismatch, the chronological one.
+  const expectedDelta = !parsedSum.equals(forwardDelta) && parsedSum.equals(backwardDelta)
+    ? backwardDelta
+    : forwardDelta;
+
+  return {
+    available: true,
+    expectedDelta: expectedDelta.toFixed(2),
+    parsedSum: parsedSum.toFixed(2),
+    matches,
+  };
+}
+
 /**
  * Full pipeline: guards → parse → per-row classify → dedupe (in-file, then
  * ledger pre-check) → fiscal-period gate → DRAFT entries → summary evidence.
@@ -409,6 +488,11 @@ export async function ingestStatement(
 
   const skipped: StatementIngestReport['skipped'] = [];
   const failures: StatementIngestReport['failures'] = [];
+  const collisionWarnings: StatementIngestReport['collisionWarnings'] = [];
+  // Every row that parsed (regardless of later classification) feeds the
+  // balance-walk reconciliation — the check must be independent of the key
+  // and skip layers it is guarding.
+  const parsedRows: ParsedRowForReconciliation[] = [];
 
   // Pass 1 — parse + classify each row, collapsing in-file duplicate keys
   // (layer a): the same transaction listed twice in one export must not
@@ -433,6 +517,10 @@ export async function ingestStatement(
       failures.push({ row: rowNumber, error: `Unparseable amount "${cell(columns.amount)}".` });
       continue;
     }
+    parsedRows.push({
+      amount,
+      runningBalanceRaw: columns.runningBalance === null ? '' : cell(columns.runningBalance),
+    });
     if (amount.isZero()) {
       // Zero-value rows (card notifications, FX quotes) book nothing.
       skipped.push({ row: rowNumber, reason: 'ZERO_AMOUNT' });
@@ -449,18 +537,37 @@ export async function ingestStatement(
       continue;
     }
 
+    const bankTransactionId = columns.id === null ? null : cell(columns.id);
+    const runningBalance =
+      columns.runningBalance === null ? '' : cell(columns.runningBalance).trim();
     const naturalKey = computeNaturalKey({
-      bankTransactionId: columns.id === null ? null : cell(columns.id),
+      bankTransactionId,
       dateIso: date.toISOString().slice(0, 10),
       amount: amount.toString(),
       currency,
       description: cell(columns.description),
-      runningBalance: columns.runningBalance === null ? '' : cell(columns.runningBalance).trim(),
+      runningBalance,
     });
     const idempotencyKey = computeStatementIdempotencyKey(ctx.organizationId, naturalKey);
 
-    if (candidatesByKey.has(idempotencyKey)) {
+    const priorRow = candidatesByKey.get(idempotencyKey);
+    if (priorRow) {
       inFileDuplicates += 1;
+      // Under-count guard: a hash key with NEITHER a bank ID NOR a running
+      // balance cannot tell two legitimately identical same-day payments
+      // apart. Still collapse (the DB unique index would reject the second
+      // entry anyway) but never silently — the operator must fix the export
+      // if these were genuinely distinct.
+      if (!bankTransactionId?.trim() && runningBalance === '') {
+        collisionWarnings.push({
+          row: rowNumber,
+          key: naturalKey,
+          reason:
+            `Row ${rowNumber} looked identical to row ${priorRow.rowNumber} and was skipped — ` +
+            'if these are genuinely two separate payments, they cannot be distinguished ' +
+            'without a running-balance or transaction-ID column; fix the export.',
+        });
+      }
       continue;
     }
     candidatesByKey.set(idempotencyKey, {
@@ -562,6 +669,8 @@ export async function ingestStatement(
     deduped,
     skipped,
     failures,
+    collisionWarnings,
+    reconciliation: buildReconciliation(columns.runningBalance !== null, parsedRows),
     inflowTotal: inflowTotal.toFixed(2),
     outflowTotal: outflowTotal.toFixed(2),
   };
@@ -578,6 +687,8 @@ export async function ingestStatement(
       deduped: report.deduped,
       skipped: report.skipped,
       failures: report.failures,
+      collisionWarnings: report.collisionWarnings,
+      reconciliation: report.reconciliation,
       inflowTotal: report.inflowTotal,
       outflowTotal: report.outflowTotal,
     },
