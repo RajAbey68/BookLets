@@ -77,7 +77,7 @@ WhatsApp .zip ─POST /api/ingest/zip─► ingestZip()
 |---------|------|-------------------------|--------------|------|------------------------|
 | **OCR microservice** | receipt OCR (primary) | `https://ocr-microservice-gamma.vercel.app/ocr` | `OCR_MICROSERVICE_URL` | none observed | **UNSET → hardcoded default; default is LIVE** (`POST /ocr` empty → 400) |
 | **SymbiOS** | receipt OCR (fallback) | `https://api.symbios.ai/api/v1/automation/extract-receipt` | `SYMBIOS_URL` | `SYMBIOS_API_KEY` | **key UNSET → fallback throws if primary down** |
-| ~~**DevServer** (Hermes-built)~~ | — | — | — | — | **Does not exist** — all-repo search 2026-07-19. Gamma is canonical (§8.1) |
+| **DevServer** (Hermes) | bulk/offline OCR worker | `ssh devserver` → `178.105.138.138` | — | ssh key | **EXISTS AND IS LIVE** — corrected 2026-07-27. See §8.1 |
 | **Hostaway** | PMS bookings sync | `https://api.hostaway.com/v1` | `HOSTAWAY_ACCOUNT_ID`, `STRICT_HOSTAWAY` | `HOSTAWAY_CLIENT_ID/SECRET`, `HOSTAWAY_API_KEY` | ⚠️ **LIVE data — revert test bookings** |
 | **Google OAuth** | sign-in | `accounts.google.com` | — | `AUTH_GOOGLE_ID/SECRET` | configured |
 | **Supabase Postgres** | system of record | project `euqdfxekrxnoibeahogq` | `DATABASE_URL` | conn string | live |
@@ -106,7 +106,7 @@ WhatsApp .zip ─POST /api/ingest/zip─► ingestZip()
 
 ## 8. OPEN GAPS — resolve, do not assume (P1 zero-fabrication)
 
-1. **DevServer — RESOLVED (2026-07-19).** All-repo search found **no Hermes-built "DevServer" OCR target**. `ocr-microservice-gamma.vercel.app` is the canonical OCR service: hardcoded default, live. `~/GitHub/ocr-microservice` is its (undeployed) source. No env/URL change needed — gamma is correctly wired.
+1. **DevServer — CORRECTED 2026-07-27. THE EARLIER ENTRY WAS WRONG.** The 2026-07-19 claim that no DevServer exists was based on an ALL-REPO SEARCH — **a repo search cannot find a VPS.** Verified by direct SSH: host `hermes-gateway`, `178.105.138.138` (Hostinger, Ubuntu, 2 vCPU / 3.8 GB, no GPU), always-on. Holds `/root/kolake-data/receipts` (476 files) and a working OCR pipeline at `/root/BookLets/scripts/ocr-pipeline-v4-openrouter.py` (idempotent, retry/backoff, heartbeat). Offline/agent OCR was deliberately built, configured and tested. Repeating the false claim cost a full working session — see RAJ-720. **Absence of evidence in one repo is not absence in the estate.**
 2. **OCR single-homed — REAL GAP.** `OCR_MICROSERVICE_URL` has no fallback URL and `SYMBIOS_API_KEY` is unset, so if gamma is down, receipts stall at `stage:'ocr'` (unextracted, not mis-booked). Fix options: (a) set `SYMBIOS_API_KEY`, or (b) deploy `~/GitHub/ocr-microservice` as a 2nd instance + add an `OCR_MICROSERVICE_FALLBACK_URL` tried before SymbiOS.
 3. **Design-vs-as-built drift** (this doc vs the canon):
    - Canon §4 specifies a separate `booklets_staging` schema; **as-built** stages as **DRAFT `JournalEntry` rows in the `booklets` schema** (debit Suspense 9999 / credit Cash 1000). The dedicated staging schema is *not yet built*.
