@@ -5,6 +5,7 @@ import { fetchOcrStagingSummary } from '@/app/actions/sandbox.actions';
 import DraftReviewQueue from '@/components/DraftReviewQueue';
 import FeedIntoBooksButton from '@/components/FeedIntoBooksButton';
 import SandboxBooksTabs from '@/components/SandboxBooksTabs';
+import StatementUploadCard from '@/components/StatementUploadCard';
 import ZipUploadCard from '@/components/ZipUploadCard';
 import { isStagingOutage } from '@/lib/ocr-bridge.deps';
 import { parkReasonLabel } from '@/lib/park-reason-labels';
@@ -43,12 +44,20 @@ export default async function SandboxPage() {
 
       <SandboxBooksTabs active="sandbox" />
 
-      {/* Raj's "what needs me" panel — same component as the dashboard. */}
+      {/* Raj's "what needs me" panel — same component as the dashboard. It sits
+          above the uploads so the summary of what is outstanding reads before
+          the actions that add more. */}
       <ActionCentre />
 
-      {/* ── Upload + staging pile, side by side ── */}
+      {/* ── Uploads + staging pile, side by side ── */}
+      <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: '0 0 0.75rem' }}>
+        Two ways in: <strong>zip</strong> uploads are WhatsApp receipt exports;{' '}
+        <strong>CSV</strong> uploads are bank statements.
+      </p>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '2.5rem' }}>
         <ZipUploadCard />
+
+        <StatementUploadCard />
 
         <div className="glass-card">
           <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>Staging pile</h3>

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   summarizeZipUploadResponse,
@@ -11,9 +11,11 @@ import {
   type ZipUploadResult,
   type ZipProgress,
 } from '../lib/zip-upload-result';
-
-/** Hard cap so a stuck request never leaves the UI hanging forever. */
-const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+import {
+  DIRECT_UPLOAD_TIMEOUT_MS,
+  MAX_DIRECT_UPLOAD_MB,
+  describeElapsed,
+} from '../lib/upload-limits';
 
 /**
  * Uploads a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
@@ -55,7 +57,9 @@ const NETWORK_ERROR: ZipUploadResult = {
 const TIMEOUT_ERROR: ZipUploadResult = {
   ok: false,
   title: 'Upload timed out',
-  message: 'The import took too long and was cancelled. Re-upload the same export — already-imported receipts are skipped.',
+  message:
+    `The server did not answer within ${Math.round(DIRECT_UPLOAD_TIMEOUT_MS / 60000)} minutes, so the import was ` +
+    'cancelled rather than left hanging. Re-upload the same export — already-imported receipts are skipped.',
   ...EMPTY_COUNTS,
 };
 
@@ -73,6 +77,20 @@ export const WhatsappZipUploader: React.FC = () => {
   const [status, setStatus] = useState<UploaderStatus>('IDLE');
   const [result, setResult] = useState<ZipUploadResult | null>(null);
   const [progress, setProgress] = useState<ZipProgress | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  // A number that visibly moves is the only way to tell a slow import from a
+  // dead one. The original bug looked exactly like "working" for hours.
+  // No synchronous tick here: the trigger site already sets elapsedMs to 0
+  // alongside startedAt, and setState in an effect body cascades an extra
+  // render (react-hooks/set-state-in-effect). The first interval tick lands a
+  // second later, which is exactly what a 0-second reading would have shown.
+  useEffect(() => {
+    if (status !== 'UPLOADING' || startedAt === null) return;
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [status, startedAt]);
 
   const cardClass = ['glass-card', status === 'DONE' ? 'is-success' : ''].filter(Boolean).join(' ');
 
@@ -80,6 +98,8 @@ export const WhatsappZipUploader: React.FC = () => {
     setStatus('IDLE');
     setResult(null);
     setProgress(null);
+    setStartedAt(null);
+    setElapsedMs(0);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -99,9 +119,15 @@ export const WhatsappZipUploader: React.FC = () => {
     setStatus('UPLOADING');
     setResult(null);
     setProgress(null);
+    setStartedAt(Date.now());
+    setElapsedMs(0);
 
+    // Aborting the signal tears down the request at ANY stage — while the body
+    // is still being uploaded, while waiting for headers, and while the NDJSON
+    // reader is blocked on read(). That is what makes an indefinite hang
+    // impossible rather than merely unlikely.
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+    const timeout = setTimeout(() => controller.abort(), DIRECT_UPLOAD_TIMEOUT_MS);
     try {
       const form = new FormData();
       form.append('file', file);
@@ -112,7 +138,10 @@ export const WhatsappZipUploader: React.FC = () => {
         signal: controller.signal,
       });
 
-      // Auth (401) / byte-cap (413) return a plain status + JSON, no stream.
+      // Auth (401) / byte-cap (413) return a plain status, no stream. A 413
+      // raised by the PLATFORM EDGE (body over ~4.5 MB) never reaches our
+      // route at all and its body is plain text, so res.json() throws here —
+      // the summarizer must, and does, stand on the status code alone.
       if (!res.ok || !res.body) {
         let body: unknown = {};
         try {
@@ -198,6 +227,18 @@ export const WhatsappZipUploader: React.FC = () => {
           {(status === 'DONE' || status === 'ERROR') && result?.message}
         </p>
 
+        {status === 'UPLOADING' && (
+          // Deliberately outside the aria-live region above: it ticks every
+          // second and would otherwise spam a screen reader.
+          <p
+            className="uploader-elapsed"
+            style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}
+          >
+            Still working — {describeElapsed(elapsedMs)}. This stops on its own after{' '}
+            {Math.round(DIRECT_UPLOAD_TIMEOUT_MS / 60000)} minutes rather than waiting forever.
+          </p>
+        )}
+
         {status === 'IDLE' && (
           <>
             <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
@@ -211,8 +252,10 @@ export const WhatsappZipUploader: React.FC = () => {
             </label>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.75rem' }}>
               In WhatsApp: open the chat → Export Chat → <strong>Attach Media</strong> → save the .zip.
-              Max {MAX_ZIP_IMAGES} new receipts per upload — for a big backlog, export smaller
-              date ranges (1–2 weeks at a time).
+              The file must be under <strong>{MAX_DIRECT_UPLOAD_MB} MB</strong> (a hosting-platform
+              limit we cannot raise) and hold at most {MAX_ZIP_IMAGES} new receipts, so export
+              short date ranges — 1–2 weeks at a time. Exporting <em>Without Media</em> keeps the
+              file small but contains no receipt photos, so it creates no entries.
             </p>
           </>
         )}

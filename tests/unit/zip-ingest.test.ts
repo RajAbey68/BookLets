@@ -39,6 +39,7 @@ import {
   ingestZip,
   type ZipIngestDeps,
 } from '../../src/lib/zip-ingest';
+import { summarizeZipUploadResponse } from '../../src/lib/zip-upload-result';
 import type { JournalEntryInput } from '../../src/lib/types';
 import type { GeminiOcrResult } from '../../src/lib/gemini-ocr';
 
@@ -730,3 +731,75 @@ describe('S5 zip-ingest — dirty OCR results must not become ledger inputs', ()
   }
 });
 
+
+/**
+ * VERIFICATION — WhatsApp "Export Chat → WITHOUT Media".
+ *
+ * That export is a zip containing only `_chat.txt`. It is the only export
+ * small enough to clear the platform's ~4.5 MB request-body ceiling, so it
+ * was proposed as the interim import path while the transport fix lands.
+ *
+ * These tests pin what it ACTUALLY does today. It does NOT error and it does
+ * NOT hang — but it creates ZERO journal entries, because every draft in this
+ * pipeline originates from OCR of a receipt IMAGE. The chat transcript is
+ * retained as evidence metadata only; no line of it is ever parsed into an
+ * entry. Any UI copy that implies otherwise is a lie, and these tests exist
+ * so that stays visible.
+ */
+describe('WhatsApp "Without Media" export (chat-only zip)', () => {
+  const withoutMediaZip = () => buildZip([{ name: '_chat.txt', data: CHAT_TEXT }]);
+
+  it('ingests without throwing — the archive itself is valid', async () => {
+    const deps = makeDeps();
+    await expect(ingestZip(withoutMediaZip(), CTX, deps)).resolves.toBeDefined();
+  });
+
+  it('creates ZERO journal entries: drafts come from receipt images, never from chat text', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(withoutMediaZip(), CTX, deps);
+
+    expect(report.imageCount).toBe(0);
+    expect(report.created).toBe(0);
+    expect(report.journalEntryIds).toEqual([]);
+    expect(deps.postEntry).not.toHaveBeenCalled();
+    expect(deps.ocr).not.toHaveBeenCalled();
+  });
+
+  it('still records the transcript as evidence, so the upload is not a total no-op', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(withoutMediaZip(), CTX, deps);
+
+    expect(report.textCount).toBe(1);
+    expect(report.chatFiles).toHaveLength(1);
+    expect(report.chatFiles[0].name).toBe('_chat.txt');
+    expect(report.chatFiles[0].messageCount).toBeGreaterThan(0);
+  });
+
+  it('reports no failures and no skips — it is a clean, empty result, not an error', async () => {
+    const report = await ingestZip(withoutMediaZip(), CTX, makeDeps());
+    expect(report.failures).toEqual([]);
+    expect(report.skipped).toEqual([]);
+  });
+
+  it('is summarised to the operator as "no receipts found", not as a success', () => {
+    // Guards against the pipeline silently reading as "Import complete".
+    const report = {
+      zipHash: 'h',
+      totalEntries: 1,
+      imageCount: 0,
+      textCount: 1,
+      skipped: [],
+      created: 0,
+      deduped: 0,
+      failures: [],
+      chatFiles: [{ name: '_chat.txt', sha256: 's', messageCount: 3, participants: ['Kumar'] }],
+      journalEntryIds: [],
+    };
+    const summary = summarizeZipUploadResponse(200, { report });
+
+    expect(summary.created).toBe(0);
+    expect(summary.showReviewLink).toBe(false);
+    expect(summary.title.toLowerCase()).toContain('no receipts');
+    expect(summary.message).toContain('Attach Media');
+  });
+});
