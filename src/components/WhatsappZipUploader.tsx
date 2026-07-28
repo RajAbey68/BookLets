@@ -82,9 +82,12 @@ export const WhatsappZipUploader: React.FC = () => {
 
   // A number that visibly moves is the only way to tell a slow import from a
   // dead one. The original bug looked exactly like "working" for hours.
+  // No synchronous tick here: the trigger site already sets elapsedMs to 0
+  // alongside startedAt, and setState in an effect body cascades an extra
+  // render (react-hooks/set-state-in-effect). The first interval tick lands a
+  // second later, which is exactly what a 0-second reading would have shown.
   useEffect(() => {
     if (status !== 'UPLOADING' || startedAt === null) return;
-    setElapsedMs(Date.now() - startedAt);
     const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
     return () => clearInterval(id);
   }, [status, startedAt]);
