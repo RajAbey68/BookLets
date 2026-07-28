@@ -1,4 +1,9 @@
 import type { ZipIngestReport, IngestFailure } from './zip-ingest';
+import {
+  MAX_DIRECT_UPLOAD_BYTES,
+  OVERSIZE_UPLOAD_HELP,
+  describeOversizeUpload,
+} from './upload-limits';
 
 /**
  * Turns the raw HTTP response from POST /api/ingest/zip into a single,
@@ -22,10 +27,24 @@ export interface ZipUploadResult {
   showReviewLink: boolean;
 }
 
-const MB_LIMIT_HINT = 'That file is over the 100 MB limit.';
+/**
+ * Lead sentence for a 413 whose body told us nothing. Vercel's edge answers an
+ * oversized body with plain text, not JSON, so `res.json()` throws and the
+ * caller has no server message to show — this must stand on its own.
+ */
+const TOO_LARGE_LEAD =
+  'That file was too big to upload — it was rejected in transit and never reached BookLets.';
 
-/** Mirror of the server's MAX_ZIP_UPLOAD_BYTES so we can reject before uploading. */
-export const MAX_ZIP_BYTES = 100 * 1024 * 1024;
+/**
+ * The single, honest upload ceiling. Kept as a named re-export because the
+ * old name is referenced elsewhere; new code should import
+ * MAX_DIRECT_UPLOAD_BYTES from ./upload-limits directly.
+ *
+ * This is NOT a mirror of the server's MAX_ZIP_UPLOAD_BYTES (100 MB) — that
+ * number is unreachable on Vercel and was the cause of the silent-failure
+ * incident. See src/lib/upload-limits.ts for the measured evidence.
+ */
+export const MAX_ZIP_BYTES = MAX_DIRECT_UPLOAD_BYTES;
 
 /**
  * Mirror of the server's MAX_INGEST_IMAGES (zip-ingest.ts) for client copy.
@@ -70,9 +89,14 @@ const NO_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLin
 
 /**
  * Client-side pre-check run before the file leaves the browser. Returns a
- * failure result to display, or `null` when the file is safe to upload — so a
- * 500 MB or wrong-type file never wastes a full multipart round-trip to hit the
- * server's 413/400. The server still enforces the same limits authoritatively.
+ * failure result to display, or `null` when the file is safe to upload.
+ *
+ * The size branch is load-bearing, not cosmetic: a body over the platform
+ * ceiling is killed at the edge before our route runs, so there is no server
+ * error to fall back on and nothing lands in the runtime logs. Catching it
+ * here is the only place the operator can be told the truth immediately.
+ * The server still enforces every limit authoritatively — this is a courtesy,
+ * never a trust boundary.
  */
 export function preflightZipFile(name: string, size: number): ZipUploadResult | null {
   if (!name.toLowerCase().endsWith('.zip')) {
@@ -86,11 +110,11 @@ export function preflightZipFile(name: string, size: number): ZipUploadResult | 
   if (size <= 0) {
     return { ok: false, title: 'Empty file', message: 'That file is empty.', ...NO_COUNTS };
   }
-  if (size > MAX_ZIP_BYTES) {
+  if (size > MAX_DIRECT_UPLOAD_BYTES) {
     return {
       ok: false,
-      title: 'File too large',
-      message: `That file is ${(size / 1024 / 1024).toFixed(1)} MB — over the 100 MB limit.`,
+      title: 'File too large to upload',
+      message: describeOversizeUpload(size),
       ...NO_COUNTS,
     };
   }
@@ -193,8 +217,27 @@ export function summarizeZipUploadResponse(status: number, body: unknown): ZipUp
   switch (status) {
     case 401:
       return { ok: false, title: 'Session expired', message: 'Please sign in again to import.', ...EMPTY_COUNTS };
+    case 403:
+      return {
+        ok: false,
+        title: 'Not allowed',
+        message: errorText(body, "Your role can't upload receipts here."),
+        ...EMPTY_COUNTS,
+      };
+    // 413 arrives from TWO places with two different body shapes:
+    //   • our own route ({ error }) once the request reached the function, and
+    //   • the platform edge, as PLAIN TEXT ("FUNCTION_PAYLOAD_TOO_LARGE"),
+    //     before the function ran at all — `res.json()` throws there, so
+    //     callers hand us `{}` / a raw string / null / undefined.
+    // Either way the operator needs the workaround, so it is always appended
+    // and the raw platform text is never surfaced.
     case 413:
-      return { ok: false, title: 'File too large', message: errorText(body, MB_LIMIT_HINT), ...EMPTY_COUNTS };
+      return {
+        ok: false,
+        title: 'File too large to upload',
+        message: `${errorText(body, TOO_LARGE_LEAD)} ${OVERSIZE_UPLOAD_HELP}`,
+        ...EMPTY_COUNTS,
+      };
     case 400:
       return {
         ok: false,

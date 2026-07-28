@@ -63,7 +63,18 @@ export const MAX_ENTRY_COMPRESSION_RATIO = 100;
 /** Ratio guard noise floor — tiny highly-compressible files are legitimate. */
 export const RATIO_GUARD_MIN_BYTES = 64 * 1024;
 
-/** Cap on the COMPRESSED upload itself (checked by the route handler). */
+/**
+ * Server-side cap on the COMPRESSED upload itself (checked by the route
+ * handler). This is a MEMORY guard for deployments that can actually receive
+ * a body this large (the Docker/standalone target) — it is NOT the number a
+ * browser should trust.
+ *
+ * On Vercel the transport ceiling is far lower: bodies over ~4.5 MB are
+ * rejected at the edge with `413 FUNCTION_PAYLOAD_TOO_LARGE` before this route
+ * is ever invoked. Client-side pre-checks MUST use MAX_DIRECT_UPLOAD_BYTES
+ * from src/lib/upload-limits.ts instead; mirroring this constant into the
+ * browser is what caused the July silent-failure incident.
+ */
 export const MAX_ZIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /** OCR fan-out cap: at most this many in-flight OCR calls per ingest. */
