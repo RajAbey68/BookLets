@@ -10,7 +10,11 @@
  *    render its "staging unavailable" note, not crash;
  *  - fetchOcrStagingSummary (sandbox.actions.ts): bound to the same
  *    OCR_BRIDGE_ORG_ID gate as the bridge route — unset env or a mismatched
- *    org returns "unavailable" WITHOUT touching the staging schema.
+ *    org returns "unavailable" WITHOUT touching the staging schema;
+ *  - the unavailableReason discriminator + isStagingOutage: which of those
+ *    paths is a genuine fault ('query_failed') and which just means the pile
+ *    does not apply to this caller. Callers that alarm the user depend on
+ *    this, so each gate's reason is pinned individually.
  *
  * Mocked Prisma via vi.doMock in the style of ocr-bridge-deps.test.ts — no
  * database, no OCR.
@@ -94,6 +98,7 @@ describe('summarizeOcrStaging', () => {
 
     expect(summary).toEqual({
       available: true,
+      unavailableReason: null,
       importable: 4,
       parked: [
         { reason: 'OCR_FAILED', count: 1 },
@@ -168,11 +173,62 @@ describe('summarizeOcrStaging', () => {
 
     expect(summary).toEqual({
       available: false,
+      // A broken query is a genuine outage, not "this feature is off for you".
+      unavailableReason: 'query_failed',
       importable: 0,
       parked: [],
       alreadyImported: 0,
       total: 0,
     });
+  });
+
+  it('reports query_failed when the counts query returns no row at all', async () => {
+    const { $queryRaw } = setup();
+    $queryRaw.mockResolvedValueOnce([]);
+    const { summarizeOcrStaging } = await import('../../src/lib/ocr-bridge.deps');
+
+    const summary = await summarizeOcrStaging(ORG);
+
+    expect(summary.available).toBe(false);
+    expect(summary.unavailableReason).toBe('query_failed');
+  });
+});
+
+// ─── the outage discriminator (isStagingOutage) ──────────────────────────────
+
+describe('isStagingOutage', () => {
+  it('is false for a healthy summary', async () => {
+    setup();
+    const { isStagingOutage, unavailableStagingSummary } = await import(
+      '../../src/lib/ocr-bridge.deps'
+    );
+    expect(
+      isStagingOutage({ available: true, unavailableReason: null }),
+    ).toBe(false);
+    expect(isStagingOutage(unavailableStagingSummary('query_failed'))).toBe(true);
+  });
+
+  it('is false when the staging pile simply does not apply to this caller', async () => {
+    setup();
+    const { isStagingOutage, unavailableStagingSummary } = await import(
+      '../../src/lib/ocr-bridge.deps'
+    );
+    for (const reason of ['unauthenticated', 'not_configured', 'org_mismatch'] as const) {
+      expect(isStagingOutage(unavailableStagingSummary(reason))).toBe(false);
+    }
+  });
+
+  it('fails LOUD: an unavailable summary with no/unknown reason counts as an outage', async () => {
+    setup();
+    const { isStagingOutage } = await import('../../src/lib/ocr-bridge.deps');
+    expect(isStagingOutage({ available: false, unavailableReason: null })).toBe(true);
+    expect(
+      isStagingOutage({
+        available: false,
+        // A reason added later that nobody classified must not read as calm.
+        unavailableReason: 'something_new_and_unclassified' as never,
+      }),
+    ).toBe(true);
   });
 });
 
@@ -213,11 +269,12 @@ describe('fetchOcrStagingSummary', () => {
     const summary = await fetchOcrStagingSummary();
 
     expect(summary.available).toBe(true);
+    expect(summary.unavailableReason).toBeNull();
     expect(summary.total).toBe(10);
     expect($queryRaw).toHaveBeenCalledTimes(1);
   });
 
-  it('reports unavailable WITHOUT querying staging when OCR_BRIDGE_ORG_ID is unset (e.g. local dev)', async () => {
+  it('reports not_configured WITHOUT querying staging when OCR_BRIDGE_ORG_ID is unset (e.g. local dev)', async () => {
     const { $queryRaw } = setup();
     mockAuth();
     delete process.env.OCR_BRIDGE_ORG_ID;
@@ -226,10 +283,12 @@ describe('fetchOcrStagingSummary', () => {
     const summary = await fetchOcrStagingSummary();
 
     expect(summary.available).toBe(false);
+    // NOT an outage: the bridge is simply not wired up in this deployment.
+    expect(summary.unavailableReason).toBe('not_configured');
     expect($queryRaw).not.toHaveBeenCalled();
   });
 
-  it("reports unavailable WITHOUT querying staging when the caller's org is not the bridge org", async () => {
+  it("reports org_mismatch WITHOUT querying staging when the caller's org is not the bridge org", async () => {
     const { $queryRaw } = setup();
     mockAuth({ organizationId: 'org-other' });
     process.env.OCR_BRIDGE_ORG_ID = ORG;
@@ -238,10 +297,11 @@ describe('fetchOcrStagingSummary', () => {
     const summary = await fetchOcrStagingSummary();
 
     expect(summary.available).toBe(false);
+    expect(summary.unavailableReason).toBe('org_mismatch');
     expect($queryRaw).not.toHaveBeenCalled();
   });
 
-  it('reports unavailable when unauthenticated, touching nothing', async () => {
+  it('reports unauthenticated when unauthenticated, touching nothing', async () => {
     const { $queryRaw } = setup();
     mockAuth({ unauthenticated: true });
     process.env.OCR_BRIDGE_ORG_ID = ORG;
@@ -250,6 +310,19 @@ describe('fetchOcrStagingSummary', () => {
     const summary = await fetchOcrStagingSummary();
 
     expect(summary.available).toBe(false);
+    expect(summary.unavailableReason).toBe('unauthenticated');
     expect($queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('passes a genuine staging query failure through as query_failed', async () => {
+    setup({ queryError: true });
+    mockAuth();
+    process.env.OCR_BRIDGE_ORG_ID = ORG;
+    const { fetchOcrStagingSummary } = await import('../../src/app/actions/sandbox.actions');
+
+    const summary = await fetchOcrStagingSummary();
+
+    expect(summary.available).toBe(false);
+    expect(summary.unavailableReason).toBe('query_failed');
   });
 });

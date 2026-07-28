@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import ActionCentre from '@/components/ActionCentre';
 import { fetchDraftReviewQueue } from '@/app/actions/approval.actions';
 import { fetchOcrStagingSummary } from '@/app/actions/sandbox.actions';
 import DraftReviewQueue from '@/components/DraftReviewQueue';
@@ -6,6 +7,7 @@ import FeedIntoBooksButton from '@/components/FeedIntoBooksButton';
 import SandboxBooksTabs from '@/components/SandboxBooksTabs';
 import StatementUploadCard from '@/components/StatementUploadCard';
 import ZipUploadCard from '@/components/ZipUploadCard';
+import { isStagingOutage } from '@/lib/ocr-bridge.deps';
 import { parkReasonLabel } from '@/lib/park-reason-labels';
 
 // Reads from the database; cannot be rendered at build time.
@@ -42,6 +44,11 @@ export default async function SandboxPage() {
 
       <SandboxBooksTabs active="sandbox" />
 
+      {/* Raj's "what needs me" panel — same component as the dashboard. It sits
+          above the uploads so the summary of what is outstanding reads before
+          the actions that add more. */}
+      <ActionCentre />
+
       {/* ── Uploads + staging pile, side by side ── */}
       <p style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', margin: '0 0 0.75rem' }}>
         Two ways in: <strong>zip</strong> uploads are WhatsApp receipt exports;{' '}
@@ -75,6 +82,13 @@ export default async function SandboxPage() {
               </div>
               <FeedIntoBooksButton />
             </>
+          ) : isStagingOutage(staging) ? (
+            /* A real fault: say so plainly rather than claiming it is switched off. */
+            <p style={{ fontSize: '0.875rem', color: 'var(--warning-color)', margin: 0 }}>
+              Staging could not be read just now — this is a fault, not an empty pile, so
+              treat any receipt counts as unknown until it comes back. Refresh to retry.
+              Zip uploads above still work.
+            </p>
           ) : (
             <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: 0 }}>
               Staging unavailable — the OCR receipt staging area is not connected in this
