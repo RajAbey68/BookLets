@@ -140,8 +140,9 @@ photo 31. Without that, an "overlapping export" is not overlapping, and the dedu
 scenarios would silently pass while testing nothing. (That was a real bug in the
 first version of the generator, found by the overlap scenario itself.)
 
-**The harness detects which upload route the build serves.** `main` has the
-single-request `/api/ingest/zip`; PR #133 replaces it with per-entry uploads to
-`/api/ingest/item` plus `/api/ingest/batch`. Scenarios are written against the
-user-visible outcome — "N receipts became N drafts" — so the same suite runs
-against either, and says which one it found.
+**The harness detects which upload route the build serves.** Before PR #133 the
+only route was the single-request `/api/ingest/zip`; #133 added per-entry uploads
+to `/api/ingest/item` plus `/api/ingest/batch` and left the zip route in place for
+small archives. Scenarios are written against the user-visible outcome — "N
+receipts became N drafts" — so the same suite runs against either, and says which
+one it found. That is what let it run unchanged across #133 landing mid-build.
