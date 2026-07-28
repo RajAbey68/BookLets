@@ -6,6 +6,7 @@ const IconTrendingUp = () => (
 );
 
 import Link from 'next/link';
+import ActionCentre from '@/components/ActionCentre';
 import { ReceiptUploader } from '@/components/ReceiptUploader';
 import { WhatsappZipUploader } from '@/components/WhatsappZipUploader';
 import { getDashboardMetrics, getRevenueTrend } from '@/app/actions/portfolio.actions';
@@ -65,6 +66,9 @@ export default async function Home() {
         </div>
       </div>
       
+      {/* Raj's "what needs me" panel — always above the numbers. */}
+      <ActionCentre />
+
       <div className="stats-grid">
         {/* RAJ-291: ledger-backed money metrics drill down to the journal entries behind them */}
         <Link

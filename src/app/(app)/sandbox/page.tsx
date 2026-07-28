@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import ActionCentre from '@/components/ActionCentre';
 import { fetchDraftReviewQueue } from '@/app/actions/approval.actions';
 import { fetchOcrStagingSummary } from '@/app/actions/sandbox.actions';
 import DraftReviewQueue from '@/components/DraftReviewQueue';
@@ -40,6 +41,9 @@ export default async function SandboxPage() {
       </div>
 
       <SandboxBooksTabs active="sandbox" />
+
+      {/* Raj's "what needs me" panel — same component as the dashboard. */}
+      <ActionCentre />
 
       {/* ── Upload + staging pile, side by side ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '2.5rem' }}>
