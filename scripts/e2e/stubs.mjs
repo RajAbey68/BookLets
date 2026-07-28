@@ -44,16 +44,31 @@ const CATEGORIES = [
 ];
 
 /**
- * The amount the stub will return for a given image — derived from the bytes,
- * so the harness knows the expected ledger total before it uploads anything.
+ * The amount this stub will return for a given image, in WHOLE CENTS.
+ *
+ * Exposed as an integer on purpose. The harness sums it to predict the ledger
+ * total, and that prediction is compared against exact scaled integers read out
+ * of Postgres — so the expected side must never pass through a float either.
+ * Deriving it from the image bytes is what makes the whole assertion possible:
+ * the right answer is knowable before anything is uploaded.
+ */
+export function expectedAmountCents(imageBytes) {
+  const hash = createHash('sha256').update(imageBytes).digest();
+  return 250 + (hash.readUInt32BE(0) % 2_000_000); // 2.50 – 20 002.50
+}
+
+/**
+ * The extraction the stub returns for a given image, in the microservice's own
+ * response shape. `totalAmount` is a JSON number because that is what the real
+ * service sends; the integer-cents form above is the one used for assertions.
  */
 export function expectedExtraction(imageBytes) {
   const hash = createHash('sha256').update(imageBytes).digest();
-  const cents = 250 + (hash.readUInt32BE(0) % 2_000_000); // 2.50 – 20 002.50
+  const cents = expectedAmountCents(imageBytes);
   return {
     vendorName: `Stub Vendor ${hash.readUInt16BE(4) % 500}`,
     date: '2026-07-12',
-    totalAmount: Math.round(cents) / 100,
+    totalAmount: cents / 100,
     categorySuggestion: CATEGORIES[hash[6] % CATEGORIES.length],
     confidence: 0.55 + (hash[7] % 40) / 100,
   };
@@ -95,13 +110,33 @@ export async function startOcrStub(options) {
       state.maxConcurrent = Math.max(state.maxConcurrent, state.inFlight);
       const n = state.calls;
 
-      const finish = (status, body) => {
+      /**
+       * Decrement exactly once, however this request ends.
+       *
+       * The injected-hang path never answers, so it used to leave `inFlight`
+       * permanently elevated — and since `maxConcurrent` is a running maximum,
+       * every later scenario's OCR-concurrency evidence was inflated by the
+       * number of hangs that had happened earlier. Quietly falsified evidence
+       * is worse than no evidence, so the counter is released when the socket
+       * closes (which is exactly when the client gives up on a hung call).
+       */
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
         state.inFlight -= 1;
+      };
+      res.on('close', release);
+
+      const finish = (status, body) => {
+        release();
+        if (res.writableEnded) return;
         res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
       };
 
       if (state.hangEveryNth && n % state.hangEveryNth === 0) {
         // Never answer: exercises the OCR client's own AbortController timeout.
+        // `release` still fires via res 'close' when the client aborts.
         return;
       }
       if (state.latencyMs > 0) await new Promise((r) => setTimeout(r, state.latencyMs));
@@ -137,6 +172,10 @@ export async function startOcrStub(options) {
       Object.assign(state, patch);
     },
     async close() {
+      // Kill keep-alive sockets FIRST: server.close() only stops new
+      // connections and waits for existing ones, so an idle keep-alive socket
+      // (undici holds them open) hangs teardown until the harness looks stuck.
+      server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
     },
   };
@@ -205,7 +244,15 @@ export async function startEdgeProxy({ port, targetPort, limitBytes = VERCEL_BOD
         reject();
         return;
       }
-      upstream.write(chunk);
+      // Honour backpressure. Without this a 28 MB upload is buffered whole in
+      // the proxy's memory whenever the app reads slower than the client
+      // writes, which is both wasteful and unlike the real edge.
+      if (!upstream.write(chunk)) {
+        clientReq.pause();
+        upstream.once('drain', () => {
+          if (!killed) clientReq.resume();
+        });
+      }
     });
     clientReq.on('end', () => {
       if (killed) return;
@@ -222,8 +269,11 @@ export async function startEdgeProxy({ port, targetPort, limitBytes = VERCEL_BOD
       state.enabled = value;
     },
     async close() {
-      await new Promise((resolve) => server.close(resolve));
+      // Drop keep-alive sockets BEFORE awaiting close, not after: server.close
+      // waits for open connections, so the old order could wait forever on a
+      // socket that the very next line was about to destroy.
       server.closeAllConnections?.();
+      await new Promise((resolve) => server.close(resolve));
     },
   };
 }

@@ -126,7 +126,7 @@ This list is printed at the end of every run as well, so it cannot rot silently.
 
 ## How it is put together
 
-```
+```text
 scripts/e2e/
   whatsapp-export.mjs   generates the archive (also a standalone CLI)
   jpeg.mjs              builds genuinely decodable JPEGs at realistic sizes
@@ -139,7 +139,33 @@ scripts/e2e/
   run.mjs               the scenarios and the report
 ```
 
-Two design decisions are worth knowing about:
+### The rule: a scenario never quietly passes
+
+The one thing this harness must never do is exit zero while covering less than
+it reports. So there are exactly three outcomes for any scenario, and "quiet
+pass" is not one of them:
+
+- **it ran** — checks recorded, pass or fail;
+- **it failed** — including because it *could not run*: a missing uploader,
+  Playwright absent, Chromium refusing to launch, a page erroring before the
+  control renders, a transport where no upload completed, a database or server
+  that never came up. All of these are failures, not warnings;
+- **it was skipped by an explicit flag** — currently only `--no-browser` — in
+  which case the headline says so in block capitals and the scenario is listed
+  under "SCENARIOS THAT DID NOT RUN".
+
+Two structural guards back this up. The transport layer refuses to report `ok`
+unless every planned upload actually produced a result (`[].every()` is `true`,
+which is how "nothing uploaded" once looked like "everything succeeded"). And
+the reporter compares what ran against a declared list of expected scenarios,
+failing the run if any is absent — so deleting a scenario, or an early return
+that skips one, cannot pass unnoticed.
+
+`report.json` carries a `coverage` block with `ran`, `skipped`, `missing` and
+`operatorUiExercised`, so a consumer can tell a full pass from a partial one
+without reading the prose.
+
+Two further design decisions are worth knowing about:
 
 **The archive is deterministic by seed, and a photo's bytes depend only on its
 sequence number.** "Photo 31" is byte-identical in every archive that contains

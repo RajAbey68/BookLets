@@ -51,6 +51,7 @@ import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { buildJpeg, makeRng, randomBytes } from './jpeg.mjs';
 
 const SENDERS = ['Raj Abeysinghe', 'Nadeesha', 'Sunil (Caretaker)', 'Ko Lake Ops'];
@@ -369,12 +370,26 @@ function parseArgs(argv) {
   return out;
 }
 
-/** Load real photographs from a directory, sorted so runs are reproducible. */
+/**
+ * Load real photographs from a directory, sorted so runs are reproducible.
+ *
+ * JPEG only, deliberately. `photoName` always emits a `.jpg` name, so a PNG or
+ * HEIC picked up here would be written into the archive under a `.jpg`
+ * extension — bytes and extension disagreeing. The server would then reject it
+ * on magic bytes and the harness would "discover" a bug it had manufactured
+ * itself. Anything else in the directory is skipped with a clear message.
+ */
 export async function loadMediaDir(dir) {
-  const names = (await readdir(dir))
-    .filter((name) => /\.(jpe?g|png|webp|heic)$/i.test(name))
-    .sort();
-  if (names.length === 0) throw new Error(`--media-dir ${dir} contains no images`);
+  const all = await readdir(dir);
+  const names = all.filter((name) => /\.jpe?g$/i.test(name)).sort();
+  const ignored = all.filter((name) => /\.(png|webp|heic|heif)$/i.test(name));
+  if (ignored.length > 0) {
+    console.warn(
+      `[media-dir] ignoring ${ignored.length} non-JPEG image(s): archive entries are named .jpg, so ` +
+        'only JPEG source files can be used. Convert them first if you need them.',
+    );
+  }
+  if (names.length === 0) throw new Error(`--media-dir ${dir} contains no JPEG images`);
   return Promise.all(names.map((name) => readFile(path.join(dir, name))));
 }
 
@@ -410,7 +425,10 @@ async function main() {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL rather than string-concatenating "file://": the naive form
+// breaks for paths with spaces or non-ASCII characters, silently turning the
+// CLI into a no-op when someone runs it from such a directory.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error(err);
     process.exit(1);

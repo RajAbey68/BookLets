@@ -25,12 +25,18 @@
  * Those run only during sign-in, not on subsequent requests, so no import
  * scenario exercises them. If sign-in breaks, this harness will not tell you.
  */
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
-
 /** Auth.js v5 cookie name over plain HTTP (the __Secure- prefix is HTTPS-only). */
 export const SESSION_COOKIE_NAME = 'authjs.session-token';
+
+/**
+ * Auth.js's own encoder, loaded as a real ES module rather than through a
+ * createRequire shim. next-auth ships ESM; going in via CJS interop worked but
+ * relied on the bundler's compatibility layer holding still.
+ */
+async function authEncode() {
+  const { encode } = await import('next-auth/jwt');
+  return encode;
+}
 
 /**
  * Mint a session cookie for `user` that this app will accept.
@@ -40,7 +46,7 @@ export const SESSION_COOKIE_NAME = 'authjs.session-token';
  * resolveActiveContext uses) and `email`.
  */
 export async function mintSessionCookie({ secret, userId, email, name = 'E2E Harness', maxAgeSeconds = 3600 }) {
-  const { encode } = require('next-auth/jwt');
+  const encode = await authEncode();
   const now = Math.floor(Date.now() / 1000);
   const value = await encode({
     secret,
@@ -73,7 +79,7 @@ export async function mintSessionCookie({ secret, userId, email, name = 'E2E Har
  * in the past.)
  */
 export async function mintExpiredSessionCookie({ secret, userId, email }) {
-  const { encode } = require('next-auth/jwt');
+  const encode = await authEncode();
   const value = await encode({
     secret,
     salt: SESSION_COOKIE_NAME,

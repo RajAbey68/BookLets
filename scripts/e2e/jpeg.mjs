@@ -177,7 +177,11 @@ export function buildJpeg({ targetBytes, seed, width = 640, height = 480 }) {
     const payload = Math.max(1, Math.min(MAX_SEGMENT_PAYLOAD, remaining - 4));
     comments.push(segment(0xfffe, randomBytes(chunkSeed, payload)));
     remaining -= payload + 4;
-    chunkSeed = (chunkSeed * 2654435761 + 1) >>> 0;
+    // Math.imul, not `*`: the plain multiply goes through a double and loses
+    // low bits above 2^53, so successive chunk seeds could collide and repeat
+    // the same "random" padding — which would make the file compressible and
+    // stop it behaving like a real photo.
+    chunkSeed = (Math.imul(chunkSeed, 2654435761) + 1) >>> 0;
   }
 
   return Buffer.concat([soi, app0, ...comments, dqt, sof0, dhtDc, dhtAc, sos, entropy, eoi]);

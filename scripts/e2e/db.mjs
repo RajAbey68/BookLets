@@ -145,10 +145,50 @@ export async function ledgerFacts(client, organizationId) {
   };
 }
 
+/** Money scale of JournalLine.amount — Decimal(19,4). */
+export const MONEY_SCALE = 4;
+
+/**
+ * Turn a Decimal(19,4) value into an exact scaled integer (ten-thousandths).
+ *
+ * Parsed from the STRING, digit by digit. The previous version did
+ * `BigInt(Math.round(Number(amount) * 10_000))`, which routes the money check
+ * through a binary float on its way to claiming exactness — and Decimal(19,4)
+ * ranges up to 10^15, far past the 2^53 where that stops being safe. A balance
+ * assertion that can itself drift is not a balance assertion.
+ *
+ * Throws on anything that is not a plain decimal (including exponent notation
+ * a driver might produce): failing loudly beats silently comparing nonsense.
+ */
+export function toScaledMoney(value, scale = MONEY_SCALE) {
+  const raw = typeof value === 'string' ? value.trim() : String(value).trim();
+  const match = /^([+-]?)(\d+)(?:\.(\d*))?$/.exec(raw);
+  if (!match) {
+    throw new Error(`Refusing to compare "${raw}" as money: not a plain decimal string.`);
+  }
+  const [, sign, whole, fraction = ''] = match;
+  if (fraction.length > scale) {
+    throw new Error(`"${raw}" has more than ${scale} decimal places; the column is Decimal(19,${scale}).`);
+  }
+  return BigInt((sign === '-' ? '-' : '') + whole + fraction.padEnd(scale, '0'));
+}
+
+/** Render a scaled integer back to a human decimal string, exactly. */
+export function formatScaledMoney(scaled, scale = MONEY_SCALE) {
+  const negative = scaled < 0n;
+  const digits = (negative ? -scaled : scaled).toString().padStart(scale + 1, '0');
+  const whole = digits.slice(0, -scale);
+  const fraction = digits.slice(-scale);
+  return `${negative ? '-' : ''}${whole}.${fraction}`;
+}
+
 /**
  * Double-entry integrity, checked directly: every entry has at least two
  * lines and its debits equal its credits. An import that creates the right
  * NUMBER of unbalanced entries is still a broken import.
+ *
+ * All arithmetic is exact integer arithmetic on the scaled values — no float
+ * is involved at any point.
  */
 export function findUnbalancedEntries(facts) {
   const bad = [];
@@ -160,17 +200,26 @@ export function findUnbalancedEntries(facts) {
     }
     let net = 0n;
     for (const line of lines) {
-      // Decimal(19,4) comes back as a string; compare in integer ten-thousandths
-      // so floating point can never be the reason a ledger looks balanced.
-      const scaled = BigInt(Math.round(Number(line.amount) * 10_000));
+      const scaled = toScaledMoney(line.amount);
       net += line.isDebit ? scaled : -scaled;
     }
-    if (net !== 0n) bad.push({ id: entry.id, reason: `unbalanced by ${Number(net) / 10_000}` });
-    if (lines.some((l) => Number(l.amount) <= 0)) {
+    if (net !== 0n) bad.push({ id: entry.id, reason: `unbalanced by ${formatScaledMoney(net)}` });
+    if (lines.some((l) => toScaledMoney(l.amount) <= 0n)) {
       bad.push({ id: entry.id, reason: 'line amount <= 0' });
     }
   }
   return bad;
+}
+
+/** Exact sum of every debit line, in scaled integer units. */
+export function sumDebitsScaled(facts) {
+  let total = 0n;
+  for (const lines of facts.linesByEntry.values()) {
+    for (const line of lines) {
+      if (line.isDebit) total += toScaledMoney(line.amount);
+    }
+  }
+  return total;
 }
 
 /** Duplicate idempotency keys — the money-correctness canary. */

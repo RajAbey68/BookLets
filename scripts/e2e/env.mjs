@@ -90,9 +90,24 @@ function run(command, args, options = {}) {
     });
     child.on('error', reject);
     child.on('close', (code) =>
-      code === 0 ? resolve(out) : reject(new Error(`${command} ${args.join(' ')} exited ${code}\n${err || out}`)),
+      code === 0
+        ? resolve(out)
+        : reject(new Error(`${command} ${args.map(redactSecrets).join(' ')} exited ${code}\n${redactSecrets(err || out)}`)),
     );
   });
+}
+
+/**
+ * Strip credentials out of anything about to be printed.
+ *
+ * `psql` is invoked with a full connection URL in argv, and the failure path
+ * formats argv into the rejection message — which lands in the console, in
+ * report.json, and in CI logs. A local harness password is not a catastrophe,
+ * but leaking whatever is in DATABASE_URL because a command exited non-zero is
+ * a bad habit to build into shared tooling.
+ */
+function redactSecrets(text) {
+  return String(text).replace(/(\w+:\/\/[^:@\s/]+):[^@\s/]+@/g, '$1:***@');
 }
 
 /**
@@ -134,6 +149,11 @@ function assertSafeDatabaseName(database) {
  */
 export async function startPostgres({ port = 55432, database = 'booklets_e2e', log = console.log }) {
   assertSafeDatabaseName(database);
+  // `port` is interpolated into pg_ctl's -o string, which `postgres` re-parses
+  // as options. An integer cannot inject anything; anything else might.
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Refusing to start Postgres on "${port}": not a valid port number.`);
+  }
   const url = `postgresql://postgres@127.0.0.1:${port}/${database}`;
 
   // `docker info` both proves the binary exists (spawn rejects ENOENT) and that
@@ -155,11 +175,28 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
     } else {
       await run('docker', ['start', name]).catch(() => {});
     }
-    for (let i = 0; i < 60; i += 1) {
-      const ready = await run('docker', ['exec', name, 'pg_isready', '-U', 'postgres']).then(() => true, () => false);
-      if (ready) break;
-      await new Promise((r) => setTimeout(r, 1000));
+    // A readiness loop that falls through when its budget runs out hands the
+    // caller a database that never came up, and every "test" after that is
+    // noise wearing the costume of a result. Never proceed unready.
+    let ready = false;
+    for (let i = 0; i < 60 && !ready; i += 1) {
+      ready = await run('docker', ['exec', name, 'pg_isready', '-U', 'postgres']).then(() => true, () => false);
+      if (!ready) await new Promise((r) => setTimeout(r, 1000));
     }
+    if (!ready) {
+      throw new Error(
+        `Docker Postgres "${name}" did not accept connections within 60s. The harness will not run ` +
+          'against a database that never started.',
+      );
+    }
+    // Match the local-cluster branch: create the database we were asked for
+    // rather than depending on POSTGRES_DB, which only takes effect on a
+    // container's FIRST start and silently does nothing on a reused one.
+    await run('docker', [
+      'exec', name, 'psql', '-U', 'postgres', '-c', `CREATE DATABASE "${database}"`,
+    ]).catch(() => {
+      /* already exists — the only expected failure here */
+    });
     return { url, kind: 'docker', async stop() { /* container is reused between runs */ } };
   }
 
@@ -175,15 +212,11 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
   // mkdtemp creates the directory 0700 and owned by us, with an unguessable
   // suffix — no other user can pre-create or symlink it out from under us.
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-pg-'));
-  const runDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-sock-'));
 
   // Drop privileges through spawn, never through a shell.
   const pgUser = await resolvePostgresUser();
   const asPg = pgUser ? { uid: pgUser.uid, gid: pgUser.gid } : {};
-  if (pgUser) {
-    await chown(dataDir, pgUser.uid, pgUser.gid);
-    await chown(runDir, pgUser.uid, pgUser.gid);
-  }
+  if (pgUser) await chown(dataDir, pgUser.uid, pgUser.gid);
 
   log(`[env] initialising local postgres cluster in ${dataDir}`);
   await run(path.join(binDir, 'initdb'), ['-D', dataDir, '-U', 'postgres', '--auth=trust'], asPg);
@@ -191,9 +224,22 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
     path.join(binDir, 'pg_ctl'),
     [
       '-D', dataDir,
-      // pg_ctl's own -o takes ONE string of postgres options. It is parsed by
-      // pg_ctl, not by a shell, so passing it as a single argv element is safe.
-      '-o', `-p ${port} -k ${runDir} -c listen_addresses=127.0.0.1`,
+      /**
+       * `-o` is ONE argv element, but that is not the whole story: pg_ctl hands
+       * this string on to `postgres`, which parses it AGAIN as command-line
+       * options. That second parsing boundary is the hazard — anything
+       * interpolated here that could contain a space injects extra PostgreSQL
+       * flags, no shell required.
+       *
+       * So NOTHING path-shaped goes in here. An earlier version passed
+       * `-k ${runDir}` (a private Unix-socket directory under os.tmpdir(), i.e.
+       * derived from TMPDIR); a TMPDIR containing a space would have split it.
+       * The socket directory was never used — every connection in this harness
+       * is TCP to 127.0.0.1, including pg_ctl's own readiness wait and the psql
+       * calls below — so it is simply gone. `port` is asserted to be an integer
+       * above, and the rest is a literal.
+       */
+      '-o', `-p ${port} -c listen_addresses=127.0.0.1`,
       '-l', path.join(dataDir, 'server.log'),
       'start',
     ],
@@ -211,7 +257,6 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
     async stop() {
       await run(path.join(binDir, 'pg_ctl'), ['-D', dataDir, '-m', 'immediate', 'stop'], asPg).catch(() => {});
       await rm(dataDir, { recursive: true, force: true }).catch(() => {});
-      await rm(runDir, { recursive: true, force: true }).catch(() => {});
     },
   };
 }
@@ -294,11 +339,26 @@ export async function startNextServer({ port, databaseUrl, env, log = console.lo
   child.stderr.on('data', capture);
 
   const base = `http://127.0.0.1:${port}`;
-  for (let i = 0; i < 120; i += 1) {
-    const ok = await fetch(`${base}/api/health`).then((r) => r.status < 500, () => false);
-    if (ok) break;
+  // As with the database readiness loop: falling through on exhaustion would
+  // hand every scenario a server that never came up, and they would then
+  // "fail" for reasons that have nothing to do with the product. Refuse to
+  // return anything but a server that answered.
+  let serving = false;
+  for (let i = 0; i < 120 && !serving; i += 1) {
+    serving = await fetch(`${base}/api/health`).then((r) => r.status < 500, () => false);
+    if (serving) break;
     if (child.exitCode !== null) throw new Error(`next start exited ${child.exitCode}\n${logLines.join('')}`);
     await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!serving) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch {
+      /* already gone */
+    }
+    throw new Error(
+      `next start never answered /api/health on :${port} within 60s.\n${logLines.join('').slice(-4000)}`,
+    );
   }
 
   return {

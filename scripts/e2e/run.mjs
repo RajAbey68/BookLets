@@ -18,7 +18,7 @@ import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { buildWhatsappExport } from './whatsapp-export.mjs';
-import { startOcrStub, startEdgeProxy, expectedExtraction, VERCEL_BODY_LIMIT_BYTES } from './stubs.mjs';
+import { startOcrStub, startEdgeProxy, expectedAmountCents, VERCEL_BODY_LIMIT_BYTES } from './stubs.mjs';
 import { mintSessionCookie, mintExpiredSessionCookie } from './session.mjs';
 import {
   connect,
@@ -29,6 +29,9 @@ import {
   findDuplicateKeys,
   ensureFiscalPeriod,
   clearFiscalPeriods,
+  sumDebitsScaled,
+  toScaledMoney,
+  formatScaledMoney,
 } from './db.mjs';
 import {
   assertDisposableDatabase,
@@ -59,13 +62,30 @@ const args = Object.fromEntries(
     }),
 );
 
+/**
+ * Numeric flag, or a clear error. `Number('abc')` is NaN, and NaN propagates
+ * quietly into archive sizes and port numbers — producing an empty archive or a
+ * server that never binds, and a run that "fails" for reasons no one can trace
+ * back to a typo on the command line.
+ */
+function numericArg(name, raw, fallback, { integer = false, min = Number.EPSILON } = {}) {
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < min || (integer && !Number.isInteger(value))) {
+    throw new Error(`--${name}=${raw} is not a valid ${integer ? 'whole ' : ''}number >= ${min}.`);
+  }
+  return value;
+}
+
 const QUICK = args.quick === 'true';
 const CONFIG = {
-  images: Number(args.images ?? (QUICK ? 24 : 120)),
-  totalMb: Number(args['total-mb'] ?? (QUICK ? 6 : 28.5)),
-  ocrLatencyMs: Number(args['ocr-latency'] ?? (QUICK ? 50 : 400)),
-  basePort: Number(args.port ?? 3310),
-  dbPort: Number(args['db-port'] ?? 55432),
+  images: numericArg('images', args.images, QUICK ? 24 : 120, { integer: true }),
+  totalMb: numericArg('total-mb', args['total-mb'], QUICK ? 6 : 28.5),
+  // 0 is meaningful here: it models an instant OCR service, which is how the
+  // rate-limiter scenario provokes the token bucket.
+  ocrLatencyMs: numericArg('ocr-latency', args['ocr-latency'], QUICK ? 50 : 400, { integer: true, min: 0 }),
+  basePort: numericArg('port', args.port, 3310, { integer: true }),
+  dbPort: numericArg('db-port', args['db-port'], 55432, { integer: true }),
   skipBuild: args['skip-build'] === 'true',
   skipBrowser: args['no-browser'] === 'true',
   keepDb: args['keep-db'] === 'true',
@@ -112,10 +132,27 @@ function finish() {
   if (currentScenario) currentScenario.elapsedMs = Date.now() - currentScenario.startedAt;
 }
 
+/**
+ * Record a scenario that did NOT run because a flag asked for it.
+ *
+ * This is the ONLY honest way for a scenario not to execute. Anything else —
+ * a missing element, an absent capability, a swallowed exception — is a
+ * failure, because it means a path went untested while the run still looked
+ * healthy. A skipped scenario is reported in the headline, not buried.
+ */
+function skipScenario(id, title, reason) {
+  currentScenario = { id, title, checks: [], skipped: true, reason, startedAt: Date.now(), elapsedMs: 0 };
+  scenarios.push(currentScenario);
+  log(`\n── ${id} — ${title}`);
+  record('SKIPPED', `${id} did not run`, reason);
+  currentScenario = null;
+}
+
 function record(severity, title, detail, evidence) {
   const finding = { scenario: currentScenario?.id ?? 'setup', severity, title, detail, evidence };
   findings.push(finding);
-  const mark = severity === 'FAIL' ? 'FAIL' : severity === 'WARN' ? 'WARN' : 'INFO';
+  const mark =
+    severity === 'FAIL' ? 'FAIL' : severity === 'WARN' ? 'WARN' : severity === 'SKIPPED' ? 'SKIP' : 'INFO';
   log(`   [${mark}] ${title}${detail ? ` — ${detail}` : ''}`);
   return finding;
 }
@@ -148,51 +185,71 @@ async function main() {
   await assertPortFree(PORTS.next, 'next start');
   await assertPortFree(PORTS.ocr, 'OCR stub');
 
-  const databaseUrl = process.env.E2E_DATABASE_URL ?? null;
-  let pg = null;
-  let dbUrl = databaseUrl;
-  if (!dbUrl) {
-    pg = await startPostgres({ port: CONFIG.dbPort, database: 'booklets_e2e', log });
-    dbUrl = pg.url;
-  }
-  assertDisposableDatabase(dbUrl);
-  await applySchema(dbUrl, { log });
-
-  const db = await connect(dbUrl);
-  await provisionOrg(db, ORG);
-
-  const ocr = await startOcrStub({ port: PORTS.ocr, latencyMs: CONFIG.ocrLatencyMs });
-  const server = await startNextServer({
-    port: PORTS.next,
-    databaseUrl: dbUrl,
-    skipBuild: CONFIG.skipBuild,
-    log,
-    env: {
-      AUTH_SECRET,
-      AUTH_URL: `http://127.0.0.1:${PORTS.edge}`,
-      NEXTAUTH_URL: `http://127.0.0.1:${PORTS.edge}`,
-      AUTH_ALLOWED_EMAILS: ORG.email,
-      AUTH_GOOGLE_ID: 'e2e-harness-client-id',
-      AUTH_GOOGLE_SECRET: 'e2e-harness-client-secret',
-      OCR_MICROSERVICE_URL: `http://127.0.0.1:${PORTS.ocr}`,
-      OCR_TIMEOUT_MS: '20000',
-    },
-  });
-  const edge = await startEdgeProxy({ port: PORTS.edge, targetPort: PORTS.next });
-  const baseUrl = `http://127.0.0.1:${PORTS.edge}`;
-
-  const session = await mintSessionCookie({ secret: AUTH_SECRET, userId: ORG.userId, email: ORG.email });
-  const expired = await mintExpiredSessionCookie({ secret: AUTH_SECRET, userId: ORG.userId, email: ORG.email });
-
+  /**
+   * Teardown stack. Each resource registers itself the moment it exists, so a
+   * throw part-way through setup still tears down everything already started.
+   * Previously a failure after (say) the OCR stub bound its port left that
+   * port held, and the NEXT run then tripped the port-in-use guard for a
+   * reason that had nothing to do with the real problem.
+   */
+  const teardown = [];
+  const onCleanup = (label, fn) => teardown.push({ label, fn });
   const cleanup = async () => {
-    await edge.close().catch(() => {});
-    await server.stop().catch(() => {});
-    await ocr.close().catch(() => {});
-    await db.end().catch(() => {});
-    if (pg && !CONFIG.keepDb) await pg.stop().catch(() => {});
+    // Reverse order: last started, first stopped.
+    for (const { label, fn } of teardown.reverse()) {
+      await Promise.resolve()
+        .then(fn)
+        .catch((err) => log(`[env] teardown of ${label} failed: ${String(err?.message ?? err)}`));
+    }
   };
 
+  let server = null;
   try {
+    const databaseUrl = process.env.E2E_DATABASE_URL ?? null;
+    let dbUrl = databaseUrl;
+    if (!dbUrl) {
+      const pg = await startPostgres({ port: CONFIG.dbPort, database: 'booklets_e2e', log });
+      dbUrl = pg.url;
+      onCleanup('postgres', async () => {
+        if (!CONFIG.keepDb) await pg.stop();
+      });
+    }
+    assertDisposableDatabase(dbUrl);
+    await applySchema(dbUrl, { log });
+
+    const db = await connect(dbUrl);
+    onCleanup('db connection', () => db.end());
+    await provisionOrg(db, ORG);
+
+    const ocr = await startOcrStub({ port: PORTS.ocr, latencyMs: CONFIG.ocrLatencyMs });
+    onCleanup('ocr stub', () => ocr.close());
+
+    server = await startNextServer({
+      port: PORTS.next,
+      databaseUrl: dbUrl,
+      skipBuild: CONFIG.skipBuild,
+      log,
+      env: {
+        AUTH_SECRET,
+        AUTH_URL: `http://127.0.0.1:${PORTS.edge}`,
+        NEXTAUTH_URL: `http://127.0.0.1:${PORTS.edge}`,
+        AUTH_ALLOWED_EMAILS: ORG.email,
+        AUTH_GOOGLE_ID: 'e2e-harness-client-id',
+        AUTH_GOOGLE_SECRET: 'e2e-harness-client-secret',
+        OCR_MICROSERVICE_URL: `http://127.0.0.1:${PORTS.ocr}`,
+        OCR_TIMEOUT_MS: '20000',
+      },
+    });
+    const startedServer = server;
+    onCleanup('next server', () => startedServer.stop());
+
+    const edge = await startEdgeProxy({ port: PORTS.edge, targetPort: PORTS.next });
+    onCleanup('edge proxy', () => edge.close());
+    const baseUrl = `http://127.0.0.1:${PORTS.edge}`;
+
+    const session = await mintSessionCookie({ secret: AUTH_SECRET, userId: ORG.userId, email: ORG.email });
+    const expired = await mintExpiredSessionCookie({ secret: AUTH_SECRET, userId: ORG.userId, email: ORG.email });
+
     await runScenarios({ baseUrl, session, expired, db, ocr, edge, server });
   } finally {
     await writeReport(startedAt, server);
@@ -223,6 +280,14 @@ async function runScenarios(ctx) {
   info(
     'transports served by this build',
     transports.available.join(', ') || 'none',
+    transports,
+  );
+  // No upload route at all means every scenario below is testing nothing.
+  // Say so as a failure rather than letting the run limp on looking busy.
+  check(
+    transports.available.length > 0,
+    'this build serves at least one receipt-upload route',
+    transports.available.length > 0 ? transports.available.join(', ') : 'NONE — nothing below can be meaningful',
     transports,
   );
   const primary = transports.available.includes(TRANSPORT_ITEM) ? TRANSPORT_ITEM : TRANSPORT_ZIP;
@@ -419,11 +484,18 @@ async function runScenarios(ctx) {
       bulk.body,
     );
   }
+  // `bulk.ok` only — NOT `|| status === 200`. The transport now refuses to
+  // report ok unless every planned upload actually produced a result, and
+  // accepting a bare 200 here would step straight back around that guard.
   check(
-    bulk.ok || bulk.status === 200,
+    bulk.ok,
     'the import completed rather than erroring out',
-    `status ${bulk.status}`,
-    bulk.body ?? bulk.batchResult,
+    `status ${bulk.status}` +
+      (bulk.expectedUploads !== undefined
+        ? `, ${bulk.attemptedUploads}/${bulk.expectedUploads} uploads completed` +
+          (bulk.transportErrors?.length ? `, ${bulk.transportErrors.length} transport errors` : '')
+        : ''),
+    bulk.body ?? bulk.batchResult ?? bulk.transportErrors,
   );
   const bulkFailures = collectFailureReasons(bulk);
   check(
@@ -432,9 +504,14 @@ async function runScenarios(ctx) {
     bulkFailures.length ? `${bulkFailures.length} rejected — e.g. ${bulkFailures[0]}` : 'none',
     bulkFailures.slice(0, 5),
   );
+  // Assert against what the archive ACTUALLY contains, not the requested count:
+  // the generator clamps photo sizes to WhatsApp's real band, so a pathological
+  // --images/--total-mb combination can yield a different number of photos, and
+  // checking the request rather than the artefact would test the wrong thing.
+  const expectedPhotos = real.manifest.photoCount;
   check(
-    facts.draftCount === CONFIG.images,
-    `all ${CONFIG.images} receipts became DRAFT journal entries in the database`,
+    facts.draftCount === expectedPhotos,
+    `all ${expectedPhotos} receipts became DRAFT journal entries in the database`,
     `database has ${facts.draftCount} DRAFT rows`,
     { byStatus: facts.byStatus },
   );
@@ -454,19 +531,23 @@ async function runScenarios(ctx) {
   const dupKeys = findDuplicateKeys(facts);
   check(dupKeys.length === 0, 'no duplicate idempotency keys were written', `${dupKeys.length} duplicated`, dupKeys.slice(0, 5));
 
-  // The amounts are deterministic, so the ledger total is knowable in advance.
-  const expectedTotal = real.manifest.photos.reduce((sum, photo) => {
-    const bytes = photoBytesFor(real, photo.name);
-    return sum + expectedExtraction(bytes).totalAmount;
-  }, 0);
-  const actualDebits = [...facts.linesByEntry.values()]
-    .flat()
-    .filter((l) => l.isDebit)
-    .reduce((sum, l) => sum + Number(l.amount), 0);
+  // The amounts are deterministic, so the ledger total is knowable in advance —
+  // and BOTH sides of this comparison are exact integers. The expected side sums
+  // whole cents from the stub; the actual side parses the Decimal(19,4) strings
+  // straight into scaled integers. Nothing here touches a float, so "the money
+  // matches to the cent" is a claim that can be made literally rather than
+  // within some tolerance that quietly hides a drift.
+  const expectedCents = real.manifest.photos.reduce(
+    (sum, photo) => sum + BigInt(expectedAmountCents(photoBytesFor(real, photo.name))),
+    0n,
+  );
+  const expectedScaled = expectedCents * 100n; // cents → ten-thousandths
+  const actualScaled = sumDebitsScaled(facts);
   check(
-    Math.abs(actualDebits - expectedTotal) < 0.01,
-    'the money in the ledger equals the money the receipts said',
-    `expected ${expectedTotal.toFixed(2)}, ledger ${actualDebits.toFixed(2)}`,
+    actualScaled === expectedScaled,
+    'the money in the ledger equals the money the receipts said, to the cent',
+    `expected ${formatScaledMoney(expectedScaled)}, ledger ${formatScaledMoney(actualScaled)}` +
+      (actualScaled === expectedScaled ? '' : ` (out by ${formatScaledMoney(actualScaled - expectedScaled)})`),
   );
 
   // The operator's on-screen number and the permanent audit row are produced by
@@ -537,11 +618,22 @@ async function runScenarios(ctx) {
   const afterSecond = await ledgerFacts(db, ORG.orgId);
   const newIds = afterSecond.entries.filter((e) => !beforeIds.has(e.id));
 
+  // Prove the second import HAPPENED before concluding anything from the fact
+  // that it added nothing. Without this, an import that never ran at all would
+  // satisfy "created zero new entries" perfectly.
+  check(
+    second.ok,
+    'the repeat import actually ran',
+    `status ${second.status}` +
+      (second.expectedUploads !== undefined ? `, ${second.attemptedUploads}/${second.expectedUploads} uploads` : ''),
+    second.body ?? second.transportErrors,
+  );
   check(newIds.length === 0, 'the second import created zero new journal entries', `${newIds.length} new rows`, newIds.slice(0, 5));
   check(
-    (second.reported?.created ?? 0) === 0,
-    'the operator is told nothing new was imported',
-    `reported created=${second.reported?.created}, deduped=${second.reported?.deduped}`,
+    second.reported?.created === 0 && second.reported?.deduped === expectedPhotos,
+    'the operator is told every receipt was already in the books',
+    `reported created=${second.reported?.created}, deduped=${second.reported?.deduped} of ${expectedPhotos}`,
+    second.reported,
   );
   check(
     ocr.state.calls === 0,
@@ -625,19 +717,23 @@ async function runScenarios(ctx) {
     });
     const afterResume = await ledgerFacts(db, ORG.orgId);
     check(
-      afterResume.draftCount === CONFIG.images,
+      afterResume.draftCount === expectedPhotos,
       're-running finishes the job',
-      `${afterResume.draftCount} of ${CONFIG.images} receipts in the books`,
+      `${afterResume.draftCount} of ${expectedPhotos} receipts in the books`,
     );
     check(
       findDuplicateKeys(afterResume).length === 0,
       'resuming duplicated nothing',
       `${findDuplicateKeys(afterResume).length} duplicated keys`,
     );
+    // No `?? 0`: a resumed run that reported nothing at all must not be able to
+    // satisfy "reports only what it actually added" by arithmetic accident.
     check(
-      (resumed.reported?.created ?? 0) + midway.draftCount === CONFIG.images,
+      Number.isInteger(resumed.reported?.created) &&
+        resumed.reported.created + midway.draftCount === expectedPhotos,
       'the resumed run reports only what it actually added',
-      `${midway.draftCount} before + ${resumed.reported?.created} reported = ${midway.draftCount + (resumed.reported?.created ?? 0)}`,
+      `${midway.draftCount} before + ${resumed.reported?.created} reported, expected ${expectedPhotos}`,
+      resumed.reported,
     );
   } else {
     // The single-request transport is all-or-nothing from the browser's point
@@ -667,9 +763,9 @@ async function runScenarios(ctx) {
     const afterResume = await ledgerFacts(db, ORG.orgId);
     edge.setEnabled(true);
     check(
-      afterResume.draftCount === CONFIG.images,
+      afterResume.draftCount === expectedPhotos,
       're-running after an interrupted import finishes the job',
-      `${afterResume.draftCount} of ${CONFIG.images}`,
+      `${afterResume.draftCount} of ${expectedPhotos}`,
     );
     check(
       findDuplicateKeys(afterResume).length === 0,
@@ -677,9 +773,11 @@ async function runScenarios(ctx) {
       `${findDuplicateKeys(afterResume).length} duplicated keys`,
     );
     check(
-      (resumed.reported?.created ?? 0) === CONFIG.images - midway.draftCount,
+      Number.isInteger(resumed.reported?.created) &&
+        resumed.reported.created === expectedPhotos - midway.draftCount,
       'the retry reports only the receipts it actually added',
-      `reported ${resumed.reported?.created}, actually missing ${CONFIG.images - midway.draftCount}`,
+      `reported ${resumed.reported?.created}, actually missing ${expectedPhotos - midway.draftCount}`,
+      resumed.reported,
     );
   }
   finish();
@@ -806,11 +904,25 @@ async function runScenarios(ctx) {
   ocr.configure({ failEveryNth: 0 });
   edge.setEnabled(true);
   const outageFacts = await ledgerFacts(db, ORG.orgId);
+  // The point of this scenario is that the operator is TOLD. The previous
+  // form was `(reported?.failed ?? 0) === 4 || draftCount === 0`, which passed
+  // whenever nothing was created — including when the run reported nothing at
+  // all. "Silence" was the very thing under test, and silence satisfied it.
+  // Now the reported failure count must actually be there and be right.
+  const outageReportedFailures = outage.reported?.failed;
   check(
-    (outage.reported?.failed ?? 0) === 4 || outageFacts.draftCount === 0,
-    'a total OCR outage ends the run with named failures rather than silence',
-    `reported failed=${outage.reported?.failed}, drafts created=${outageFacts.draftCount}`,
+    outageReportedFailures === outageArchive.manifest.photoCount,
+    'a total OCR outage ends the run by naming every receipt it could not read',
+    `reported failed=${String(outageReportedFailures)} of ${outageArchive.manifest.photoCount}, ` +
+      `drafts created=${outageFacts.draftCount}`,
     outage.reported,
+  );
+  const outageNamed = collectFailureReasons(outage);
+  check(
+    outageNamed.length === outageArchive.manifest.photoCount,
+    'each failed receipt is named, so the operator knows which ones need attention',
+    `${outageNamed.length} named — e.g. ${outageNamed[0] ?? '(none)'}`,
+    outageNamed.slice(0, 3),
   );
   check(
     outageFacts.draftCount === 0,
@@ -833,7 +945,7 @@ async function runScenarios(ctx) {
   ocr.configure({ zeroAmountNth: 0 });
   edge.setEnabled(true);
   const zeroFacts = await ledgerFacts(db, ORG.orgId);
-  const zeroValued = [...zeroFacts.linesByEntry.values()].flat().filter((l) => Number(l.amount) <= 0);
+  const zeroValued = [...zeroFacts.linesByEntry.values()].flat().filter((l) => toScaledMoney(l.amount) <= 0n);
   check(
     zeroValued.length === 0,
     'a receipt OCR could not price never becomes a zero-value journal entry',
@@ -912,7 +1024,17 @@ async function runScenarios(ctx) {
   finish();
 
   // ── 7. rate limiter under a legitimate bulk run ───────────────────────────
-  if (primary === TRANSPORT_ITEM) {
+  // The per-organisation token bucket only exists on the per-item transport.
+  // On a zip-only build there is nothing here to test — but that is stated out
+  // loud, not passed over in silence.
+  if (primary !== TRANSPORT_ITEM) {
+    skipScenario(
+      'S7',
+      'Does the per-organisation rate limiter throttle a legitimate bulk import?',
+      'this build serves only /api/ingest/zip, which has no per-organisation rate limiter — there is ' +
+        'nothing to exercise. See S0: this build cannot carry a real archive at all.',
+    );
+  } else {
     scenario('S7', 'Does the per-organisation rate limiter throttle a legitimate bulk import?');
     await resetLedger(db, ORG.orgId);
     ocr.reset();
@@ -1006,7 +1128,18 @@ async function runScenarios(ctx) {
   finish();
 
   // ── 8. a real browser ──────────────────────────────────────────────────────
-  if (!CONFIG.skipBrowser) {
+  // This is the operator's actual journey. It is NOT optional-by-accident: if
+  // it cannot run, that is a failure, because a harness that reports success
+  // without having driven the UI manufactures exactly the confidence this
+  // project exists to destroy. The only way to not run it is to ask, with
+  // --no-browser, and the report then says so in the headline.
+  if (CONFIG.skipBrowser) {
+    skipScenario(
+      'S8',
+      'A real Chromium browser drives the actual upload UI',
+      'skipped because --no-browser was passed. The operator-facing UI path was NOT exercised on this run.',
+    );
+  } else {
     scenario('S8', 'A real Chromium browser drives the actual upload UI');
     try {
       const { runBrowserLeg } = await import('./browser.mjs');
@@ -1029,17 +1162,20 @@ async function runScenarios(ctx) {
         ledgerFacts: () => ledgerFacts(db, ORG.orgId),
       });
     } catch (err) {
-      warn('the browser leg could not run', String(err?.message ?? err));
+      // Previously a warn, which let a crashing browser leg exit 0.
+      record(
+        'FAIL',
+        'the browser leg could not run, so the operator-facing UI path is UNTESTED',
+        `${String(err?.message ?? err)} — Playwright missing, Chromium failing to launch, or the page ` +
+          'erroring before the uploader renders all land here. Fix it, or pass --no-browser to state ' +
+          'plainly that the UI path was not covered.',
+        { stack: String(err?.stack ?? '').split('\n').slice(0, 4) },
+      );
     }
     finish();
   }
 }
 
-/**
- * The exact bytes of one photo inside a generated archive, cached per archive.
- * Used to compute the ledger total the stub OCR will produce, so the harness
- * knows the right answer before it uploads anything.
- */
 /** Every reason the server gave for refusing a receipt, whichever transport ran. */
 function collectFailureReasons(result) {
   const fromZip = (result.body?.report?.failures ?? []).map((f) => `${f.name}: ${f.error}`);
@@ -1050,6 +1186,11 @@ function collectFailureReasons(result) {
   return [...fromZip, ...fromItems];
 }
 
+/**
+ * The exact bytes of one photo inside a generated archive, cached per archive.
+ * Used to compute the ledger total the stub OCR will produce, so the harness
+ * knows the right answer before it uploads anything.
+ */
 const entryCaches = new WeakMap();
 function photoBytesFor(built, name) {
   let cache = entryCaches.get(built);
@@ -1057,10 +1198,44 @@ function photoBytesFor(built, name) {
     cache = new Map(expandArchive(built.zip).map((e) => [e.name, e.data]));
     entryCaches.set(built, cache);
   }
-  return cache.get(name) ?? Buffer.alloc(0);
+  const bytes = cache.get(name);
+  // Silently substituting an empty buffer would make the expected ledger total
+  // wrong in a way that looks like a product bug rather than a harness bug.
+  if (!bytes) throw new Error(`generated archive has no entry named "${name}"`);
+  return bytes;
 }
 
 // ── report ───────────────────────────────────────────────────────────────────
+
+/**
+ * Every scenario this harness claims to cover.
+ *
+ * Checked against what actually ran, because "the suite passed" has to mean
+ * "the suite ran". Without this, deleting a scenario, an early return, or a
+ * branch that quietly never fires all leave a green run that covers less than
+ * the report implies — the same class of false confidence as the original bug,
+ * just moved up a level into the test tooling.
+ */
+const EXPECTED_SCENARIOS = [
+  ['S0', 'session and transport discovery'],
+  ['S1', 'platform edge rejects a real archive'],
+  ['S1c', 'framework body cap is honest about failure'],
+  ['S1b', 'a brand-new organisation can import'],
+  ['S2', 'full-scale import'],
+  ['S3', 'repeat import creates nothing'],
+  ['S4', 'overlapping archive adds only the new'],
+  ['S5', 'interruption and resume'],
+  ['S6', 'failure modes reach a terminal state'],
+  ['S7', 'rate limiter under a bulk run'],
+  ['S9', 'concurrent double-submit'],
+  ['S8', 'a real browser drives the UI'],
+];
+
+/** Scenarios that neither ran nor were explicitly skipped — a silent hole. */
+function findMissingScenarios() {
+  const seen = new Map(scenarios.map((s) => [s.id, s]));
+  return EXPECTED_SCENARIOS.filter(([id]) => !seen.has(id)).map(([id, title]) => ({ id, title }));
+}
 
 const NOT_COVERED = [
   'The real Google OAuth sign-in. The harness mints the same session cookie the app mints, using ' +
@@ -1083,15 +1258,46 @@ const NOT_COVERED = [
 ];
 
 async function writeReport(startedAt, server) {
+  // A scenario that never ran and never announced itself is a hole in the
+  // coverage, so it is turned into a failure here rather than going unnoticed.
+  const missing = findMissingScenarios();
+  for (const m of missing) {
+    findings.push({
+      scenario: m.id,
+      severity: 'FAIL',
+      title: `${m.id} (${m.title}) never ran and was never explicitly skipped`,
+      detail:
+        'The harness claims to cover this and did not. Treat the whole run as untrustworthy until ' +
+        'this is explained — a suite that quietly covers less than it reports is how the original ' +
+        'bug survived 720 green tests.',
+    });
+  }
+
   const fails = findings.filter((f) => f.severity === 'FAIL');
   const warns = findings.filter((f) => f.severity === 'WARN');
+  const skipped = scenarios.filter((s) => s.skipped);
   const totalChecks = scenarios.reduce((n, s) => n + s.checks.length, 0);
   const passed = scenarios.reduce((n, s) => n + s.checks.filter((c) => c.ok).length, 0);
+  const ranBrowser = scenarios.some((s) => s.id === 'S8' && !s.skipped);
 
   log('\n════════════════════════════════════════════════════════════════');
   log(` RESULT: ${passed}/${totalChecks} checks passed, ${fails.length} failures, ${warns.length} warnings`);
+  log(`         scenarios: ${scenarios.length - skipped.length} ran, ${skipped.length} skipped`);
   log(`         run took ${secs(Date.now() - startedAt)}`);
+  if (!ranBrowser) {
+    // Loud, in the headline, every time. A run that did not drive the UI must
+    // never be mistaken for one that did.
+    log('');
+    log(' ***  THE OPERATOR-FACING UI PATH WAS NOT EXERCISED ON THIS RUN.  ***');
+    log(' ***  These results say the HTTP and database layers behaved.     ***');
+    log(' ***  They say NOTHING about what the operator sees in a browser. ***');
+  }
   log('════════════════════════════════════════════════════════════════');
+
+  if (skipped.length) {
+    log('\nSCENARIOS THAT DID NOT RUN');
+    for (const s of skipped) log(`  • [${s.id}] ${s.title}\n      ${s.reason ?? ''}`);
+  }
 
   if (fails.length) {
     log('\nFAILURES');
@@ -1109,6 +1315,15 @@ async function writeReport(startedAt, server) {
     startedAt: new Date(startedAt).toISOString(),
     elapsedMs: Date.now() - startedAt,
     config: CONFIG,
+    // Machine-readable answer to "what did this run actually exercise?", so a
+    // consumer of report.json can tell a full pass from a partial one.
+    coverage: {
+      expected: EXPECTED_SCENARIOS.map(([id, title]) => ({ id, title })),
+      ran: scenarios.filter((s) => !s.skipped).map((s) => s.id),
+      skipped: scenarios.filter((s) => s.skipped).map((s) => ({ id: s.id, reason: s.reason })),
+      missing,
+      operatorUiExercised: ranBrowser,
+    },
     scenarios,
     findings,
     notCovered: NOT_COVERED,

@@ -163,13 +163,13 @@ export async function uploadPerItem({
    */
   let rateLimitHits = 0;
 
-  const postOne = async (entry) => {
+  const postOne = async (entry, sequence) => {
     const form = new FormData();
     form.set('file', new File([entry.data], entry.name, { type: 'application/octet-stream' }));
     form.set('batchId', batchId);
 
     for (let attempt = 1; attempt <= RATE_LIMIT_ATTEMPTS; attempt += 1) {
-      const headerCookie = cookieForItem ? cookieForItem(posted) : cookie;
+      const headerCookie = cookieForItem ? cookieForItem(sequence) : cookie;
       let res;
       try {
         res = await fetch(`${baseUrl}/api/ingest/item`, {
@@ -200,7 +200,11 @@ export async function uploadPerItem({
       }
       return { name: entry.name, status: res.status, ok: res.ok, body };
     }
-    return { name: entry.name, status: 429, ok: false, body: { error: 'rate limited after retries' } };
+    // Unreachable by construction: the final attempt cannot `continue`, because
+    // the retry branch requires `attempt < RATE_LIMIT_ATTEMPTS`. Throwing rather
+    // than returning a plausible-looking result means that if the loop is ever
+    // restructured, the harness stops instead of inventing an outcome.
+    throw new Error(`transport bug: postOne fell out of the retry loop for ${entry.name}`);
   };
 
   const queue = entries.slice();
@@ -209,12 +213,17 @@ export async function uploadPerItem({
       if (aborted) return;
       const entry = queue.shift();
       if (!entry) return;
-      const result = await postOne(entry);
+      // `posted` is read BEFORE the request (for cookieForItem) and incremented
+      // after, so it is claimed here rather than after the await — otherwise
+      // concurrent workers all see the same value and the session-expiry
+      // scenario switches cookies at the wrong point.
+      const sequence = posted;
+      posted += 1;
+      const result = await postOne(entry, sequence);
       if (result) {
         results.push(result);
-        posted += 1;
-        onItem?.(result, posted);
-        if (stopAfter && posted >= stopAfter) {
+        onItem?.(result, results.length);
+        if (stopAfter && results.length >= stopAfter) {
           aborted = true;
           return;
         }
@@ -253,12 +262,35 @@ export async function uploadPerItem({
     }
   }
 
+  /**
+   * `ok` must mean "the whole archive really went up", not "nothing I chose to
+   * look at said otherwise".
+   *
+   * The previous version was `!aborted && results.every(r => r.ok)`, and
+   * `[].every()` is TRUE — so a run in which every single upload died at the
+   * transport layer (connection refused, DNS gone, server never started)
+   * produced an empty `results`, reported ok:true and status 200, and read as a
+   * clean pass having uploaded nothing at all. Same false-pass family as the
+   * browser leg: absence of evidence presented as evidence of absence.
+   *
+   * So being ok now requires positive proof: entries existed, every one of them
+   * produced a result, no request failed at the transport layer, and every
+   * result was itself ok.
+   */
+  const expectedUploads = entries.length;
+  const completedEveryUpload = !aborted && expectedUploads > 0 && results.length === expectedUploads;
+  const ok = completedEveryUpload && transportErrors.length === 0 && results.every((r) => r.ok);
+
   return {
     transport: TRANSPORT_ITEM,
-    ok: !aborted && results.every((r) => r.ok),
-    status: aborted ? 0 : 200,
+    ok,
+    // Never claim 200 for a run that did not finish: report the first failing
+    // status if there is one, else 0.
+    status: ok ? 200 : (results.find((r) => !r.ok)?.status ?? 0),
     batchId,
     aborted,
+    expectedUploads,
+    attemptedUploads: results.length,
     elapsedMs: Date.now() - started,
     transportErrors,
     clientSkipped,

@@ -56,7 +56,15 @@ export async function runBrowserLeg({
   ledgerFacts,
 }) {
   const { chromium } = loadPlaywright();
-  const launchOptions = { headless: true };
+  // Chromium's sandbox cannot initialise as uid 0, and the docs point this
+  // harness at CI runners, which routinely run as root in a container. Without
+  // this the browser leg fails there for an environmental reason that looks
+  // like a product failure.
+  const runningAsRoot = process.getuid?.() === 0;
+  const launchOptions = {
+    headless: true,
+    ...(runningAsRoot ? { args: ['--no-sandbox', '--disable-dev-shm-usage'] } : {}),
+  };
   const browser = await chromium.launch(launchOptions).catch(async (err) => {
     // A pinned-version mismatch is recoverable: the environment ships a
     // Chromium at a known path.
@@ -119,13 +127,18 @@ export async function runBrowserLeg({
 
     const fileInput = page.locator('input[type="file"][accept*="zip"]').first();
     const hasUploader = (await fileInput.count()) > 0;
-    if (!hasUploader) {
-      warn(
-        'no zip uploader is rendered on /sandbox in this build',
-        'the browser leg cannot exercise the UI path; the HTTP scenarios still apply',
-      );
-      return;
-    }
+    // A MISSING uploader is a failure, not a warning. This used to warn and
+    // return, which meant that if /sandbox stopped rendering the uploader — or
+    // crashed before it got there — the harness exited 0 having tested nothing
+    // through the UI. That is the exact shape of the original disaster: a green
+    // signal covering a path that never ran. The only acceptable way to not
+    // exercise the operator's journey is to ask for it with --no-browser.
+    check(
+      hasUploader,
+      'the upload control the operator actually uses is present on /sandbox',
+      hasUploader ? 'found' : 'NO zip file input rendered — the UI path is untested',
+    );
+    if (!hasUploader) return;
 
     // `outDir` is always the private 0700 directory created by
     // env.mjs createArtifactDir — never a fixed path under the system temp
@@ -180,23 +193,39 @@ export async function runBrowserLeg({
     info('what the operator is shown', shownText.split('\n')[0]?.slice(0, 200) ?? '(nothing)');
 
     const facts = await ledgerFacts();
-    // "N draft entries created" / "N receipts imported" — whichever wording the
-    // build uses, the NUMBER has to match the database.
-    const claimed = Number(shownText.match(/(\d+)\s+(?:draft|receipt|entr)/i)?.[1] ?? NaN);
-    if (Number.isFinite(claimed)) {
+
+    // Three outcomes, and only one of them is a pass. An error banner is a
+    // failed upload; a status banner without a number means the truthfulness
+    // check could not run, which must never read as success.
+    if (outcome?.role === 'alert') {
       check(
-        claimed === facts.draftCount,
-        'the number the page shows equals the number of rows in the database',
-        `page says ${claimed}, database has ${facts.draftCount}`,
+        false,
+        'the browser-driven upload succeeded rather than showing an error',
+        shownText.slice(0, 200),
       );
     } else if (terminal) {
-      warn(
-        'the page did not state a receipt count in a readable form',
-        `could not parse a count from: ${shownText.slice(0, 160)}`,
+      // "N draft entries created" / "N receipts imported" — whichever wording
+      // the build uses, the NUMBER has to match the database.
+      const claimed = Number(shownText.match(/(\d+)\s+(?:draft|receipt|entr)/i)?.[1] ?? NaN);
+      check(
+        Number.isFinite(claimed),
+        'the page states a receipt count the operator can act on',
+        Number.isFinite(claimed) ? `parsed ${claimed}` : `no count in: ${shownText.slice(0, 160)}`,
       );
+      if (Number.isFinite(claimed)) {
+        check(
+          claimed === facts.draftCount,
+          'the number the page shows equals the number of rows in the database',
+          `page says ${claimed}, database has ${facts.draftCount}`,
+        );
+      }
     }
+
+    // No `|| !terminal` escape hatch here: an upload that never finished has
+    // not put the receipts in the books, and saying otherwise would let the
+    // spinner bug pass this check.
     check(
-      facts.draftCount === archive.manifest.photoCount || !terminal,
+      facts.draftCount === archive.manifest.photoCount,
       'a browser-driven upload puts every receipt in the books',
       `${facts.draftCount} of ${archive.manifest.photoCount}`,
     );
@@ -225,5 +254,12 @@ function sampleBytes(archive, name) {
     map = new Map(zip.getEntries().map((e) => [e.entryName, e.getData()]));
     cache.set(archive, map);
   }
-  return map.get(name) ?? Buffer.alloc(0);
+  const bytes = map.get(name);
+  // Returning an empty buffer here would hand the JPEG-decode check a zero-byte
+  // "image", which fails for a reason that has nothing to do with the fixture —
+  // and sends whoever reads the report hunting the wrong bug.
+  if (!bytes) {
+    throw new Error(`generated archive has no entry named "${name}" — the manifest and the zip disagree`);
+  }
+  return bytes;
 }
