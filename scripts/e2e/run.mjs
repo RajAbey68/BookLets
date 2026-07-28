@@ -279,6 +279,51 @@ async function runScenarios(ctx) {
   check(afterEdge.entryCount === 0, 'nothing reached the books through the rejected upload', `${afterEdge.entryCount} rows`);
   finish();
 
+  // ── 1c. the framework's OWN body ceiling, behind the platform's ───────────
+  // Next.js buffers a clone of every request body when a proxy (this version's
+  // middleware) exists, capped by `experimental.proxyClientMaxBodySize` — 10 MB
+  // by default. Over the cap it does NOT fail the request: it hands the route a
+  // TRUNCATED body and carries on (documented behaviour, see
+  // node_modules/next/dist/docs/.../proxyClientMaxBodySize.md). Today the
+  // platform edge hides this at 4.5 MB, so it only bites if the edge limit is
+  // raised or the app is self-hosted from the Dockerfile — which is exactly the
+  // shape of bug that waits until someone thinks the problem is solved.
+  //
+  // The test is not "does a big upload work" — it is "if it does not work, does
+  // the app tell the truth about why". Blaming a perfectly good file is worse
+  // than refusing it.
+  scenario('S1c', 'A 12 MB upload with the platform edge out of the way — is the failure honest?');
+  await resetLedger(db, ORG.orgId);
+  edge.setEnabled(false);
+  const framework = buildWhatsappExport({ images: 40, totalBytes: 12 * 1024 * 1024, seed: 5, startIndex: 30_000 });
+  const frameworkRes = await importArchive(TRANSPORT_ZIP, {
+    baseUrl,
+    cookie: session.header,
+    zipBuffer: framework.zip,
+  });
+  edge.setEnabled(true);
+  const truncatedBlame =
+    frameworkRes.status === 400 && /not a readable zip|INVALID_ZIP/i.test(JSON.stringify(frameworkRes.body ?? {}));
+  check(
+    !truncatedBlame,
+    'a valid archive over the framework body cap is never reported back as a corrupt file',
+    `POST /api/ingest/zip (${mb(framework.zip.length)}) → ${frameworkRes.status} ` +
+      `${JSON.stringify(frameworkRes.body).slice(0, 140)}`,
+    frameworkRes.body,
+  );
+  if (truncatedBlame) {
+    record(
+      'FAIL',
+      'uploads over 10 MB are silently truncated and then blamed on the operator’s file',
+      'next.config.ts does not set experimental.proxyClientMaxBodySize, so Next buffers only the first ' +
+        '10 MB of the body and passes the truncated bytes to the route, which then answers ' +
+        '"Payload is not a readable zip archive". The archive is fine. The platform edge currently ' +
+        'masks this at 4.5 MB; raise that limit, or self-host, and this is the next wall.',
+      frameworkRes.body,
+    );
+  }
+  finish();
+
   // ── 1b. a brand-new organisation, configured exactly as production is ─────
   // Production was set up WITHOUT prisma/seed.ts (the seed creates demo Dublin
   // properties and must never touch the real books). So the live organisation
@@ -360,6 +405,17 @@ async function runScenarios(ctx) {
       `peak OCR concurrency ${ocr.state.maxConcurrent}`,
   );
 
+  // An archive-level rejection means NOTHING was imported, and every check
+  // below will fail for one reason. Name that reason once, in plain language,
+  // so the report reads as one problem rather than a wall of noise.
+  if (!bulk.ok && bulk.body?.code) {
+    record(
+      'FAIL',
+      `the operator's real archive is refused outright (${bulk.body.code})`,
+      String(bulk.body.error ?? '').slice(0, 300),
+      bulk.body,
+    );
+  }
   check(
     bulk.ok || bulk.status === 200,
     'the import completed rather than erroring out',

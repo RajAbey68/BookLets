@@ -75,13 +75,15 @@ fiscal period) and nothing else.
 | Area | What is actually proven |
 | --- | --- |
 | Platform ceiling | A 28.5 MB single-request upload is rejected before the app runs, and nothing reaches the books — the production bug, reproduced on demand |
+| Framework ceiling | A 12 MB upload with the platform edge out of the way: Next buffers a clone of every body when a `proxy.ts` exists and silently truncates past `experimental.proxyClientMaxBodySize` (10 MB by default). The check is that a valid archive is never reported back as a corrupt one |
 | Cold start | Whether a freshly deployed organisation, configured the way production is, can import a receipt at all |
 | Scale | A full ~120-photo, ~28.5 MB import end to end: duration, OCR fan-out, and whether the rate limiter throttles a legitimate bulk run |
 | Truthfulness | The number shown to the operator equals the DRAFT rows in the database, and equals the permanent audit record |
 | Money | Every entry is a balanced double-entry pair, no zero or negative lines, and the ledger total equals the sum the receipts stated |
 | Dedup | Re-importing the same archive creates nothing and spends no OCR; an overlapping archive adds only the genuinely new receipts — both checked in SQL |
 | Interruption | Killing a run midway leaves the completed work in the database, and re-running finishes it without duplicating |
-| Failure surfacing | Corrupt archive, non-image file, voice note, video, oversized photo, path traversal, total OCR outage, unpriceable receipt, expired session — each must reach a clear terminal state |
+| Failure surfacing | Corrupt archive, non-image file, voice note, video, oversized photo, path traversal, total OCR outage, unpriceable receipt, an OCR call that never answers, expired session — each must reach a clear terminal state |
+| Races | The same archive submitted twice simultaneously: each receipt must be created exactly once, and the two runs together must not claim more than exists |
 | Browser | A real Chromium loads `/sandbox`, uploads through the real file input, and must reach a visible finished-or-failed state; the count on screen is compared to the database |
 
 Every assertion is made against Postgres. The application's response is recorded
