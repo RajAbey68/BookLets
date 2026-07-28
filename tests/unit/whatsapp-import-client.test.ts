@@ -8,7 +8,7 @@
  *   3. re-running the same export resumes — every already-imported receipt
  *      comes back as a duplicate because the server keys on content hash.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import AdmZip from 'adm-zip';
 import { randomBytes } from 'node:crypto';
 import {
@@ -274,62 +274,15 @@ describe('importWhatsappExport', () => {
 });
 
 /**
- * Fake only the timer functions the code under test uses.
+ * Let the real event loop turn so zlib/stream callbacks can run.
  *
- * Faking setImmediate/nextTick as well would freeze Node's stream internals,
- * and the archive is expanded through DecompressionStream — the reader would
- * simply never finish and every test here would time out on real seconds.
+ * This moves NO time on the injected clock, so it can never be mistaken by the
+ * code under test for elapsed time — which is the whole point of the split.
  */
-function useTimerFakes() {
-  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-}
-
-/** Let the real event loop turn so zlib/stream callbacks can run. */
 async function flushIo(turns = 12) {
   for (let i = 0; i < turns; i += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
-}
-
-/**
- * Interleave real IO turns with small virtual-time steps until `predicate`
- * holds. Expanding the archive is real async work (DecompressionStream) that
- * fake timers cannot drive, so a fixed "advance N ms" is a race; this waits for
- * the condition instead.
- */
-async function waitUntil(predicate: () => boolean, stepMs = 10, steps = 200) {
-  for (let i = 0; i < steps; i += 1) {
-    if (predicate()) return;
-    await flushIo(4);
-    await vi.advanceTimersByTimeAsync(stepMs);
-  }
-}
-
-/**
- * Drive virtual time until `promise` settles, then return it.
- *
- * `stepMs` is how much virtual time each turn of the real event loop costs.
- * Keep it SMALL when the test asserts something about gaps between events
- * (e.g. the inactivity watchdog): a large step makes slow real IO look like a
- * long silence and can trip a watchdog that would never fire in production.
- */
-async function settle<T>(promise: Promise<T>, stepMs = 500, steps = 400): Promise<T> {
-  let done = false;
-  const tracked = promise.then(
-    (value) => {
-      done = true;
-      return value;
-    },
-    (err) => {
-      done = true;
-      throw err;
-    },
-  );
-  for (let i = 0; i < steps && !done; i += 1) {
-    await flushIo(4);
-    await vi.advanceTimersByTimeAsync(stepMs);
-  }
-  return tracked;
 }
 
 const okItem = () =>
@@ -340,13 +293,78 @@ const okItem = () =>
 
 const callCount = (f: typeof fetch) => (f as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
 
-describe('rate-limit backoff', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
+/**
+ * A watchdog clock the test drives by hand, injected via `timers`.
+ *
+ * The watchdog tests below used to fake `setTimeout` and advance virtual time a
+ * slice at a time while pumping the real event loop, because the archive is
+ * expanded through DecompressionStream and that IO cannot be faked. The two
+ * clocks were therefore coupled: on a loaded machine a slow unzip burned virtual
+ * time and looked exactly like silence, so the watchdog fired when it should not
+ * have — and, when it fired before the first request went out, the run parked on
+ * a fetch whose abort event had already passed and the test hung to its timeout.
+ * Both CI failures were that one coupling, from opposite ends.
+ *
+ * With the clock injected, real time is irrelevant: the unzip takes as long as
+ * the machine needs, and the watchdog advances only when the test says so.
+ */
+function manualClock() {
+  let now = 0;
+  let seq = 0;
+  let fired = 0;
+  const pending = new Map<number, { at: number; fn: () => void }>();
+  return {
+    timers: {
+      setTimeout(fn: () => void, ms: number) {
+        const id = (seq += 1);
+        pending.set(id, { at: now + ms, fn });
+        return id;
+      },
+      clearTimeout(handle: unknown) {
+        pending.delete(handle as number);
+      },
+    },
+    /** Move the watchdog's clock forward, running anything now due. */
+    advance(ms: number) {
+      now += ms;
+      for (const [id, timer] of [...pending]) {
+        if (timer.at <= now) {
+          pending.delete(id);
+          fired += 1;
+          timer.fn();
+        }
+      }
+    },
+    /** Virtual ms until the armed watchdog fires, or null when disarmed. */
+    get armedIn(): number | null {
+      const next = [...pending.values()].sort((a, b) => a.at - b.at)[0];
+      return next ? next.at - now : null;
+    },
+    /** How many times the watchdog has actually fired. */
+    get fired() {
+      return fired;
+    },
+  };
+}
 
+/**
+ * Wait on the REAL event loop until `predicate` holds.
+ *
+ * Safe to spin here precisely because the watchdog no longer runs on this
+ * clock: nothing under test can time out while we wait, so a slow machine only
+ * makes this take longer, never makes it assert something different.
+ */
+async function waitFor(predicate: () => boolean, turns = 50_000) {
+  for (let i = 0; i < turns; i += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error('condition never became true');
+}
+
+describe('rate-limit backoff', () => {
   it('waits the server’s retry-after instead of hammering it, then carries on', async () => {
-    useTimerFakes();
+    const clock = manualClock();
     let n = 0;
     const fetchImpl = vi.fn(async () => {
       n += 1;
@@ -354,23 +372,29 @@ describe('rate-limit backoff', () => {
       return okItem();
     }) as unknown as typeof fetch;
 
-    const run = importWhatsappExport(exportZip(0), { fetchImpl, concurrency: 1 });
-    await waitUntil(() => callCount(fetchImpl) >= 1);
+    const run = importWhatsappExport(exportZip(0), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+    await waitFor(() => callCount(fetchImpl) >= 1);
     expect(callCount(fetchImpl)).toBe(1);
 
     // Well inside the 20 s the server asked for: no retry yet.
-    await vi.advanceTimersByTimeAsync(10_000);
+    clock.advance(10_000);
     await flushIo();
     expect(callCount(fetchImpl)).toBe(1);
 
-    const report = await settle(run);
+    // The wait the server asked for is now up.
+    clock.advance(10_000);
+    const report = await run;
     expect(callCount(fetchImpl)).toBeGreaterThan(1);
     expect(report.chatFiles).toHaveLength(1);
     expect(report.failures).toHaveLength(0);
   });
 
   it('clamps an absurd retry-after so a hostile header cannot park the import', async () => {
-    useTimerFakes();
+    const clock = manualClock();
     let n = 0;
     const fetchImpl = vi.fn(async () => {
       n += 1;
@@ -379,25 +403,47 @@ describe('rate-limit backoff', () => {
       return okItem();
     }) as unknown as typeof fetch;
 
-    const run = importWhatsappExport(exportZip(0), { fetchImpl, concurrency: 1 });
-    await waitUntil(() => callCount(fetchImpl) >= 1);
+    const run = importWhatsappExport(exportZip(0), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+    await waitFor(() => callCount(fetchImpl) >= 1);
 
-    const report = await settle(run);
-    // Resolved at all — 24 h would have outlasted every step settle() takes.
+    // The clamp is 30 s. Advancing exactly that much retries; had the 24 h been
+    // honoured literally, nothing would move here and this would never settle.
+    clock.advance(30_000);
+    const report = await run;
     expect(callCount(fetchImpl)).toBeGreaterThan(1);
     expect(report.chatFiles).toHaveLength(1);
     expect(report.failures).toHaveLength(0);
   });
 
   it('gives up after the attempt cap and reports the item as failed', async () => {
-    useTimerFakes();
+    const clock = manualClock();
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ error: 'Too many uploads at once' }), { status: 429 }),
     ) as unknown as typeof fetch;
 
-    const report = await settle(
-      importWhatsappExport(exportZip(0), { fetchImpl, concurrency: 1 }),
-    );
+    const run = importWhatsappExport(exportZip(0), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+
+    // Let each backoff elapse in turn until the attempt cap is reached and the
+    // item is given up on. The clamp bounds every wait to 30 s.
+    await waitFor(() => callCount(fetchImpl) >= 1);
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    for (let i = 0; i < 5 && !settled; i += 1) {
+      clock.advance(30_000);
+      await flushIo();
+    }
+    const report = await tracked;
 
     expect(report.failures).toHaveLength(1);
     expect(report.failures[0].stage).toBe('upload');
@@ -407,7 +453,7 @@ describe('rate-limit backoff', () => {
   });
 
   it('observes an abort DURING the backoff wait instead of sleeping it out', async () => {
-    useTimerFakes();
+    const clock = manualClock();
     const controller = new AbortController();
     const fetchImpl = vi.fn(
       async () => new Response('{}', { status: 429, headers: { 'retry-after': '30' } }),
@@ -417,16 +463,15 @@ describe('rate-limit backoff', () => {
       fetchImpl,
       concurrency: 1,
       signal: controller.signal,
+      timers: clock.timers,
     });
-    await waitUntil(() => callCount(fetchImpl) >= 1);
+    await waitFor(() => callCount(fetchImpl) >= 1);
     // The first 429 has landed and the 30 s wait has begun.
     expect(callCount(fetchImpl)).toBe(1);
 
     controller.abort();
-    // Barely any virtual time passes: an unaware sleep would still be parked
-    // for the rest of the 30 s and this would not settle here.
-    await vi.advanceTimersByTimeAsync(50);
-    await flushIo();
+    // NO time passes on the backoff clock at all. An unaware sleep would still
+    // be parked for the whole 30 s and this would never settle.
     const report = await run;
 
     expect(report.interrupted).toBe(true);
@@ -435,10 +480,6 @@ describe('rate-limit backoff', () => {
 });
 
 describe('never hang silently', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it('never calls the batch summary endpoint after an abort', async () => {
     const controller = new AbortController();
     const urls: string[] = [];
@@ -468,45 +509,85 @@ describe('never hang silently', () => {
   });
 
   it('stops a stalled import on the inactivity watchdog and says so', async () => {
-    useTimerFakes();
+    const clock = manualClock();
     // A request that never answers — but that DOES honour its abort signal,
-    // exactly as a real fetch does. Without a watchdog the card sits on
+    // exactly as a real fetch does, including rejecting outright when handed a
+    // signal that has already aborted. Without a watchdog the card sits on
     // "Importing…" forever, which is the failure this work exists to kill.
     const fetchImpl = vi.fn(
       (_url: string | URL, init?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () =>
-            reject(new DOMException('The operation was aborted.', 'AbortError')),
-          );
+          const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'));
+          if (init?.signal?.aborted) return abort();
+          init?.signal?.addEventListener('abort', abort);
         }),
     ) as unknown as typeof fetch;
 
-    const report = await settle(
-      importWhatsappExport(exportZip(3), { fetchImpl, concurrency: 1, idleTimeoutMs: 1000 }),
-    );
+    const run = importWhatsappExport(exportZip(3), {
+      fetchImpl,
+      concurrency: 1,
+      idleTimeoutMs: 1000,
+      timers: clock.timers,
+    });
 
+    // The archive is expanded and the first upload is on the wire, silent.
+    await waitFor(() => callCount(fetchImpl) === 1);
+    expect(clock.fired).toBe(0);
+    expect(clock.armedIn).toBe(1000);
+
+    // Now — and only now — the silence becomes long enough to matter.
+    clock.advance(1000);
+    expect(clock.fired).toBe(1);
+
+    const report = await run;
     expect(report.interrupted).toBe(true);
     expect(report.interruptedReason).toBe('idle-timeout');
     expect(report.attempted).toBe(0);
   });
 
   it('does not fire the watchdog while items keep completing', async () => {
-    useTimerFakes();
-    const fetchImpl = vi.fn(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      return okItem();
+    const clock = manualClock();
+    const IDLE = 5000;
+    // Each item takes most of the watchdog's budget, but never all of it.
+    const ITEM_MS = 4000;
+    const ITEMS = 5; // 1 chat transcript + 4 images
+
+    // Each item upload parks until the test releases it, so item completion and
+    // the passage of time are both driven from here rather than raced.
+    const release: Array<() => void> = [];
+    const fetchImpl = vi.fn((url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) {
+        return Promise.resolve(new Response('{}', { status: 200 }));
+      }
+      return new Promise<Response>((resolve) => {
+        release.push(() => resolve(okItem()));
+      });
     }) as unknown as typeof fetch;
 
-    // Five items at 800 ms each is far more total elapsed time than the 5 s
-    // watchdog, yet no single gap between completions comes close to it. The
-    // watchdog measures SILENCE, not duration, so a long healthy import runs
-    // to the end instead of being cancelled for taking a while.
-    const report = await settle(
-      importWhatsappExport(exportZip(4), { fetchImpl, concurrency: 1, idleTimeoutMs: 5000 }),
-      25,
-      2000,
-    );
+    const run = importWhatsappExport(exportZip(4), {
+      fetchImpl,
+      concurrency: 1,
+      idleTimeoutMs: IDLE,
+      timers: clock.timers,
+    });
 
+    // Twenty seconds of virtual time pass in total — four times the 5 s
+    // watchdog — yet no single gap between completions reaches it. The watchdog
+    // measures SILENCE, not duration, so a long healthy import runs to the end
+    // instead of being cancelled for taking a while.
+    for (let i = 0; i < ITEMS; i += 1) {
+      await waitFor(() => release.length === i + 1);
+      clock.advance(ITEM_MS / 2);
+      expect(clock.fired).toBe(0);
+      clock.advance(ITEM_MS / 2);
+      expect(clock.fired).toBe(0);
+      // Still armed, with the unused remainder of the budget left on it.
+      expect(clock.armedIn).toBe(IDLE - ITEM_MS);
+      release[i](); // this item finishes, which must re-arm the watchdog
+    }
+
+    const report = await run;
+    expect(clock.fired).toBe(0);
     expect(report.interrupted).toBe(false);
     expect(report.created).toBe(4);
   });

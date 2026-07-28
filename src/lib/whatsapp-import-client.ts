@@ -67,6 +67,38 @@ export const DEFAULT_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 export type ImportInterruptedReason = 'cancelled' | 'idle-timeout';
 
 /**
+ * The clock this module measures its two delays with: the inactivity watchdog
+ * and the rate-limit backoff.
+ *
+ * Injectable for ONE reason. Both behaviours are statements about elapsed time,
+ * and the archive around them is expanded through `DecompressionStream` — real
+ * async IO that a fake-timer library cannot drive. A test that fakes
+ * `setTimeout` must therefore keep pumping the real event loop to let the unzip
+ * proceed, which couples virtual time to real IO latency: on a loaded machine a
+ * slow unzip is indistinguishable from genuine silence, so the watchdog fires
+ * when it should not, the run parks on a request that was aborted before it was
+ * issued, and a wait for "the first request went out" expires while the
+ * threadpool is still busy. Handing the clock in decouples them — the test says
+ * exactly when time passes, and real IO takes as long as the machine needs.
+ *
+ * Production never passes this — {@link HOST_TIMERS} is the default and is a
+ * straight pass-through to the host's own `setTimeout`/`clearTimeout`.
+ */
+export interface ImportTimers {
+  setTimeout: (handler: () => void, ms: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+}
+
+/**
+ * The default clock: the host's timers, resolved at CALL time so that a test
+ * which fakes the globals still sees its fakes through the default path.
+ */
+export const HOST_TIMERS: ImportTimers = {
+  setTimeout: (handler, ms) => setTimeout(handler, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/**
  * One tick per FINISHED item. Emitted whatever the outcome, so the count
  * always moves — the point is to distinguish a slow import from a stuck one.
  */
@@ -150,6 +182,12 @@ export interface WhatsappImportOptions {
    * than something each card has to remember to re-implement.
    */
   idleTimeoutMs?: number;
+  /**
+   * Clock for the inactivity watchdog and the rate-limit backoff. Defaults to
+   * {@link HOST_TIMERS}, so production behaviour is exactly as before; tests
+   * inject a clock they drive by hand. See {@link ImportTimers}.
+   */
+  timers?: ImportTimers;
   /** Overridable for tests; production always uses the module constants. */
   itemEndpoint?: string;
   batchEndpoint?: string;
@@ -184,18 +222,18 @@ function newBatchId(): string {
  * setTimeout would make a cancelled import sit through the whole backoff before
  * noticing, which is the same "unresponsive UI" failure in miniature.
  */
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(ms: number, signal: AbortSignal | undefined, timers: ImportTimers): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
       resolve();
       return;
     }
     const finish = () => {
-      clearTimeout(timer);
+      timers.clearTimeout(timer);
       signal?.removeEventListener('abort', finish);
       resolve();
     };
-    const timer = setTimeout(finish, ms);
+    const timer = timers.setTimeout(finish, ms);
     signal?.addEventListener('abort', finish, { once: true });
   });
 }
@@ -221,6 +259,7 @@ async function uploadItem(
   endpoint: string,
   fetchImpl: typeof fetch,
   signal: AbortSignal | undefined,
+  timers: ImportTimers,
 ): Promise<ItemResponse> {
   for (let attempt = 1; ; attempt += 1) {
     const form = new FormData();
@@ -235,7 +274,7 @@ async function uploadItem(
         Number.isFinite(retryAfter) && retryAfter > 0
           ? Math.min(retryAfter * 1000, RATE_LIMIT_MAX_WAIT_MS)
           : Math.min(RATE_LIMIT_BACKOFF_MS * attempt, RATE_LIMIT_MAX_WAIT_MS);
-      await sleep(waitMs, signal);
+      await sleep(waitMs, signal, timers);
       if (signal?.aborted) {
         throw new DOMException('The import was cancelled.', 'AbortError');
       }
@@ -272,6 +311,7 @@ export async function importWhatsappExport(
   const batchId = options.batchId ?? newBatchId();
   const archiveName = file.name ?? 'export.zip';
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const timers = options.timers ?? HOST_TIMERS;
 
   // One controller drives the whole run: the caller's signal and the
   // inactivity watchdog both feed into it, and it is what every fetch is given.
@@ -280,18 +320,18 @@ export async function importWhatsappExport(
   const controller = new AbortController();
   const { signal } = controller;
   let stalled = false;
-  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: unknown;
 
   const armWatchdog = () => {
     if (idleTimeoutMs <= 0) return;
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => {
+    if (idleTimer !== undefined) timers.clearTimeout(idleTimer);
+    idleTimer = timers.setTimeout(() => {
       stalled = true;
       controller.abort();
     }, idleTimeoutMs);
   };
   const disarmWatchdog = () => {
-    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    if (idleTimer !== undefined) timers.clearTimeout(idleTimer);
     idleTimer = undefined;
   };
 
@@ -346,7 +386,13 @@ export async function importWhatsappExport(
     let item: ItemResponse;
     try {
       const bytes = await readZipEntry(file, entry);
-      item = await uploadItem(bytes, entry.name, batchId, itemEndpoint, fetchImpl, signal);
+      // Expanding the entry is real work, and a cancel or an idle-timeout can
+      // land while it happens. Re-check before going to the network: the run is
+      // already over, so this request could only ever be thrown away, and
+      // issuing it anyway would leave the outcome to however the host's fetch
+      // treats a signal that is already aborted.
+      if (signal.aborted) return;
+      item = await uploadItem(bytes, entry.name, batchId, itemEndpoint, fetchImpl, signal, timers);
     } catch (err) {
       // A cancelled run must not invent a failure for the request it cut off:
       // that item was never judged, so it is neither attempted nor failed. The
