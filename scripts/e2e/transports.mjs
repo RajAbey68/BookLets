@@ -36,6 +36,22 @@ export const DEFAULT_ITEM_CONCURRENCY = 3;
  * the real UI never posts, and measure a code path the operator never reaches.
  */
 const MAX_ITEM_BYTES = 4 * 1024 * 1024;
+/**
+ * Ceiling on any single harness request.
+ *
+ * Generous enough for a real upload (OCR round-trip plus a rate-limit wait),
+ * tight enough that a server which has died mid-run produces a FAILURE rather
+ * than a harness that hangs forever. An indefinite hang is the same disease as
+ * a false pass: the run stops telling the truth about what happened.
+ */
+export const REQUEST_TIMEOUT_MS = 120_000;
+
+/** AbortSignal that fires on the caller's signal OR the timeout, whichever first. */
+export function withTimeout(signal, ms = REQUEST_TIMEOUT_MS) {
+  const timeout = AbortSignal.timeout(ms);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
+}
+
 /** Mirrors RATE_LIMIT_ATTEMPTS / RATE_LIMIT_BACKOFF_MS in the real client. */
 const RATE_LIMIT_ATTEMPTS = 3;
 const RATE_LIMIT_BACKOFF_MS = 4000;
@@ -56,6 +72,7 @@ export async function detectTransports(baseUrl, cookie) {
       method: 'POST',
       headers: cookie ? { cookie } : {},
       body: '{}',
+      signal: withTimeout(undefined, 30_000),
     });
     return res.status !== 404;
   };
@@ -90,7 +107,7 @@ export async function uploadWholeZip({ baseUrl, cookie, zipBuffer, signal }) {
     method: 'POST',
     headers: { 'content-type': 'application/zip', cookie },
     body: zipBuffer,
-    signal,
+    signal: withTimeout(signal),
   });
   const text = await res.text();
   let body = null;
@@ -176,7 +193,7 @@ export async function uploadPerItem({
           method: 'POST',
           headers: { cookie: headerCookie },
           body: form,
-          signal,
+          signal: withTimeout(signal),
         });
       } catch (err) {
         transportErrors.push({ name: entry.name, error: String(err?.message ?? err) });
@@ -252,7 +269,7 @@ export async function uploadPerItem({
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({ batchId, archiveName }),
-      signal,
+      signal: withTimeout(signal),
     }).catch((err) => ({ ok: false, status: 0, text: async () => String(err) }));
     const text = await res.text();
     try {

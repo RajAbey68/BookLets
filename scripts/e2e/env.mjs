@@ -15,6 +15,7 @@
  * harness at all.
  */
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 import { chmod, chown, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
@@ -178,10 +179,16 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
     // A readiness loop that falls through when its budget runs out hands the
     // caller a database that never came up, and every "test" after that is
     // noise wearing the costume of a result. Never proceed unready.
+    // One exit condition, not two: `break` on success, and the loop bound is
+    // just the retry budget. (The sibling loop in startNextServer carried both
+    // a `break` and a `&& !flag` guard, which CodeQL correctly called a useless
+    // negation — the flag can never be true at the test. Both loops now read
+    // the same way, so neither invites that alert again.)
     let ready = false;
-    for (let i = 0; i < 60 && !ready; i += 1) {
+    for (let i = 0; i < 60; i += 1) {
       ready = await run('docker', ['exec', name, 'pg_isready', '-U', 'postgres']).then(() => true, () => false);
-      if (!ready) await new Promise((r) => setTimeout(r, 1000));
+      if (ready) break;
+      await new Promise((r) => setTimeout(r, 1000));
     }
     if (!ready) {
       throw new Error(
@@ -209,6 +216,28 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
         'E2E_DATABASE_URL to a disposable local database the harness may write to.',
     );
   }
+  // A leftover cluster from a previous run holds the port, and postgres then
+  // fails with "could not create any TCP/IP sockets" buried in a log file the
+  // caller never sees. Say it plainly, before doing any work.
+  const portTaken = await new Promise((resolve) => {
+    const probe = net.connect({ host: '127.0.0.1', port }, () => {
+      probe.destroy();
+      resolve(true);
+    });
+    probe.on('error', () => resolve(false));
+    probe.setTimeout(1500, () => {
+      probe.destroy();
+      resolve(true);
+    });
+  });
+  if (portTaken) {
+    throw new Error(
+      `Something is already listening on 127.0.0.1:${port}. That is almost certainly a Postgres ` +
+        'cluster left over from an earlier harness run — stop it (pg_ctl -D <its data dir> stop, or ' +
+        'docker stop booklets-e2e-pg), or pass --db-port=<free port>.',
+    );
+  }
+
   // mkdtemp creates the directory 0700 and owned by us, with an unguessable
   // suffix — no other user can pre-create or symlink it out from under us.
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-pg-'));
@@ -344,7 +373,7 @@ export async function startNextServer({ port, databaseUrl, env, log = console.lo
   // "fail" for reasons that have nothing to do with the product. Refuse to
   // return anything but a server that answered.
   let serving = false;
-  for (let i = 0; i < 120 && !serving; i += 1) {
+  for (let i = 0; i < 120; i += 1) {
     serving = await fetch(`${base}/api/health`).then((r) => r.status < 500, () => false);
     if (serving) break;
     if (child.exitCode !== null) throw new Error(`next start exited ${child.exitCode}\n${logLines.join('')}`);

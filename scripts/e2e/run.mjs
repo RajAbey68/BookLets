@@ -46,6 +46,7 @@ import {
   expandArchive,
   importArchive,
   uploadPerItem,
+  withTimeout,
   TRANSPORT_ITEM,
   TRANSPORT_ZIP,
 } from './transports.mjs';
@@ -267,13 +268,16 @@ async function runScenarios(ctx) {
 
   // ── 0. session + transport discovery ───────────────────────────────────────
   scenario('S0', 'The harness is genuinely signed in, and knows which transport this build serves');
-  const whoami = await fetch(`${baseUrl}/api/export/trial-balance`, { headers: { cookie: session.header } });
+  const whoami = await fetch(`${baseUrl}/api/export/trial-balance`, {
+    headers: { cookie: session.header },
+    signal: withTimeout(undefined, 30_000),
+  });
   check(
     whoami.status !== 401,
     'the minted session is accepted by the real auth gate',
     `GET /api/export/trial-balance → ${whoami.status}`,
   );
-  const anon = await fetch(`${baseUrl}/api/export/trial-balance`);
+  const anon = await fetch(`${baseUrl}/api/export/trial-balance`, { signal: withTimeout(undefined, 30_000) });
   check(anon.status === 401, 'an unauthenticated request is still rejected', `→ ${anon.status}`);
 
   const transports = await detectTransports(baseUrl, session.header);
@@ -808,6 +812,7 @@ async function runScenarios(ctx) {
       method: 'POST',
       headers: { cookie: session.header },
       body: form,
+      signal: withTimeout(undefined, 60_000),
     });
     const body = await res.json().catch(() => ({}));
     check(
@@ -880,6 +885,7 @@ async function runScenarios(ctx) {
       method: 'POST',
       headers: { cookie: session.header },
       body: form,
+      signal: withTimeout(undefined, 60_000),
     });
     const body = await res.json().catch(() => ({}));
     check(
