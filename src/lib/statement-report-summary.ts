@@ -31,18 +31,17 @@ export interface StatementReportSummary {
 export const SUMMARY_DETAIL_CAP = 8;
 
 /**
- * ZERO_AMOUNT is statement-specific; the known park reasons reuse the shared
- * wording so Raj reads identical language across the sandbox. The summary is
- * user-facing, so an UNKNOWN reason must never surface as its raw code
- * (parkReasonLabel echoes unknown codes back) — it gets a plain-English
- * fallback instead.
+ * ZERO_AMOUNT is statement-specific; other reasons reuse the shared
+ * park-reason wording so Raj reads identical language across the sandbox.
+ * parkReasonLabel echoes UNKNOWN codes back verbatim — detected here by
+ * comparing its output to the input, so this user-facing surface substitutes
+ * a plain-English fallback instead of leaking a raw code, and any reason
+ * added to the shared map later is picked up automatically.
  */
-const STATEMENT_SKIP_REASONS = new Set(['FX_UNSUPPORTED', 'NO_FISCAL_PERIOD']);
-
 function skipReasonLabel(reason: string): string {
   if (reason === 'ZERO_AMOUNT') return 'zero amount, nothing to book';
-  if (STATEMENT_SKIP_REASONS.has(reason)) return parkReasonLabel(reason);
-  return 'could not be imported for an unrecognised reason';
+  const label = parkReasonLabel(reason);
+  return label !== reason ? label : 'could not be imported for an unrecognised reason';
 }
 
 export function summarizeStatementReport(report: StatementIngestReport): StatementReportSummary {

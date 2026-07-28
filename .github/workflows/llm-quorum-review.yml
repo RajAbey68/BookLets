@@ -30,9 +30,14 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
+      # SECURITY (CodeRabbit critical): check out the trusted BASE commit, not
+      # the PR head — this job holds bot secrets, and executing head-controlled
+      # script code would let any branch exfiltrate them (pwn-request). The
+      # script fetches the PR diff via the API, so it never needs head files.
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
 
       - name: Z.AI verdict + RajAbeyBot approval
         env:
