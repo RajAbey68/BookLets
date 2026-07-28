@@ -128,6 +128,7 @@ function extractReport(body: unknown): ZipIngestReport | null {
 function topFailureReason(failures: IngestFailure[]): string {
   if (failures.some((f) => f.stage === 'ocr')) return 'OCR service could not read them';
   if (failures.some((f) => f.stage === 'ledger')) return 'could not save to the ledger';
+  if (failures.some((f) => f.stage === 'upload')) return 'they could not be uploaded';
   return '';
 }
 

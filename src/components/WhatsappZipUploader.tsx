@@ -6,21 +6,34 @@ import {
   summarizeZipUploadResponse,
   preflightZipFile,
   describeProgress,
-  splitNdjson,
-  MAX_ZIP_IMAGES,
   type ZipUploadResult,
   type ZipProgress,
 } from '../lib/zip-upload-result';
-
-/** Hard cap so a stuck request never leaves the UI hanging forever. */
-const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+import {
+  importWhatsappExport,
+  describeImportFailure,
+  toUploadReport,
+} from '../lib/whatsapp-import-client';
 
 /**
- * Uploads a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
- * images) to POST /api/ingest/zip. The endpoint STREAMS NDJSON progress — one
- * event per image — so this shows a live number-by-number count (never a
- * spinner: a spinner can't tell a slow import from a stuck one). Every entry is
- * DRAFT; nothing posts to the ledger until approved in the review queue.
+ * Inactivity watchdog. Not a total-run budget: a 200-receipt import legitimately
+ * runs for half an hour, and cancelling that at a fixed deadline would throw
+ * away work. What must never happen is silence — if no single file finishes
+ * for this long, something is stuck and the operator is told so.
+ */
+const IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * Imports a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
+ * images).
+ *
+ * The archive is expanded HERE, in the browser, and each entry is uploaded on
+ * its own small request to /api/ingest/item — a whole export can never be
+ * POSTed in one piece, because Vercel's edge rejects bodies over ~4.5 MB before
+ * the function even runs. Doing it per item also gives every photo its own OCR
+ * time budget and makes the progress count real (never a spinner: a spinner
+ * can't tell a slow import from a stuck one). Every entry lands as DRAFT;
+ * nothing posts to the ledger until approved in the review queue.
  */
 
 type UploaderStatus = 'IDLE' | 'UPLOADING' | 'DONE' | 'ERROR';
@@ -45,27 +58,18 @@ const IconAlert = () => (
 
 const EMPTY_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
 
-const NETWORK_ERROR: ZipUploadResult = {
-  ok: false,
-  title: 'Upload failed',
-  message: 'Could not reach the server. Check your connection and try again.',
-  ...EMPTY_COUNTS,
-};
-
-const TIMEOUT_ERROR: ZipUploadResult = {
-  ok: false,
-  title: 'Upload timed out',
-  message: 'The import took too long and was cancelled. Re-upload the same export — already-imported receipts are skipped.',
-  ...EMPTY_COUNTS,
-};
-
-function interruptedResult(last: ZipProgress | null): ZipUploadResult {
-  const where = last ? ` at ${last.done} of ${last.total}` : '';
+/**
+ * A run that stopped early still imported real drafts, so the counts are kept
+ * and the operator is told exactly how far it got and what to do about it.
+ */
+function interruptedResult(summary: ZipUploadResult, attempted: number, total: number): ZipUploadResult {
   return {
+    ...summary,
     ok: false,
-    title: 'Import interrupted',
-    message: `The import stopped early${where}. Re-upload the same export to resume — already-imported receipts are skipped.`,
-    ...EMPTY_COUNTS,
+    title: 'Import stopped early',
+    message:
+      `Stopped after ${attempted} of ${total} files. ${summary.message} ` +
+      'Re-upload the same export to carry on — receipts already imported are skipped, never duplicated.',
   };
 }
 
@@ -101,79 +105,38 @@ export const WhatsappZipUploader: React.FC = () => {
     setProgress(null);
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
+    // Reset on every finished file, so the watchdog measures silence, not
+    // duration — a long import is fine, a stalled one is not.
+    let idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    const bumpWatchdog = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
+    };
+
     try {
-      const form = new FormData();
-      form.append('file', file);
-      const res = await fetch('/api/ingest/zip', {
-        method: 'POST',
-        body: form,
-        headers: { accept: 'application/x-ndjson' },
+      const report = await importWhatsappExport(file, {
         signal: controller.signal,
+        onProgress: (p) => {
+          setProgress(p);
+          bumpWatchdog();
+        },
       });
 
-      // Auth (401) / byte-cap (413) return a plain status + JSON, no stream.
-      if (!res.ok || !res.body) {
-        let body: unknown = {};
-        try {
-          body = await res.json();
-        } catch {
-          // non-JSON error page — summarizer falls back on the status code
-        }
-        const summary = summarizeZipUploadResponse(res.status, body);
-        setResult(summary);
-        setStatus(summary.ok ? 'DONE' : 'ERROR');
-        return;
-      }
-
-      // NDJSON stream: progress ticks, then a terminal done/error event.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let last: ZipProgress | null = null;
-      let settled = false;
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const { events, rest } = splitNdjson(buffer);
-        buffer = rest;
-        for (const raw of events) {
-          const ev = raw as Record<string, unknown>;
-          if (ev.type === 'progress') {
-            last = ev as unknown as ZipProgress;
-            setProgress(last);
-          } else if (ev.type === 'done') {
-            const summary = summarizeZipUploadResponse(200, { report: ev.report });
-            setResult(summary);
-            setStatus(summary.ok ? 'DONE' : 'ERROR');
-            settled = true;
-          } else if (ev.type === 'error') {
-            const summary = summarizeZipUploadResponse(Number(ev.status) || 500, {
-              error: ev.message,
-              code: ev.code,
-              meta: ev.meta,
-            });
-            setResult(summary);
-            setStatus('ERROR');
-            settled = true;
-          }
-        }
-      }
-
-      // Stream ended with no terminal event → the request was cut off mid-batch
-      // (e.g. a serverless timeout). Show exactly how far it got.
-      if (!settled) {
-        setResult(interruptedResult(last));
-        setStatus('ERROR');
-      }
+      const summary = summarizeZipUploadResponse(200, { report: toUploadReport(report) });
+      const total = report.imageCount + report.textCount;
+      const final = report.interrupted
+        ? interruptedResult(summary, report.attempted, total)
+        : summary;
+      setResult(final);
+      setStatus(final.ok ? 'DONE' : 'ERROR');
     } catch (err) {
+      // Only archive-level rejections reach here; per-file problems are
+      // reported inside the summary above, never as a dead end.
       console.error('[WhatsappZipUploader]', err);
-      setResult(err instanceof DOMException && err.name === 'AbortError' ? TIMEOUT_ERROR : NETWORK_ERROR);
+      setResult({ ...describeImportFailure(err), ...EMPTY_COUNTS });
       setStatus('ERROR');
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(idle);
     }
   };
 
@@ -211,8 +174,9 @@ export const WhatsappZipUploader: React.FC = () => {
             </label>
             <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.75rem' }}>
               In WhatsApp: open the chat → Export Chat → <strong>Attach Media</strong> → save the .zip.
-              Max {MAX_ZIP_IMAGES} new receipts per upload — for a big backlog, export smaller
-              date ranges (1–2 weeks at a time).
+              Keep this tab open while it runs — receipts are imported one at a time and you can see
+              the count. If it stops early, just upload the same file again: it picks up where it
+              left off and never imports the same receipt twice.
             </p>
           </>
         )}

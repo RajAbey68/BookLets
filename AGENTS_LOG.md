@@ -25,6 +25,25 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### upload-transport-fix (claude/upload-transport-fix) — per-item receipt upload transport
+- **Started:** 2026-07-28
+- **Goal:** Make a real WhatsApp export importable at all. Vercel's edge 413s any
+  request body over ~4.5 MB before the function runs, so `POST /api/ingest/zip`
+  could never receive one and `public."JournalEntry"` has 0 rows. The browser now
+  expands the archive (`src/lib/zip-reader.ts`, zero new dependencies, uses
+  `DecompressionStream`) and POSTs each entry to `POST /api/ingest/item`.
+- **Touching:** `src/lib/zip-reader.ts`, `src/lib/ingest-limits.ts`,
+  `src/lib/ingest-item.ts`, `src/lib/ingest-item.deps.ts`,
+  `src/lib/whatsapp-import-client.ts`, `src/app/api/ingest/item/route.ts`,
+  `src/app/api/ingest/batch/route.ts`, plus light edits to
+  `WhatsappZipUploader.tsx`, `ZipUploadCard.tsx`, `zip-upload-result.ts`
+  (`stage: 'upload'` only), `zip-ingest.ts` (comments + widened
+  `IngestFailure['stage']`) and `upload-guard.ts` (`RateLimiter.reset`).
+- **Coordinate with:** `claude/upload-size-honest-failure` — it owns the client
+  preflight constants and error copy in the same three UI files. Edits here were
+  kept minimal and additive for that reason.
+- **No schema change. No migration. No production data touched.**
+
 ### fable5-builder-e5 (claude/e5-maker-identity) — session-derived maker identity + re-enable P1.4 SoD gate
 - **Started:** 2026-07-12
 - **Goal:** Close mandate E5. Human-initiated ledger writes already thread

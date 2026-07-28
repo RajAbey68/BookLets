@@ -63,7 +63,19 @@ export const MAX_ENTRY_COMPRESSION_RATIO = 100;
 /** Ratio guard noise floor — tiny highly-compressible files are legitimate. */
 export const RATIO_GUARD_MIN_BYTES = 64 * 1024;
 
-/** Cap on the COMPRESSED upload itself (checked by the route handler). */
+/**
+ * Cap on the COMPRESSED upload itself (checked by the route handler).
+ *
+ * REACHABILITY WARNING: on Vercel this ceiling is unreachable. The platform
+ * edge rejects any request body over ~4.5 MB with 413
+ * FUNCTION_PAYLOAD_TOO_LARGE *before* this function runs (measured against
+ * production: a 4 MB body reaches the handler, a 5 MB body does not), so
+ * POST /api/ingest/zip can only ever accept a small archive. A real WhatsApp
+ * "Export Chat → Attach Media" export is tens of MB and must go through the
+ * per-item transport instead: the browser expands it (src/lib/zip-reader.ts)
+ * and POSTs each entry to /api/ingest/item. This route is kept for small
+ * archives, curl and the existing test suite.
+ */
 export const MAX_ZIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /** OCR fan-out cap: at most this many in-flight OCR calls per ingest. */
@@ -157,7 +169,12 @@ export interface ZipIngestContext {
 
 export interface IngestFailure {
   name: string;
-  stage: 'ocr' | 'ledger';
+  /**
+   * 'upload' exists for the per-item transport (whatsapp-import-client.ts):
+   * the request itself failed, so the server never got to judge the receipt.
+   * The single-shot zip path never produces it.
+   */
+  stage: 'ocr' | 'ledger' | 'upload';
   error: string;
 }
 

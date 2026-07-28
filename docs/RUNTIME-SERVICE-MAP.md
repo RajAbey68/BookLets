@@ -51,25 +51,55 @@ Auth.js / NextAuth v5, **Google OAuth only**, JWT sessions; route-gating in `src
 |-------|--------|------|---------|
 | `/api/health` | GET | public | liveness |
 | `/api/auth/[...nextauth]` | * | public | NextAuth OAuth |
-| `/api/ingest/zip` | POST | session | **S5** WhatsApp `.zip` → DRAFT entries |
+| `/api/ingest/item` | POST | session | **primary** one WhatsApp archive entry → DRAFT entry / chat evidence |
+| `/api/ingest/batch` | POST | session | closes one import run; writes the server-recounted summary row |
+| `/api/ingest/zip` | POST | session | **S5, legacy** whole `.zip` → DRAFT entries (small archives only — see §5) |
 | `/api/ingest/ocr-bridge` | POST | session | **S1b** `raj_fin_track.ocr_receipts` staging → DRAFT |
 | `/api/export/{ledger,trial-balance,pl,balance-sheet}` | GET | session | report exports |
 
 ## 5. Ingestion flow (as-built)
 
+### Why the transport changed
+
+`POST /api/ingest/zip` **cannot receive a real WhatsApp export on Vercel.** The
+platform edge rejects any request body over ~4.5 MB with
+`413 FUNCTION_PAYLOAD_TOO_LARGE` *before the function runs* (measured on
+production: a 4 MB body reaches the handler and 401s, a 5 MB body 413s and
+never arrives). An "Export Chat → Attach Media" archive is tens of MB, so the
+route's `MAX_ZIP_UPLOAD_BYTES = 100 MB` was unreachable and **zero receipts were
+ever imported**. The archive is now expanded in the browser and uploaded one
+entry per request.
+
 ```
-WhatsApp .zip ─POST /api/ingest/zip─► ingestZip()
- (_chat.txt+images)                    ├─ guards: path-traversal, zip-bomb, entry-cap,
-                                       │   type-allowlist, 100 MB cap  (BEFORE any OCR spend)
-                                       ├─ per image: extractReceipt(b64) ─► OCR microservice ─(fallback)─► SymbiOS
-                                       ├─ dedup: sha256(image bytes) per org  (+ DB unique constraint)
-                                       └─ LedgerService.postEntry(DRAFT)   debit Suspense 9999 / credit Cash 1000
+WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
+ (_chat.txt+images)   guards HERE (client's own protection):        │
+                      entry-cap, total-uncompressed-cap,            │
+                      path-traversal, zip-bomb ratio, type allowlist│
+                                                                    ▼
+        for each entry ─POST /api/ingest/item (≤4 MB)─► ingestItem()
+                                       ├─ guards RE-APPLIED server-side:
+                                       │   filename sanitisation (traversal → 422),
+                                       │   MAX_ITEM_BYTES (413), extension allowlist,
+                                       │   magic bytes, per-org rate limit (429)
+                                       ├─ dedup: sha256(entry bytes) per org — SAME key
+                                       │   fn as the zip path (+ DB unique constraint)
+                                       ├─ extractReceipt(b64) ─► OCR microservice ─(fallback)─► SymbiOS
+                                       └─ LedgerService.postEntryWithOutcome(DRAFT)
+                                             debit Suspense 9999 / credit Cash 1000
+                                                │
+        end of run ─POST /api/ingest/batch─► WHATSAPP_BATCH_COMPLETED evidence
+                                             (counts recomputed from the server's
+                                              own per-item evidence rows)
                                                 │
                                           /review ─ human four-eyes ─► POSTED
 ```
-- **DRAFT-only**: `gateAutomatedJournalEntry` forces DRAFT regardless of OCR confidence (auto-POST abolished — canon §4).
-- UI entry point: dashboard **"Import WhatsApp export (.zip)"** (`WhatsappZipUploader.tsx`, shipped PR #99).
-- **Stopgap limits (PR #101, shipped 2026-07-19):** max **30 fresh (non-duplicate) images per upload** (`MAX_INGEST_IMAGES`, 422 `TOO_MANY_IMAGES` with `meta {limit, actual}` before any OCR spend); route `maxDuration=60`; dirty-OCR guard (0/negative/NaN amounts → `ocr`-stage failures, never ledger inputs). These bridge to the async-queue re-architecture (ingest-resilience issue) — batch orchestration still runs inline in one invocation until that lands.
+- **DRAFT-only**: OCR'd entries are born DRAFT regardless of confidence (auto-POST abolished — canon §4).
+- **Dedup is unchanged**: `computeEntryIdempotencyKey(orgId, sha256(entryBytes))` is *imported* by the item path from `zip-ingest.ts`, not reimplemented. It is content-addressed and date-independent, so re-uploading an export is a no-op, a partial run resumes, and entries imported through either transport dedupe against each other.
+- **Zip-bomb guard**: now client-side only, and that is correct — the server no longer inflates anything, so the protection is structural rather than a check. The only remaining decompressor is the user's own browser, where `zip-reader.ts` still enforces the ratio.
+- **Timeout**: one OCR per invocation, so the 60 s budget belongs to a single photo. `MAX_INGEST_IMAGES = 30` (PR #101) applies only to the legacy zip route and is not a limit on the per-item path.
+- **Evidence**: one `WHATSAPP_ITEM_INGESTED` row per uploaded entry, `ZIP_CHAT_INGESTED` for the transcript (same payload shape as before; `zipHash` replaced by `batchId`), and one `WHATSAPP_BATCH_COMPLETED` per run.
+- UI entry points: dashboard **"Import WhatsApp export (.zip)"** (`WhatsappZipUploader.tsx`) and the sandbox **"Upload receipts zip"** card (`ZipUploadCard.tsx`); both drive `src/lib/whatsapp-import-client.ts`.
+- **Known limits**: per-file cap **4 MB** (a photo sent as a *document* at full camera resolution is skipped by name, with advice); archive preflight cap 100 MB compressed / 200 MB uncompressed; the browser needs `DecompressionStream('deflate-raw')` (Chrome 80+, Safari 16.4+, Firefox 113+) and Zip64 archives are refused with a clear message.
 
 ## 6. External service dependency register  ⚠️ **read if you own one of these**
 

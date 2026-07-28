@@ -2,12 +2,13 @@
 
 import React, { useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { importWhatsappExport, describeImportFailure } from '@/lib/whatsapp-import-client';
 
 /**
  * Client-side pre-check mirror of MAX_ZIP_UPLOAD_BYTES (src/lib/zip-ingest.ts,
  * 100 MB). Not imported: zip-ingest pulls in adm-zip/node:crypto, which do not
  * belong in the client bundle. The server remains the authority — this only
- * saves Raj from uploading 100 MB just to see a 413.
+ * saves Raj from opening a 100 MB archive just to be told it is too big.
  */
 const MAX_ZIP_UPLOAD_MB = 100;
 
@@ -29,16 +30,20 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 /**
  * S11 — upload a receipts zip into the sandbox.
  *
- * Sends the archive EXACTLY as /api/ingest/zip expects for a non-multipart
- * request: the raw zip bytes as the request body with Content-Type
- * application/zip (the route buffers the body via arrayBuffer() behind its
- * byte-cap guard). All security guards, dedupe, and OCR run server-side; the
- * returned ZipIngestReport is translated to plain English here.
+ * The archive is expanded in the browser and each entry is POSTed separately
+ * to /api/ingest/item: Vercel's edge rejects any request body over ~4.5 MB
+ * before the function runs, so a real receipts export can never be sent whole.
+ * Expansion moved to the client; the trust boundary did not — the server
+ * re-checks every item's size, filename and type, and derives the dedupe key
+ * from a hash of the bytes it received. All OCR and ledger work stays
+ * server-side; the resulting report is translated to plain English here.
  */
 export default function ZipUploadCard() {
   const [status, setStatus] = useState<UploadStatus>('IDLE');
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<UploadReport | null>(null);
+  /** Live count, one tick per finished receipt — never an indeterminate spinner. */
+  const [progress, setProgress] = useState<string | null>(null);
   const [isDragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
@@ -59,44 +64,28 @@ export default function ZipUploadCard() {
     }
 
     setStatus('UPLOADING');
+    setProgress(null);
     try {
-      const res = await fetch('/api/ingest/zip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/zip' },
-        body: file,
+      const result = await importWhatsappExport(file, {
+        onProgress: (p) => setProgress(`Reading receipt ${p.done} of ${p.total} — ${p.name}`),
       });
-
-      // Error bodies are JSON ({ error, code? }) when the route answered, but
-      // a proxy/edge 413 may not be — parse defensively.
-      let body: { report?: UploadReport; error?: string } = {};
-      try {
-        body = await res.json();
-      } catch {
-        /* non-JSON body — fall through to the status-based messages */
-      }
-
-      if (!res.ok) {
-        setStatus('ERROR');
-        if (res.status === 401) setError('Sign in to upload receipts.');
-        else if (res.status === 403) setError("Your role can't upload receipts here.");
-        else if (res.status === 413) setError(body.error ?? `Zip too large (max ${MAX_ZIP_UPLOAD_MB} MB).`);
-        else setError(body.error ?? `Upload failed (HTTP ${res.status}). Try again shortly.`);
-        return;
-      }
-
-      if (!body.report) {
-        setStatus('ERROR');
-        setError('Upload succeeded but the server returned no summary. Refresh and check the queue.');
-        return;
-      }
-      setReport(body.report);
+      setReport(result);
       setStatus('DONE');
+      if (result.interrupted) {
+        setError(
+          `The import stopped after ${result.attempted} of ${result.imageCount + result.textCount} files. ` +
+            'Upload the same file again to carry on — nothing is imported twice.',
+        );
+      }
       // Re-render the server-side pieces (consensus queue, staging summary).
       router.refresh();
     } catch (err) {
+      // Only archive-level rejections land here; per-file problems are already
+      // inside the report as skipped/failed entries.
       setStatus('ERROR');
-      setError(err instanceof Error ? err.message : 'Upload failed. Check your connection and try again.');
+      setError(describeImportFailure(err).message);
     } finally {
+      setProgress(null);
       // Allow re-selecting the same file after an error or a second upload.
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -129,7 +118,7 @@ export default function ZipUploadCard() {
       >
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
           {busy
-            ? 'Uploading and reading the receipts — this can take a minute for large exports…'
+            ? (progress ?? 'Opening the archive…')
             : 'Drag a WhatsApp/receipts export (.zip) here, or pick a file. Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.'}
         </p>
         <label className="btn btn-primary" style={{ cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}>
@@ -148,7 +137,9 @@ export default function ZipUploadCard() {
         </label>
       </div>
 
-      {status === 'ERROR' && error && (
+      {/* Also shown on DONE: a run that stopped early still imported real
+          drafts, and the operator has to be told both facts at once. */}
+      {error && (
         <div role="alert" style={{ fontSize: '0.8125rem', color: 'var(--danger-color)', fontWeight: 600 }}>
           {error}
         </div>
