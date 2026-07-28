@@ -15,9 +15,11 @@ import { EvidenceLogService } from './evidence-log.service';
 import { RateLimiter } from './upload-guard';
 import { MAX_ZIP_ENTRIES, type ResolvedLedgerAccounts } from './zip-ingest';
 import {
+  BATCH_EVIDENCE_EVENT,
   ITEM_EVIDENCE_EVENT,
   type BatchItemEvidence,
   type BatchSummaryDeps,
+  type BatchTally,
   type ItemIngestDeps,
 } from './ingest-item';
 
@@ -38,6 +40,11 @@ import {
  */
 export const itemRateLimiter = new RateLimiter({ capacity: 60, refillPerMinute: 180 });
 
+/**
+ * Production IO for the per-item path: the real OCR client, the real
+ * LedgerService and the real hash-chained evidence log. Unit tests inject
+ * fakes instead, so no test touches a live DB or spends OCR budget.
+ */
 export function buildDefaultItemIngestDeps(): ItemIngestDeps {
   return {
     ocr: (imageBase64) => extractReceipt(imageBase64),
@@ -99,6 +106,16 @@ export function buildDefaultItemIngestDeps(): ItemIngestDeps {
   };
 }
 
+/** Reads a number out of an evidence payload, defaulting to 0. */
+function payloadCount(payload: Record<string, unknown>, key: string): number {
+  const value = payload[key];
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Production IO for closing a run. Both reads are scoped by tenantId, so an
+ * organisation can only ever summarise its own import.
+ */
 export function buildDefaultBatchSummaryDeps(): BatchSummaryDeps {
   return {
     /**
@@ -106,6 +123,10 @@ export function buildDefaultBatchSummaryDeps(): BatchSummaryDeps {
      * completion summary is computed from these — never from a client tally —
      * so the audit trail records what the server did, not what a browser said
      * it did. Scoped by tenantId, so one org can never summarise another's.
+     *
+     * Ordered NEWEST FIRST because tallyBatch collapses per-request rows down
+     * to per-entry facts with the newest winning: if the row cap ever bites, it
+     * must drop superseded attempts, never an entry's final outcome.
      */
     async loadBatchItemEvidence(organizationId, batchId): Promise<BatchItemEvidence[]> {
       const rows = await prisma.evidenceLog.findMany({
@@ -114,10 +135,11 @@ export function buildDefaultBatchSummaryDeps(): BatchSummaryDeps {
           eventType: ITEM_EVIDENCE_EVENT,
           payload: { path: ['batchId'], equals: batchId },
         },
-        orderBy: { createdAt: 'asc' },
-        // One archive can hold at most MAX_ZIP_ENTRIES items; the slack keeps
-        // a retried item from silently truncating the summary.
-        take: MAX_ZIP_ENTRIES + 50,
+        orderBy: { createdAt: 'desc' },
+        // One archive can hold at most MAX_ZIP_ENTRIES entries, but rows are
+        // per REQUEST, so retries can exceed that — the slack absorbs them and
+        // the desc ordering means anything dropped is already superseded.
+        take: MAX_ZIP_ENTRIES * 2,
         select: { payload: true },
       });
       return rows.map((row) => {
@@ -127,8 +149,38 @@ export function buildDefaultBatchSummaryDeps(): BatchSummaryDeps {
           kind: typeof payload.kind === 'string' ? payload.kind : 'unknown',
           outcome: typeof payload.outcome === 'string' ? payload.outcome : 'unknown',
           ...(typeof payload.stage === 'string' ? { stage: payload.stage } : {}),
+          ...(typeof payload.entrySha256 === 'string'
+            ? { entrySha256: payload.entrySha256 }
+            : {}),
         };
       });
+    },
+
+    /**
+     * The completion row already on record for this batch, if any. Makes
+     * closing a batch idempotent so a retry cannot append a second audit
+     * summary for one import.
+     */
+    async findExistingBatchCompletion(organizationId, batchId): Promise<BatchTally | null> {
+      const row = await prisma.evidenceLog.findFirst({
+        where: {
+          tenantId: organizationId,
+          eventType: BATCH_EVIDENCE_EVENT,
+          payload: { path: ['batchId'], equals: batchId },
+        },
+        orderBy: { createdAt: 'asc' },
+        select: { payload: true },
+      });
+      if (!row) return null;
+      const payload = (row.payload ?? {}) as Record<string, unknown>;
+      return {
+        total: payloadCount(payload, 'total'),
+        created: payloadCount(payload, 'created'),
+        deduped: payloadCount(payload, 'deduped'),
+        failed: payloadCount(payload, 'failed'),
+        skipped: payloadCount(payload, 'skipped'),
+        chatFiles: payloadCount(payload, 'chatFiles'),
+      };
     },
 
     async recordEvidence(input) {

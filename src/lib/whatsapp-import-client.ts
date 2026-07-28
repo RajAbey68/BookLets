@@ -28,7 +28,9 @@ import {
   readZipEntry,
   type SkippedZipEntry,
   type ZipEntryMeta,
+  type ZipReaderCode,
 } from './zip-reader';
+import type { ZipIngestReport } from './zip-ingest';
 
 /** Endpoint that accepts one archive entry. */
 export const ITEM_ENDPOINT = '/api/ingest/item';
@@ -49,7 +51,25 @@ export const DEFAULT_ITEM_CONCURRENCY = 3;
 /** Attempts per item when the server answers 429 (rate limited). */
 const RATE_LIMIT_ATTEMPTS = 3;
 const RATE_LIMIT_BACKOFF_MS = 4000;
+/** Ceiling on an honoured `retry-after`, so a bad header cannot park a run. */
+const RATE_LIMIT_MAX_WAIT_MS = 30_000;
 
+/**
+ * Inactivity watchdog. NOT a total-run budget: a 200-receipt import
+ * legitimately runs for half an hour, and cancelling that at a fixed deadline
+ * would throw away real work. What must never happen is silence — if no single
+ * item finishes for this long, the run is stopped and said so, rather than
+ * leaving a card spinning with no way back. Set to 0 to disable.
+ */
+export const DEFAULT_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
+
+/** Why a run stopped before attempting every item. */
+export type ImportInterruptedReason = 'cancelled' | 'idle-timeout';
+
+/**
+ * One tick per FINISHED item. Emitted whatever the outcome, so the count
+ * always moves — the point is to distinguish a slow import from a stuck one.
+ */
 export interface WhatsappImportProgress {
   /** Items finished so far (any outcome). */
   done: number;
@@ -62,6 +82,11 @@ export interface WhatsappImportProgress {
   failed: number;
 }
 
+/**
+ * An entry that did not import, and how far it got. `stage` matters to the
+ * operator: an OCR failure means the photo is unreadable, an upload failure
+ * means the request never landed and a retry will probably work.
+ */
 export interface WhatsappImportFailure {
   name: string;
   /** 'upload' means the request itself failed — the server never judged it. */
@@ -69,12 +94,20 @@ export interface WhatsappImportFailure {
   error: string;
 }
 
+/** A chat transcript accepted as evidence (never a journal entry). */
 export interface WhatsappChatFile {
   name: string;
   messageCount: number;
   participants: string[];
 }
 
+/**
+ * The outcome of one import run, as reported to the operator.
+ *
+ * Every count here is a tally of SERVER responses, not of attempts made:
+ * "34 imported" has to be literally true, because it is what someone will
+ * rely on when deciding whether his books are complete.
+ */
 export interface WhatsappImportReport {
   batchId: string;
   archiveName: string;
@@ -93,13 +126,30 @@ export interface WhatsappImportReport {
   attempted: number;
   /** True when the run stopped before every planned item was attempted. */
   interrupted: boolean;
+  /**
+   * Why it stopped, so the UI can distinguish "you cancelled" from "nothing
+   * responded for three minutes" — those need different advice.
+   */
+  interruptedReason: ImportInterruptedReason | null;
 }
 
+/**
+ * Knobs for one import run. All optional: the defaults are what production
+ * uses, and the injectable `fetchImpl` is what keeps this module testable
+ * with no network.
+ */
 export interface WhatsappImportOptions {
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
   concurrency?: number;
   onProgress?: (progress: WhatsappImportProgress) => void;
+  /**
+   * Stop the run if no item finishes for this long. Defaults to
+   * DEFAULT_IDLE_TIMEOUT_MS; 0 disables the watchdog. Every caller gets this
+   * for free, so "never hang silently" is a property of the transport rather
+   * than something each card has to remember to re-implement.
+   */
+  idleTimeoutMs?: number;
   /** Overridable for tests; production always uses the module constants. */
   itemEndpoint?: string;
   batchEndpoint?: string;
@@ -127,7 +177,28 @@ function newBatchId(): string {
   return `${hex(8)}-${hex(4)}-4${hex(3)}-8${hex(3)}-${hex(12)}`;
 }
 
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Wait `ms`, or until `signal` aborts — whichever comes first.
+ *
+ * Resolves (never rejects) on abort so the caller decides what to do; a plain
+ * setTimeout would make a cancelled import sit through the whole backoff before
+ * noticing, which is the same "unresponsive UI" failure in miniature.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal?.addEventListener('abort', finish, { once: true });
+  });
+}
 
 async function readErrorText(response: Response, fallback: string): Promise<string> {
   try {
@@ -160,10 +231,14 @@ async function uploadItem(
 
     if (response.status === 429 && attempt < RATE_LIMIT_ATTEMPTS) {
       const retryAfter = Number(response.headers?.get?.('retry-after'));
-      const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-        ? Math.min(retryAfter * 1000, 30_000)
-        : RATE_LIMIT_BACKOFF_MS * attempt;
-      await sleep(waitMs);
+      const waitMs =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, RATE_LIMIT_MAX_WAIT_MS)
+          : Math.min(RATE_LIMIT_BACKOFF_MS * attempt, RATE_LIMIT_MAX_WAIT_MS);
+      await sleep(waitMs, signal);
+      if (signal?.aborted) {
+        throw new DOMException('The import was cancelled.', 'AbortError');
+      }
       continue;
     }
 
@@ -196,8 +271,39 @@ export async function importWhatsappExport(
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_ITEM_CONCURRENCY);
   const batchId = options.batchId ?? newBatchId();
   const archiveName = file.name ?? 'export.zip';
-  const { signal } = options;
+  const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 
+  // One controller drives the whole run: the caller's signal and the
+  // inactivity watchdog both feed into it, and it is what every fetch is given.
+  // Putting the watchdog HERE rather than in each component means no caller can
+  // forget it — a stalled request can never strand a card on "Importing…".
+  const controller = new AbortController();
+  const { signal } = controller;
+  let stalled = false;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const armWatchdog = () => {
+    if (idleTimeoutMs <= 0) return;
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, idleTimeoutMs);
+  };
+  const disarmWatchdog = () => {
+    if (idleTimer !== undefined) clearTimeout(idleTimer);
+    idleTimer = undefined;
+  };
+
+  const cancelFromCaller = () => controller.abort();
+  if (options.signal?.aborted) controller.abort();
+  else options.signal?.addEventListener('abort', cancelFromCaller, { once: true });
+
+  // Armed before the first request and reset by every completed item, so it
+  // measures SILENCE rather than duration.
+  armWatchdog();
+
+  try {
   // Archive-level guards run here, before a single byte leaves the machine.
   const entries = await readZipDirectory(file);
   const plan = planWhatsappImport(entries, { maxItemBytes: MAX_ITEM_BYTES });
@@ -216,6 +322,7 @@ export async function importWhatsappExport(
     journalEntryIds: [],
     attempted: 0,
     interrupted: false,
+    interruptedReason: null,
   };
 
   const total = plan.texts.length + plan.images.length;
@@ -224,6 +331,7 @@ export async function importWhatsappExport(
   const tick = (name: string) => {
     done += 1;
     report.attempted = done;
+    armWatchdog();
     options.onProgress?.({
       done,
       total,
@@ -296,7 +404,7 @@ export async function importWhatsappExport(
     tick(name);
   };
 
-  const aborted = () => signal?.aborted === true;
+  const aborted = () => signal.aborted;
 
   // Chat transcripts first and sequentially: the transcript is the evidence
   // the receipts are read against, so it should be on record before any draft
@@ -324,10 +432,15 @@ export async function importWhatsappExport(
   }
 
   report.interrupted = report.attempted < total;
+  if (report.interrupted) {
+    report.interruptedReason = stalled ? 'idle-timeout' : 'cancelled';
+  }
 
   // Close the run with a summary the SERVER recounts from its own evidence
   // rows. Best-effort by design: the drafts are already saved, so a failed
-  // summary must never be reported to the operator as a failed import.
+  // summary must never be reported to the operator as a failed import. Skipped
+  // entirely for an interrupted run — recording a completion for a partial
+  // import would put a half-truth in the audit trail.
   if (!report.interrupted) {
     try {
       await fetchImpl(batchEndpoint, {
@@ -341,16 +454,28 @@ export async function importWhatsappExport(
     }
   }
 
-  return report;
+    return report;
+  } finally {
+    disarmWatchdog();
+    options.signal?.removeEventListener('abort', cancelFromCaller);
+  }
 }
 
 /**
  * Adapter to the shape summarizeZipUploadResponse (zip-upload-result.ts)
  * already understands, so the existing plain-language summariser — and its
  * tests — keep working unchanged across the transport swap.
+ *
+ * The return type is pinned to ZipIngestReport so a change to that contract
+ * breaks here at compile time instead of silently producing a summary with
+ * missing fields.
  */
-export function toUploadReport(report: WhatsappImportReport) {
+export function toUploadReport(report: WhatsappImportReport): ZipIngestReport {
   return {
+    // There is no zip hash any more — the archive is never uploaded. The batch
+    // id is the equivalent per-run correlation handle, and it is what the
+    // server writes into every evidence row for this import, so it is the
+    // right value for a field the summariser only ever passes through.
     zipHash: report.batchId,
     totalEntries: report.totalEntries,
     imageCount: report.imageCount,
@@ -371,13 +496,22 @@ export function toUploadReport(report: WhatsappImportReport) {
 
 // ─── operator-facing copy for archive-level rejections ───────────────────────
 
+/**
+ * Operator-facing copy for a failure: a short heading and a sentence that
+ * says what to DO next. Never raw technical text.
+ */
 export interface ImportFailureCopy {
   ok: false;
   title: string;
   message: string;
 }
 
-const ARCHIVE_FAILURE_COPY: Record<string, ImportFailureCopy> = {
+/**
+ * Typed as a TOTAL Record over ZipReaderCode on purpose: adding a new reader
+ * error code becomes a compile error here, so a new failure mode can never
+ * silently fall through to the generic "something went wrong" message.
+ */
+const ARCHIVE_FAILURE_COPY: Record<ZipReaderCode, ImportFailureCopy> = {
   INVALID_ZIP: {
     ok: false,
     title: 'Not a WhatsApp export',

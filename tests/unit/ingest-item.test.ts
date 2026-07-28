@@ -96,6 +96,18 @@ describe('sanitizeEntryName — the path-traversal guard, moved to the item boun
     expect(safe.length).toBeLessThanOrEqual(MAX_ITEM_NAME_LENGTH);
     expect(safe.endsWith('.jpg')).toBe(true);
   });
+
+  it('honours the cap even when the "extension" is itself pathologically long', () => {
+    // `a.` + 300 chars: the extension-preserving branch must not be able to
+    // push the result back over the limit it exists to enforce.
+    const safe = sanitizeEntryName(`a.${'b'.repeat(300)}`);
+    expect(safe.length).toBeLessThanOrEqual(MAX_ITEM_NAME_LENGTH);
+  });
+
+  it('caps a long name that has no extension at all', () => {
+    const safe = sanitizeEntryName('z'.repeat(4000));
+    expect(safe.length).toBeLessThanOrEqual(MAX_ITEM_NAME_LENGTH);
+  });
 });
 
 describe('classifyEntryName — the type allowlist, applied server-side', () => {

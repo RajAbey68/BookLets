@@ -94,8 +94,19 @@ export async function POST(request: Request) {
     return tooLarge(declaredLength);
   }
 
-  // Fan-out bound (replaces the archive-wide entry cap). Checked before the
-  // body is read so a throttled caller costs almost nothing.
+  // Shape checks come BEFORE the rate limiter. A request we reject on headers
+  // alone costs the server nothing, so charging it to the organisation's bucket
+  // would let malformed traffic throttle a legitimate import.
+  const contentType = request.headers.get('content-type') ?? '';
+  if (!contentType.includes('multipart/form-data')) {
+    return NextResponse.json(
+      { error: 'Send the archive entry as a multipart form with a "file" part.' },
+      { status: 400 },
+    );
+  }
+
+  // Fan-out bound (replaces the archive-wide entry cap). Still checked before
+  // the body is read, so a throttled caller never costs us the buffering.
   if (!itemRateLimiter.tryConsume(organizationId)) {
     return NextResponse.json(
       {
@@ -103,14 +114,6 @@ export async function POST(request: Request) {
         code: 'RATE_LIMITED',
       },
       { status: 429, headers: { 'retry-after': '10' } },
-    );
-  }
-
-  const contentType = request.headers.get('content-type') ?? '';
-  if (!contentType.includes('multipart/form-data')) {
-    return NextResponse.json(
-      { error: 'Send the archive entry as a multipart form with a "file" part.' },
-      { status: 400 },
     );
   }
 

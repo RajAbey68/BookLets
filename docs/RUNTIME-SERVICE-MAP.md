@@ -70,7 +70,7 @@ route's `MAX_ZIP_UPLOAD_BYTES = 100 MB` was unreachable and **zero receipts were
 ever imported**. The archive is now expanded in the browser and uploaded one
 entry per request.
 
-```
+```text
 WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
  (_chat.txt+images)   guards HERE (client's own protection):        │
                       entry-cap, total-uncompressed-cap,            │
@@ -97,7 +97,8 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 - **Dedup is unchanged**: `computeEntryIdempotencyKey(orgId, sha256(entryBytes))` is *imported* by the item path from `zip-ingest.ts`, not reimplemented. It is content-addressed and date-independent, so re-uploading an export is a no-op, a partial run resumes, and entries imported through either transport dedupe against each other.
 - **Zip-bomb guard**: now client-side only, and that is correct — the server no longer inflates anything, so the protection is structural rather than a check. The only remaining decompressor is the user's own browser, where `zip-reader.ts` still enforces the ratio.
 - **Timeout**: one OCR per invocation, so the 60 s budget belongs to a single photo. `MAX_INGEST_IMAGES = 30` (PR #101) applies only to the legacy zip route and is not a limit on the per-item path.
-- **Evidence**: one `WHATSAPP_ITEM_INGESTED` row per uploaded entry, `ZIP_CHAT_INGESTED` for the transcript (same payload shape as before; `zipHash` replaced by `batchId`), and one `WHATSAPP_BATCH_COMPLETED` per run.
+- **Evidence**: one `WHATSAPP_ITEM_INGESTED` row per uploaded entry, `ZIP_CHAT_INGESTED` for the transcript (same payload shape as before; `zipHash` replaced by `batchId`), and one `WHATSAPP_BATCH_COMPLETED` per run. Item rows are per REQUEST, so `tallyBatch` collapses them by `entrySha256` (newest wins) before counting — a retried upload must not read as two receipts. Closing a batch is idempotent: a replayed close returns the existing summary instead of appending a second one.
+- **Never hangs**: the inactivity watchdog lives inside `importWhatsappExport`, not in the cards, so every caller gets it. It measures *silence* (no item finished for 3 min), never total duration — a long healthy import is not cancelled for taking a while. Rate-limit backoff honours `retry-after` clamped to 30 s and is abort-aware.
 - UI entry points: dashboard **"Import WhatsApp export (.zip)"** (`WhatsappZipUploader.tsx`) and the sandbox **"Upload receipts zip"** card (`ZipUploadCard.tsx`); both drive `src/lib/whatsapp-import-client.ts`.
 - **Known limits**: per-file cap **4 MB** (a photo sent as a *document* at full camera resolution is skipped by name, with advice); archive preflight cap 100 MB compressed / 200 MB uncompressed; the browser needs `DecompressionStream('deflate-raw')` (Chrome 80+, Safari 16.4+, Firefox 113+) and Zip64 archives are refused with a clear message.
 

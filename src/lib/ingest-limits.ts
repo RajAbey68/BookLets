@@ -75,8 +75,16 @@ export function classifyEntryName(name: string): 'image' | 'text' | null {
   return null;
 }
 
-/** Human-readable reason used identically by the browser plan and the server. */
+/**
+ * Human-readable reason used identically by the browser plan and the server.
+ *
+ * The accepted-types list is DERIVED from the sets above rather than written
+ * out again: a hand-written list drifts the moment someone adds a format, and
+ * a message that lies about what is accepted is worse than no message.
+ */
 export function disallowedTypeReason(name: string): string {
   const ext = extensionOf(name);
-  return `Disallowed type ".${ext || '(none)'}" — only jpg/jpeg/png/webp/heic images and .txt chat files are ingested.`;
+  const images = [...ITEM_IMAGE_EXTENSIONS].join('/');
+  const texts = [...ITEM_TEXT_EXTENSIONS].map((e) => `.${e}`).join('/');
+  return `Disallowed type ".${ext || '(none)'}" — only ${images} images and ${texts} chat files are ingested.`;
 }

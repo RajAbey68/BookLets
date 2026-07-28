@@ -72,8 +72,14 @@ export default function ZipUploadCard() {
       setReport(result);
       setStatus('DONE');
       if (result.interrupted) {
+        // importWhatsappExport carries the inactivity watchdog, so a stalled
+        // request always ends here with a message instead of leaving this card
+        // stuck on "Uploading…" with the file picker disabled.
+        const total = result.imageCount + result.textCount;
         setError(
-          `The import stopped after ${result.attempted} of ${result.imageCount + result.textCount} files. ` +
+          (result.interruptedReason === 'idle-timeout'
+            ? `The import stalled after ${result.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging. `
+            : `The import stopped after ${result.attempted} of ${total} files. `) +
             'Upload the same file again to carry on — nothing is imported twice.',
         );
       }
@@ -116,7 +122,12 @@ export default function ZipUploadCard() {
           marginBottom: '1rem',
         }}
       >
-        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
+        {/* aria-live so the running count is announced during a long import —
+            a screen-reader user must not be left guessing whether it moved. */}
+        <p
+          aria-live="polite"
+          style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}
+        >
           {busy
             ? (progress ?? 'Opening the archive…')
             : 'Drag a WhatsApp/receipts export (.zip) here, or pick a file. Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.'}

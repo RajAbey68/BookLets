@@ -13,15 +13,8 @@ import {
   importWhatsappExport,
   describeImportFailure,
   toUploadReport,
+  type WhatsappImportReport,
 } from '../lib/whatsapp-import-client';
-
-/**
- * Inactivity watchdog. Not a total-run budget: a 200-receipt import legitimately
- * runs for half an hour, and cancelling that at a fixed deadline would throw
- * away work. What must never happen is silence — if no single file finishes
- * for this long, something is stuck and the operator is told so.
- */
-const IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /**
  * Imports a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
@@ -61,14 +54,23 @@ const EMPTY_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReview
 /**
  * A run that stopped early still imported real drafts, so the counts are kept
  * and the operator is told exactly how far it got and what to do about it.
+ * "Nothing responded" and "you cancelled" need different first sentences.
  */
-function interruptedResult(summary: ZipUploadResult, attempted: number, total: number): ZipUploadResult {
+function interruptedResult(
+  summary: ZipUploadResult,
+  report: WhatsappImportReport,
+): ZipUploadResult {
+  const total = report.imageCount + report.textCount;
+  const lead =
+    report.interruptedReason === 'idle-timeout'
+      ? `The import stalled after ${report.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging.`
+      : `The import stopped after ${report.attempted} of ${total} files.`;
   return {
     ...summary,
     ok: false,
     title: 'Import stopped early',
     message:
-      `Stopped after ${attempted} of ${total} files. ${summary.message} ` +
+      `${lead} ${summary.message} ` +
       'Re-upload the same export to carry on — receipts already imported are skipped, never duplicated.',
   };
 }
@@ -104,29 +106,13 @@ export const WhatsappZipUploader: React.FC = () => {
     setResult(null);
     setProgress(null);
 
-    const controller = new AbortController();
-    // Reset on every finished file, so the watchdog measures silence, not
-    // duration — a long import is fine, a stalled one is not.
-    let idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
-    const bumpWatchdog = () => {
-      clearTimeout(idle);
-      idle = setTimeout(() => controller.abort(), IDLE_TIMEOUT_MS);
-    };
-
     try {
-      const report = await importWhatsappExport(file, {
-        signal: controller.signal,
-        onProgress: (p) => {
-          setProgress(p);
-          bumpWatchdog();
-        },
-      });
+      // The inactivity watchdog lives inside importWhatsappExport, so it
+      // applies to every caller and cannot be forgotten here.
+      const report = await importWhatsappExport(file, { onProgress: setProgress });
 
       const summary = summarizeZipUploadResponse(200, { report: toUploadReport(report) });
-      const total = report.imageCount + report.textCount;
-      const final = report.interrupted
-        ? interruptedResult(summary, report.attempted, total)
-        : summary;
+      const final = report.interrupted ? interruptedResult(summary, report) : summary;
       setResult(final);
       setStatus(final.ok ? 'DONE' : 'ERROR');
     } catch (err) {
@@ -135,8 +121,6 @@ export const WhatsappZipUploader: React.FC = () => {
       console.error('[WhatsappZipUploader]', err);
       setResult({ ...describeImportFailure(err), ...EMPTY_COUNTS });
       setStatus('ERROR');
-    } finally {
-      clearTimeout(idle);
     }
   };
 

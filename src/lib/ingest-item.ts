@@ -69,8 +69,17 @@ export const CHAT_EVIDENCE_EVENT = 'ZIP_CHAT_INGESTED';
 
 // ─── errors ───────────────────────────────────────────────────────────────────
 
+/**
+ * Reasons an item is refused outright (as opposed to being reported as a
+ * per-item skip). Both mean the REQUEST was malformed, not the receipt.
+ */
 export type ItemIngestCode = 'INVALID_NAME' | 'INVALID_BATCH_ID';
 
+/**
+ * Thrown only when a request cannot be processed at all. Anything wrong with
+ * the receipt itself comes back as an ItemIngestResult so one bad photo
+ * never aborts an import run.
+ */
 export class ItemIngestError extends Error {
   readonly code: ItemIngestCode;
 
@@ -83,8 +92,16 @@ export class ItemIngestError extends Error {
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
+/**
+ * What happened to one entry.
+ *   created   — a new DRAFT journal entry exists
+ *   duplicate — already in the books (dedup by content hash); a no-op
+ *   skipped   — refused by a guard (type, size, magic bytes); no spend
+ *   failed    — OCR or the ledger rejected it; needs a human
+ */
 export type ItemOutcome = 'created' | 'duplicate' | 'skipped' | 'failed';
 
+/** The server’s verdict on one uploaded entry. */
 export interface ItemIngestResult {
   /** Sanitised filename — safe to render, log and store. */
   name: string;
@@ -102,11 +119,16 @@ export interface ItemIngestResult {
   participants?: string[];
 }
 
+/**
+ * Who is importing. ALWAYS derived from the signed-in session by the route
+ * — never from request input, or one org could write into another’s books.
+ */
 export interface ItemIngestContext {
   organizationId: string;
   userId: string;
 }
 
+/** Per-request extras that are not part of the entry itself. */
 export interface ItemIngestOptions {
   /** Correlation id for one archive import run; recorded in the audit trail. */
   batchId?: string;
@@ -126,6 +148,14 @@ export interface ItemIngestDeps {
 }
 
 // ─── name handling ────────────────────────────────────────────────────────────
+
+/**
+ * Longest trailing ".xxx" still treated as an extension worth preserving when
+ * a name has to be truncated. The longest allowlisted extension is "jpeg"; the
+ * slack covers unusual-but-real ones without letting a 300-character tail
+ * masquerade as a file type and defeat MAX_ITEM_NAME_LENGTH.
+ */
+const MAX_PRESERVED_EXTENSION = 12;
 
 /**
  * Control characters (NUL, CR, LF and friends) are stripped: a filename now
@@ -159,8 +189,13 @@ export function sanitizeEntryName(raw: string): string {
   if (base.length <= MAX_ITEM_NAME_LENGTH) return base;
 
   // Preserve the extension: the type allowlist reads it, and so does a human.
+  // A "extension" longer than MAX_PRESERVED_EXTENSION is not one — keeping it
+  // would push the result back over the very cap this branch enforces, so it
+  // is dropped and the name is simply truncated. The truncated name then fails
+  // the allowlist, which is the right outcome for `a.` + 300 characters.
   const dot = base.lastIndexOf('.');
-  const ext = dot > 0 ? base.slice(dot) : '';
+  const candidate = dot > 0 ? base.slice(dot) : '';
+  const ext = candidate.length <= MAX_PRESERVED_EXTENSION ? candidate : '';
   const keep = Math.max(1, MAX_ITEM_NAME_LENGTH - ext.length);
   return base.slice(0, keep) + ext;
 }
@@ -178,6 +213,10 @@ export function sanitizeLabel(raw: unknown, maxLength = MAX_ITEM_NAME_LENGTH): s
 /** Batch ids are server-shaped (UUID v4); anything else is refused outright. */
 const BATCH_ID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
+/**
+ * Return `raw` if it is a well-formed batch id, else throw. Use where a
+ * batch id is required; isValidBatchId is the non-throwing form.
+ */
 export function assertBatchId(raw: unknown): string {
   if (typeof raw !== 'string' || !BATCH_ID_PATTERN.test(raw)) {
     throw new ItemIngestError('INVALID_BATCH_ID', 'The import batch id is missing or malformed.');
@@ -185,6 +224,10 @@ export function assertBatchId(raw: unknown): string {
   return raw;
 }
 
+/**
+ * True for a well-formed batch id. The id reaches the audit trail, so its
+ * shape is checked before it is ever stored.
+ */
 export function isValidBatchId(raw: unknown): raw is string {
   return typeof raw === 'string' && BATCH_ID_PATTERN.test(raw);
 }
@@ -433,6 +476,13 @@ export interface BatchItemEvidence {
   kind: string;
   outcome: string;
   stage?: string;
+  /**
+   * sha256 of the entry's bytes. This is the ENTRY's identity — evidence rows
+   * are written per REQUEST, so one entry can have several (a retried upload,
+   * a replayed request). tallyBatch collapses on this so a receipt is counted
+   * once no matter how many attempts it took.
+   */
+  entrySha256?: string;
 }
 
 export interface BatchTally {
@@ -450,10 +500,32 @@ export interface BatchTally {
   chatFiles: number;
 }
 
-/** Count outcomes the SERVER recorded. Never derived from a client report. */
+/**
+ * Count outcomes the SERVER recorded. Never derived from a client report.
+ *
+ * `items` MUST arrive newest-first (`createdAt desc`). Evidence rows are
+ * per-REQUEST, not per-entry: a retried upload writes a second row for the
+ * same bytes, so counting rows would report "2 receipts, 1 failed" for one
+ * receipt that eventually succeeded. Rows are therefore collapsed by
+ * `entrySha256` with the newest winning — which is also why the caller's row
+ * cap must truncate the OLDEST rows, never the final outcome.
+ *
+ * A row without `entrySha256` is malformed; those are kept distinct rather
+ * than merged, because merging on weak identity under-reports (and two
+ * genuinely different entries can sanitise to the same filename).
+ */
 export function tallyBatch(items: readonly BatchItemEvidence[]): BatchTally {
+  const latestByEntry = new Map<string, BatchItemEvidence>();
+  items.forEach((item, index) => {
+    const key =
+      typeof item.entrySha256 === 'string' && item.entrySha256.length > 0
+        ? `sha:${item.entrySha256}`
+        : `row:${index}:${item.name}`;
+    if (!latestByEntry.has(key)) latestByEntry.set(key, item);
+  });
+
   const tally: BatchTally = { total: 0, created: 0, deduped: 0, failed: 0, skipped: 0, chatFiles: 0 };
-  for (const item of items) {
+  for (const item of latestByEntry.values()) {
     tally.total += 1;
     if (item.kind === 'text') {
       tally.chatFiles += 1;
@@ -468,15 +540,29 @@ export function tallyBatch(items: readonly BatchItemEvidence[]): BatchTally {
 }
 
 export interface BatchSummaryDeps {
-  /** Per-item evidence rows recorded for this batch, this organisation. */
+  /**
+   * Per-item evidence rows recorded for this batch, this organisation,
+   * ordered NEWEST FIRST (see tallyBatch).
+   */
   loadBatchItemEvidence: (organizationId: string, batchId: string) => Promise<BatchItemEvidence[]>;
+  /**
+   * The tally from an already-written completion row for this batch, or null.
+   * Makes closing a batch idempotent — see completeBatch.
+   */
+  findExistingBatchCompletion: (
+    organizationId: string,
+    batchId: string,
+  ) => Promise<BatchTally | null>;
   recordEvidence: (input: EvidenceInput) => Promise<void>;
 }
 
+/** Outcome of closing one import run. */
 export interface BatchSummaryResult {
   batchId: string;
   summaryRecorded: boolean;
   tally: BatchTally | null;
+  /** True when this call found a completion already on record and wrote nothing. */
+  alreadyRecorded: boolean;
 }
 
 /**
@@ -484,6 +570,19 @@ export interface BatchSummaryResult {
  * ZIP_INGEST_COMPLETED. The counts are recomputed from the server's own
  * per-item evidence rows, so a client cannot talk the audit trail into a
  * number that never happened.
+ *
+ * IDEMPOTENT: a browser retry or a double-POST must not append a second
+ * WHATSAPP_BATCH_COMPLETED row — an auditor summing completion rows would then
+ * double-count an import that happened once. (The journal entries themselves
+ * are protected by the idempotency key, so this is an audit-trail and
+ * reported-counts problem, not a double-booking one.) When a completion is
+ * already on record this returns it unchanged.
+ *
+ * RESIDUAL RACE, stated plainly: the check-then-write is at application level,
+ * so two *simultaneous* closes could both see "none" and both write. That
+ * window is milliseconds and the client sends exactly one close per run. A
+ * hard guarantee would need a unique index on the evidence log, which is a
+ * migration this change deliberately does not carry — see the PR notes.
  *
  * Failure here is deliberately NOT fatal: the drafts are already safely in the
  * ledger, and telling a non-developer his import failed because a summary row
@@ -497,6 +596,11 @@ export async function completeBatch(
 ): Promise<BatchSummaryResult> {
   const makerIdentity = `${ZIP_INGEST_SOURCE}:${ctx.userId}`;
   try {
+    const existing = await deps.findExistingBatchCompletion(ctx.organizationId, batchId);
+    if (existing) {
+      return { batchId, summaryRecorded: true, tally: existing, alreadyRecorded: true };
+    }
+
     const items = await deps.loadBatchItemEvidence(ctx.organizationId, batchId);
     const tally = tallyBatch(items);
     await deps.recordEvidence({
@@ -514,9 +618,9 @@ export async function completeBatch(
         entries: items.map((i) => ({ name: i.name, kind: i.kind, outcome: i.outcome })),
       },
     });
-    return { batchId, summaryRecorded: true, tally };
+    return { batchId, summaryRecorded: true, tally, alreadyRecorded: false };
   } catch (err) {
     console.error('[ingest/batch] summary could not be recorded:', err);
-    return { batchId, summaryRecorded: false, tally: null };
+    return { batchId, summaryRecorded: false, tally: null, alreadyRecorded: false };
   }
 }

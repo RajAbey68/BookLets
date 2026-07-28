@@ -172,6 +172,33 @@ describe('guards', () => {
     expect(mockDeps.recordEvidence).not.toHaveBeenCalled();
   });
 
+  it('413s a body past the stream cap, aborting it mid-flight', async () => {
+    // Bigger than MAX_ITEM_BYTES *plus* the multipart allowance, so the guard
+    // that fires is withByteCap tearing the body stream down — not the
+    // post-decode size gate. An oversize upload must never be fully buffered.
+    const huge = Buffer.alloc(MAX_ITEM_BYTES + 128 * 1024, 0x41);
+    const res = await POST(itemRequest(huge));
+    expect(res.status).toBe(413);
+    expect(mockDeps.ocr).not.toHaveBeenCalled();
+    expect(mockDeps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('does not spend the organisation’s rate-limit budget on a malformed request', async () => {
+    // A request we reject on shape alone costs the server nothing. Charging it
+    // to the org's bucket would let junk traffic throttle a real import.
+    const spy = vi.spyOn(itemRateLimiter, 'tryConsume');
+    const res = await POST(
+      new Request('http://localhost/api/ingest/item', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it('429s once the per-organisation rate limit is exhausted', async () => {
     // The limiter replaces the archive-wide MAX_ZIP_ENTRIES cap: one item per
     // request means the fan-out bound has to live in a rate limit instead.

@@ -75,6 +75,10 @@ export const READER_RATIO_GUARD_MIN_BYTES = 64 * 1024;
 /** Re-exported so callers get one import for the per-item ceiling. */
 export { MAX_ITEM_BYTES };
 
+/**
+ * Archive-level budgets. Every field mirrors a server-side constant in
+ * zip-ingest.ts; tests/unit/zip-reader.test.ts fails CI if they drift.
+ */
 export interface ZipReaderLimits {
   maxEntries: number;
   maxTotalUncompressedBytes: number;
@@ -91,6 +95,11 @@ const DEFAULT_LIMITS: ZipReaderLimits = {
 
 // ─── errors ───────────────────────────────────────────────────────────────────
 
+/**
+ * Machine-readable reason an archive was refused. Each code maps to
+ * operator-facing copy in whatsapp-import-client.describeImportFailure,
+ * which is typed as a total Record so a new code cannot go unhandled.
+ */
 export type ZipReaderCode =
   | 'INVALID_ZIP'
   | 'TOO_MANY_ENTRIES'
@@ -100,6 +109,10 @@ export type ZipReaderCode =
   | 'UNSUPPORTED_ZIP'
   | 'UNSUPPORTED_BROWSER';
 
+/**
+ * Thrown for an archive-level rejection. Carries a `code` so the caller can
+ * choose plain-language advice instead of surfacing raw zip terminology.
+ */
 export class ZipReaderError extends Error {
   readonly code: ZipReaderCode;
 
@@ -129,6 +142,12 @@ const ZIP64_SENTINEL_16 = 0xffff;
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
+/**
+ * One entry as described by the archive index. Sizes and offsets come from
+ * the CENTRAL DIRECTORY, which is authoritative; local headers may carry
+ * zeroed sizes with a trailing data descriptor. Treat every field as
+ * attacker-influenced — it is whatever the file claims.
+ */
 export interface ZipEntryMeta {
   /** Entry name exactly as stored, including any directory prefix. */
   name: string;
@@ -140,11 +159,19 @@ export interface ZipEntryMeta {
   isDirectory: boolean;
 }
 
+/**
+ * An entry that will not be uploaded, and the reason in words the operator
+ * can act on. Reported by name so a short count is never a mystery.
+ */
 export interface SkippedZipEntry {
   name: string;
   reason: string;
 }
 
+/**
+ * What an archive turns into: receipts to OCR, transcripts to keep as
+ * evidence, and everything deliberately left behind.
+ */
 export interface WhatsappImportPlan {
   images: ZipEntryMeta[];
   texts: ZipEntryMeta[];
@@ -391,6 +418,17 @@ export async function readZipEntry(
 ): Promise<Uint8Array> {
   const cfg: ZipReaderLimits = { ...DEFAULT_LIMITS, ...limits };
 
+  // Absolute ceiling, independent of what the archive index claims. The
+  // declared size is attacker-controlled, and this function is exported — a
+  // caller reaching it without going through readZipDirectory/planWhatsappImport
+  // must still not be able to ask for an arbitrary allocation.
+  if (entry.uncompressedSize > cfg.maxTotalUncompressedBytes) {
+    throw new ZipReaderError(
+      'TOTAL_SIZE_EXCEEDED',
+      `Entry "${entry.name}" declares ${Math.round(entry.uncompressedSize / (1024 * 1024))} MB, above the ${Math.floor(cfg.maxTotalUncompressedBytes / (1024 * 1024))} MB limit.`,
+    );
+  }
+
   const header = await readRange(
     blob,
     entry.localHeaderOffset,
@@ -450,6 +488,7 @@ export async function readZipEntry(
   return data;
 }
 
+/** Overrides for planWhatsappImport; production uses the defaults. */
 export interface WhatsappPlanOptions {
   /** Per-request byte ceiling; entries above it cannot be uploaded at all. */
   maxItemBytes?: number;

@@ -214,3 +214,57 @@ describe('summarizeZipUploadResponse — explicit counts (owner: "how many did i
     expect(res.message.toLowerCase()).toMatch(/chat text|attach media/);
   });
 });
+
+/**
+ * Transport failures are not OCR failures.
+ *
+ * With the per-item upload transport an entry can fail before the server ever
+ * looks at it (`stage: 'upload'`). Reporting that as "couldn't be read" sends
+ * the operator hunting for an unreadable photo that is perfectly fine — the
+ * request simply never landed. The two need different words.
+ */
+describe('failure wording is stage-accurate', () => {
+  it('does not call an upload failure a reading failure', () => {
+    const body = {
+      report: report({
+        imageCount: 2,
+        created: 1,
+        deduped: 0,
+        failures: [{ name: 'IMG-2.jpg', stage: 'upload' as const, error: 'Failed to fetch' }],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.failed).toBe(1);
+    expect(res.message).not.toMatch(/couldn't be read \(they could not be uploaded\)/);
+    expect(res.message.toLowerCase()).toMatch(/upload/);
+  });
+
+  it('still says "couldn’t be read" for a genuine OCR failure', () => {
+    const body = {
+      report: report({
+        imageCount: 2,
+        created: 1,
+        failures: [{ name: 'IMG-2.jpg', stage: 'ocr' as const, error: 'unreadable' }],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.message).toMatch(/couldn't be read/);
+    expect(res.message).toMatch(/OCR/);
+  });
+
+  it('reports a mixed batch without claiming every failure was one kind', () => {
+    const body = {
+      report: report({
+        imageCount: 3,
+        created: 1,
+        failures: [
+          { name: 'a.jpg', stage: 'ocr' as const, error: 'unreadable' },
+          { name: 'b.jpg', stage: 'upload' as const, error: 'Failed to fetch' },
+        ],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.failed).toBe(2);
+    expect(res.message).toMatch(/2 /);
+  });
+});

@@ -239,6 +239,25 @@ describe('readZipEntry', () => {
   });
 });
 
+describe('readZipEntry — absolute inflate ceiling', () => {
+  it('refuses to inflate past an absolute cap even when the index declares more', async () => {
+    // readZipEntry is exported and can be called without going through
+    // planWhatsappImport, so it must not be willing to allocate whatever the
+    // (attacker-controlled) central directory happens to declare.
+    const payload = Buffer.alloc(200_000, 0x41);
+    const zip = new AdmZip();
+    zip.addFile('big.txt', payload);
+    const blob = blobOf(zip.toBuffer());
+    const [entry] = await readZipDirectory(blob, { maxEntryCompressionRatio: 1_000_000 });
+    await expect(
+      readZipEntry(blob, entry, {
+        maxEntryCompressionRatio: 1_000_000,
+        maxTotalUncompressedBytes: 1024,
+      }),
+    ).rejects.toMatchObject({ code: 'TOTAL_SIZE_EXCEEDED' });
+  });
+});
+
 describe('planWhatsappImport', () => {
   it('splits images and chat text, and skips everything else with a reason', async () => {
     const entries = await readZipDirectory(blobOf(whatsappZip()));

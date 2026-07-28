@@ -124,12 +124,23 @@ function extractReport(body: unknown): ZipIngestReport | null {
   return null;
 }
 
-/** Friendly, specific reason for a batch of failures (surfaced so "1 failed" isn't a blank). */
-function topFailureReason(failures: IngestFailure[]): string {
-  if (failures.some((f) => f.stage === 'ocr')) return 'OCR service could not read them';
-  if (failures.some((f) => f.stage === 'ledger')) return 'could not save to the ledger';
-  if (failures.some((f) => f.stage === 'upload')) return 'they could not be uploaded';
-  return '';
+/**
+ * Friendly, specific phrasing for a batch of failures (surfaced so "1 failed"
+ * isn't a blank).
+ *
+ * The whole clause is stage-derived, not just a parenthetical: with the
+ * per-item transport an entry can fail before the server ever looks at it
+ * (`stage: 'upload'`), and calling that "couldn't be read" sends the operator
+ * hunting for an unreadable photo that is in fact perfectly fine. Mixed stages
+ * get neutral wording rather than the first stage speaking for all of them.
+ */
+function describeFailures(failures: IngestFailure[], failed: number): string {
+  const stages = new Set(failures.map((f) => f.stage));
+  if (stages.size > 1) return `${failed} could not be imported`;
+  if (stages.has('ocr')) return `${failed} couldn't be read (OCR service could not read them)`;
+  if (stages.has('ledger')) return `${failed} couldn't be saved to the ledger`;
+  if (stages.has('upload')) return `${failed} couldn't be uploaded (the request did not reach the server)`;
+  return `${failed} could not be imported`;
 }
 
 function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
@@ -160,8 +171,7 @@ function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
   // Always state, explicitly, what happened to the receipts it saw.
   const parts = [`${created} imported`, `${deduped} already in your books`];
   if (failed > 0) {
-    const reason = topFailureReason(failures);
-    parts.push(`${failed} couldn't be read${reason ? ` (${reason})` : ''}`);
+    parts.push(describeFailures(failures, failed));
   }
   const headline = `Saw ${seen} receipt${seen === 1 ? '' : 's'}`;
   const message = `${headline}: ${parts.join(' · ')}${skippedNote}.`;

@@ -39,10 +39,20 @@ joining this repo should read it before claiming scope here.
   `WhatsappZipUploader.tsx`, `ZipUploadCard.tsx`, `zip-upload-result.ts`
   (`stage: 'upload'` only), `zip-ingest.ts` (comments + widened
   `IngestFailure['stage']`) and `upload-guard.ts` (`RateLimiter.reset`).
-- **Coordinate with:** `claude/upload-size-honest-failure` — it owns the client
-  preflight constants and error copy in the same three UI files. Edits here were
-  kept minimal and additive for that reason.
-- **No schema change. No migration. No production data touched.**
+- **Coordinate with:** `claude/upload-size-honest-failure` (PR #132) — it owns
+  the client preflight constants and error copy in the same three UI files.
+  Edits here were kept minimal and additive for that reason.
+  **Rebase note for `ZipUploadCard.tsx`:** #132 adds a fixed
+  `DIRECT_UPLOAD_TIMEOUT_MS` deadline around its single `fetch`. That is the
+  right mechanism for a one-shot request and the wrong one for this transport —
+  a 200-receipt run legitimately lasts half an hour. This branch replaces that
+  `fetch` with `importWhatsappExport`, which carries an INACTIVITY watchdog
+  inside the transport (so no caller can forget it). On rebase, keep #132's
+  preflight and error copy; drop its timeout wiring in this card, because the
+  call it wrapped no longer exists. #132's `upload-limits.ts` is untouched here.
+- **No schema change. No migration. No production data touched.** Batch-close
+  idempotency is enforced at application level, deliberately without a DB
+  unique index — see the completeBatch docstring for the residual race.
 
 ### fable5-builder-e5 (claude/e5-maker-identity) — session-derived maker identity + re-enable P1.4 SoD gate
 - **Started:** 2026-07-12
