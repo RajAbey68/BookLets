@@ -9,6 +9,13 @@
  *  - fetchActionCentre (action-centre.actions.ts, mocked Prisma): org
  *    scoping, reuse of fetchOcrStagingSummary, the bounded evidence query,
  *    and the {unavailable} degradation discriminator (mirrors books.actions).
+ *
+ * The load-bearing distinction pinned here: the panel degrades when a data
+ * source BREAKS (any of the three, plus a rejecting session lookup), but NOT
+ * when the OCR staging pile merely does not apply to this deployment — which
+ * is the everyday state, since OCR_BRIDGE_ORG_ID is unset. Getting that
+ * backwards is either a hidden outage or a permanent false alarm, and both
+ * end the same way: Raj stops trusting the panel.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
@@ -169,6 +176,51 @@ describe('deriveActionItems — rules', () => {
     expect(items[1].text).toBe('4 hours ago: a draft entry was rejected');
   });
 
+  it('renders action-intent decisions in plain English', () => {
+    const items = deriveActionItems(
+      makeInputs({
+        recentEvents: [
+          {
+            eventType: 'ACTION_INTENT_APPROVED',
+            createdAt: hoursAgo(2),
+            description: 'raw evidence description',
+            payload: {},
+          },
+          {
+            eventType: 'ACTION_INTENT_REJECTED',
+            createdAt: hoursAgo(5),
+            description: 'raw evidence description',
+            payload: {},
+          },
+        ],
+      }),
+    );
+    expect(items[0].text).toBe('2 hours ago: an action was approved');
+    expect(items[1].text).toBe('5 hours ago: an action was rejected');
+  });
+
+  it('gives every narrated event type its own wording, never the raw evidence row', () => {
+    // Guards the ACTION_EVENT_TYPES ↔ describeEvent pairing: adding a type to
+    // the query filter without wording would leak a raw DB description at Raj.
+    for (const eventType of ACTION_EVENT_TYPES) {
+      const [item] = deriveActionItems(
+        makeInputs({
+          recentEvents: [
+            {
+              eventType,
+              createdAt: hoursAgo(1),
+              description: 'RAW_DB_DESCRIPTION',
+              // Ingest types read counts from the payload; decision types ignore it.
+              payload: { created: 2, deduped: 0 },
+            },
+          ],
+        }),
+      );
+      expect(item.priority).toBe('info');
+      expect(item.text).not.toContain('RAW_DB_DESCRIPTION');
+    }
+  });
+
   it('falls back to the event description when payload counts are missing', () => {
     const items = deriveActionItems(
       makeInputs({
@@ -273,55 +325,99 @@ describe('deriveActionItems — ordering and cap', () => {
 
 const ORG = 'org-1';
 
+/**
+ * The staging-summary shapes fetchOcrStagingSummary can hand back. The
+ * `unavailableReason` discriminator is the whole point: three of these are
+ * "this feature does not apply to you" (the normal production state, because
+ * OCR_BRIDGE_ORG_ID is unset) and only 'query_failed' is a genuine outage.
+ */
+const STAGING_OK = {
+  available: true,
+  unavailableReason: null,
+  importable: 2,
+  parked: [],
+  alreadyImported: 0,
+  total: 2,
+};
+
+function stagingUnavailable(reason: string) {
+  return {
+    available: false,
+    unavailableReason: reason,
+    importable: 0,
+    parked: [],
+    alreadyImported: 0,
+    total: 0,
+  };
+}
+
+const EVIDENCE_ROW = {
+  eventType: 'ZIP_INGEST_COMPLETED',
+  createdAt: new Date(),
+  description: 'Zip ingest',
+  payload: { created: 3, deduped: 1 },
+};
+
 interface SetupOverrides {
   unauthenticated?: boolean;
-  dbError?: boolean;
+  /** resolveActiveContext REJECTS rather than returning {ok:false}. */
+  authRejects?: boolean;
+  organizationId?: string;
   draftCount?: number;
+  /** prisma.journalEntry.count rejects. */
+  draftCountFails?: boolean;
+  /** prisma.evidenceLog.findMany rejects. */
+  evidenceFails?: boolean;
+  /** fetchOcrStagingSummary itself rejects (rather than degrading politely). */
+  stagingRejects?: boolean;
+  /** The summary fetchOcrStagingSummary resolves with. */
+  staging?: ReturnType<typeof stagingUnavailable> | typeof STAGING_OK;
 }
 
 function setup(overrides: SetupOverrides = {}) {
+  const orgId = overrides.organizationId ?? ORG;
   const prisma = {
     journalEntry: {
-      count: overrides.dbError
+      count: overrides.draftCountFails
         ? vi.fn().mockRejectedValue(new Error('db down'))
         : vi.fn().mockResolvedValue(overrides.draftCount ?? 0),
     },
     evidenceLog: {
-      findMany: vi.fn().mockResolvedValue([
-        {
-          eventType: 'ZIP_INGEST_COMPLETED',
-          createdAt: new Date(),
-          description: 'Zip ingest',
-          payload: { created: 3, deduped: 1 },
-        },
-      ]),
+      findMany: overrides.evidenceFails
+        ? vi.fn().mockRejectedValue(new Error('evidence log unreadable'))
+        : vi.fn().mockResolvedValue([EVIDENCE_ROW]),
     },
   };
-  const fetchOcrStagingSummary = vi.fn().mockResolvedValue({
-    available: true,
-    importable: 2,
-    parked: [],
-    alreadyImported: 0,
-    total: 2,
-  });
-  vi.doMock('../../src/lib/prisma', () => ({ prisma, setRlsOrgContext: vi.fn() }));
+  const setRlsOrgContext = vi.fn().mockResolvedValue(undefined);
+  const fetchOcrStagingSummary = overrides.stagingRejects
+    ? vi.fn().mockRejectedValue(new Error('staging summary blew up'))
+    : vi.fn().mockResolvedValue(overrides.staging ?? STAGING_OK);
+  const resolveActiveContext = overrides.authRejects
+    ? vi.fn().mockRejectedValue(new Error('session store unreachable'))
+    : vi.fn().mockResolvedValue(
+        overrides.unauthenticated
+          ? { ok: false, error: 'Not authenticated. Sign in to continue.' }
+          : {
+              ok: true,
+              context: {
+                organizationId: orgId,
+                organizationName: 'Test Org',
+                userId: 'u-1',
+                role: 'OWNER',
+              },
+            },
+      );
+  vi.doMock('../../src/lib/prisma', () => ({ prisma, setRlsOrgContext }));
   vi.doMock('../../src/app/actions/sandbox.actions', () => ({ fetchOcrStagingSummary }));
-  vi.doMock('../../src/lib/auth-context', () => ({
-    resolveActiveContext: vi.fn().mockResolvedValue(
-      overrides.unauthenticated
-        ? { ok: false, error: 'Not authenticated. Sign in to continue.' }
-        : {
-            ok: true,
-            context: { organizationId: ORG, organizationName: 'Test Org', userId: 'u-1', role: 'OWNER' },
-          },
-    ),
-  }));
-  return { prisma, fetchOcrStagingSummary };
+  vi.doMock('../../src/lib/auth-context', () => ({ resolveActiveContext }));
+  return { prisma, fetchOcrStagingSummary, setRlsOrgContext, orgId };
 }
 
 async function importAction() {
   return import('../../src/app/actions/action-centre.actions');
 }
+
+const DEGRADED = { unavailable: true, items: [] };
 
 beforeEach(() => vi.resetModules());
 
@@ -350,18 +446,132 @@ describe('fetchActionCentre', () => {
     });
   });
 
-  it('degrades to {unavailable: true} instead of throwing when a lookup fails', async () => {
-    setup({ dbError: true });
+  it('scopes EVERY tenant query to the org resolved from the session, not a constant', async () => {
+    const { prisma } = setup({ organizationId: 'org-other', draftCount: 1 });
     const { fetchActionCentre } = await importAction();
 
-    await expect(fetchActionCentre()).resolves.toEqual({ unavailable: true, items: [] });
+    await fetchActionCentre();
+
+    expect(prisma.journalEntry.count).toHaveBeenCalledWith({
+      where: { organizationId: 'org-other', status: 'DRAFT' },
+    });
+    expect(prisma.evidenceLog.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ tenantId: 'org-other' }) }),
+    );
+    // Nothing is queried without an org predicate.
+    for (const call of [
+      ...prisma.journalEntry.count.mock.calls,
+      ...prisma.evidenceLog.findMany.mock.calls,
+    ]) {
+      const where = (call[0] as { where?: Record<string, unknown> })?.where ?? {};
+      expect(where.organizationId ?? where.tenantId).toBe('org-other');
+    }
   });
 
-  it('degrades to {unavailable: true} when unauthenticated, touching nothing', async () => {
-    const { prisma } = setup({ unauthenticated: true });
+  it('opens no interactive transaction, so it never has to inject the RLS GUC itself', async () => {
+    // setRlsOrgContext exists for prisma.$transaction(async (tx) => ...) openers
+    // (see src/lib/prisma.ts). This action issues plain model reads, which the
+    // rls-org-context extension wraps on its own; calling setRlsOrgContext here
+    // would be impossible (no tx client) and pinning zero calls documents that.
+    const { setRlsOrgContext } = setup();
     const { fetchActionCentre } = await importAction();
 
-    await expect(fetchActionCentre()).resolves.toEqual({ unavailable: true, items: [] });
+    await fetchActionCentre();
+
+    expect(setRlsOrgContext).not.toHaveBeenCalled();
+  });
+
+  // ── degradation: each data source must be able to fail the panel loudly ──
+
+  it('degrades to {unavailable: true} when the DRAFT count query fails', async () => {
+    setup({ draftCountFails: true });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  it('degrades to {unavailable: true} when the evidence-log query fails', async () => {
+    setup({ evidenceFails: true });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  it('degrades to {unavailable: true} when the staging summary throws', async () => {
+    setup({ stagingRejects: true });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  it('degrades to {unavailable: true} when unauthenticated, touching NO data source', async () => {
+    const { prisma, fetchOcrStagingSummary } = setup({ unauthenticated: true });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
     expect(prisma.journalEntry.count).not.toHaveBeenCalled();
+    expect(prisma.evidenceLog.findMany).not.toHaveBeenCalled();
+    expect(fetchOcrStagingSummary).not.toHaveBeenCalled();
+  });
+
+  it('degrades instead of throwing when resolving the session REJECTS', async () => {
+    // resolveActiveContext is documented to return {ok:false}, but it also does
+    // IO — if it rejects, the page it renders on must degrade, not 500.
+    setup({ authRejects: true });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  // ── the distinction this change exists for ──────────────────────────────
+
+  it('degrades ONLY when the staging summary reports a genuine query failure', async () => {
+    setup({ draftCount: 4, staging: stagingUnavailable('query_failed') });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  it('treats a malformed unavailable summary (no reason) as an outage, never as calm', async () => {
+    setup({ draftCount: 4, staging: stagingUnavailable(null as unknown as string) });
+    const { fetchActionCentre } = await importAction();
+
+    await expect(fetchActionCentre()).resolves.toEqual(DEGRADED);
+  });
+
+  it.each(['not_configured', 'unauthenticated', 'org_mismatch'])(
+    'carries on normally when staging is simply not applicable (%s)',
+    async (reason) => {
+      // OCR_BRIDGE_ORG_ID is unset in this deployment, so this is the EVERYDAY
+      // state. A permanent "status unavailable" warning here would be a standing
+      // false alarm and would train Raj to ignore the panel.
+      setup({ draftCount: 4, staging: stagingUnavailable(reason) });
+      const { fetchActionCentre } = await importAction();
+
+      const result = await fetchActionCentre();
+
+      expect(result.unavailable).toBe(false);
+      expect(result.items[0]).toEqual({
+        priority: 'urgent',
+        text: '4 entries await your approval',
+        href: '/sandbox',
+      });
+      // Recent activity still narrated; no staged/parked lines invented from zeros.
+      expect(result.items.some((i) => i.priority === 'info')).toBe(true);
+      expect(result.items.some((i) => i.text.includes('staged'))).toBe(false);
+      expect(result.items.some((i) => i.text.includes('All caught up'))).toBe(false);
+    },
+  );
+
+  it('still narrates activity when staging is not applicable and nothing awaits approval', async () => {
+    setup({ draftCount: 0, staging: stagingUnavailable('not_configured') });
+    const { fetchActionCentre } = await importAction();
+
+    const result = await fetchActionCentre();
+
+    expect(result.unavailable).toBe(false);
+    expect(result.items).toEqual([
+      { priority: 'info', text: 'just now: 3 receipts uploaded, 1 duplicate skipped' },
+    ]);
   });
 });

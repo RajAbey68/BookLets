@@ -6,6 +6,7 @@ import DraftReviewQueue from '@/components/DraftReviewQueue';
 import FeedIntoBooksButton from '@/components/FeedIntoBooksButton';
 import SandboxBooksTabs from '@/components/SandboxBooksTabs';
 import ZipUploadCard from '@/components/ZipUploadCard';
+import { isStagingOutage } from '@/lib/ocr-bridge.deps';
 import { parkReasonLabel } from '@/lib/park-reason-labels';
 
 // Reads from the database; cannot be rendered at build time.
@@ -72,6 +73,13 @@ export default async function SandboxPage() {
               </div>
               <FeedIntoBooksButton />
             </>
+          ) : isStagingOutage(staging) ? (
+            /* A real fault: say so plainly rather than claiming it is switched off. */
+            <p style={{ fontSize: '0.875rem', color: 'var(--warning-color)', margin: 0 }}>
+              Staging could not be read just now — this is a fault, not an empty pile, so
+              treat any receipt counts as unknown until it comes back. Refresh to retry.
+              Zip uploads above still work.
+            </p>
           ) : (
             <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: 0 }}>
               Staging unavailable — the OCR receipt staging area is not connected in this

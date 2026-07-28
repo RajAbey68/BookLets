@@ -2,26 +2,31 @@ import Link from 'next/link';
 import { fetchActionCentre } from '@/app/actions/action-centre.actions';
 import type { ActionItem } from '@/lib/action-centre';
 
-/**
- * Raj's "progress + current actions" panel — a read-only server component
- * (no client JS needed): what is waiting on him, what could move forward,
- * and what the system just did. Mounted on the dashboard home and /sandbox.
- * All ranking and wording comes from the pure action-centre lib; this is
- * dumb rendering, and the degraded state is a quiet line, never a crash.
- */
-
+/** Colour per priority — urgent shouts, info recedes. */
 const PRIORITY_COLORS: Record<ActionItem['priority'], string> = {
   urgent: 'var(--danger-color)',
   attention: 'var(--warning-color)',
   info: 'var(--text-secondary)',
 };
 
+/** Font weight per priority, reinforcing the same ladder as the colours. */
 const PRIORITY_WEIGHT: Record<ActionItem['priority'], number> = {
   urgent: 700,
   attention: 600,
   info: 400,
 };
 
+/**
+ * Raj's "progress + current actions" panel — a read-only server component
+ * (no client JS needed): what is waiting on him, what could move forward,
+ * and what the system just did. Mounted on the dashboard home and /sandbox.
+ * All ranking and wording comes from the pure action-centre lib; this is
+ * dumb rendering, and the degraded state is a quiet line, never a crash.
+ *
+ * The `unavailable` branch is the point of the whole component: when the data
+ * could not be gathered it SAYS SO. It never falls back to the calm empty
+ * state, because a silent failure that looks healthy is what cost Raj hours.
+ */
 export default async function ActionCentre() {
   const { unavailable, items } = await fetchActionCentre();
 

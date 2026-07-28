@@ -15,16 +15,32 @@
  */
 import { parkReasonLabel } from './park-reason-labels';
 
+/**
+ * How loudly a line speaks, and in what order it appears:
+ *  - `urgent`    — Raj personally has to act (approvals);
+ *  - `attention` — work is queued up and could move forward;
+ *  - `info`      — the system reporting what it already did.
+ */
 export type ActionPriority = 'urgent' | 'attention' | 'info';
 
+/** One rendered line of the panel: a priority, plain English, optional link. */
 export interface ActionItem {
   priority: ActionPriority;
+  /** Complete sentence/phrase for a non-coder — no jargon, no raw ids. */
   text: string;
+  /** Where the line leads, when there is somewhere useful to go. */
   href?: string;
 }
 
-/** Minimal structural slice of OcrStagingSummary — keeps this module free of
- * ocr-bridge.deps (which imports prisma). */
+/**
+ * Minimal structural slice of OcrStagingSummary — keeps this module free of
+ * ocr-bridge.deps (which imports prisma).
+ *
+ * Deliberately carries no `unavailableReason`: WHY the pile could not be read
+ * decides whether the whole panel degrades, which is the caller's judgement
+ * (see fetchActionCentre / isStagingOutage). All this pure layer has to know
+ * is that unavailable counts are meaningless and must not be rendered.
+ */
 export interface ActionCentreStaging {
   available: boolean;
   importable: number;
@@ -39,7 +55,13 @@ export interface ActionCentreEvent {
   payload: unknown;
 }
 
+/**
+ * Everything deriveActionItems is allowed to look at. Injected wholesale (the
+ * clock included) so the panel's wording and ordering are testable without a
+ * database and without real time passing.
+ */
 export interface ActionCentreInputs {
+  /** DRAFT journal entries sitting in the four-eyes queue for this org. */
   draftsAwaitingApproval: number;
   staging: ActionCentreStaging;
   /** Newest first; filtered again here by type and the 24h window. */
@@ -71,6 +93,12 @@ export const MAX_ACTION_ITEMS = 6;
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+/**
+ * "just now" / "45 minutes ago" / "2 hours ago" / "3 days ago" — coarse on
+ * purpose, because the panel is glanced at, not read. Both ends are supplied
+ * so the output is deterministic; a `then` in the future clamps to "just now"
+ * rather than printing a negative age.
+ */
 export function formatRelativeTime(then: Date, now: Date): string {
   const ms = Math.max(0, now.getTime() - then.getTime());
   const minutes = Math.floor(ms / 60_000);
