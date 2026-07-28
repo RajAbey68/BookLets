@@ -50,4 +50,12 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: node scripts/llm-quorum-review.mjs
+        # Bootstrap guard: the trusted-BASE checkout means the script only
+        # exists once this workflow's own introducing PR has merged. Absent
+        # script = neutral skip (same contract as missing secrets).
+        run: |
+          if [ -f scripts/llm-quorum-review.mjs ]; then
+            node scripts/llm-quorum-review.mjs
+          else
+            echo "[llm-quorum-review] SKIP: script not on base ref yet (bootstrap PR)"
+          fi
