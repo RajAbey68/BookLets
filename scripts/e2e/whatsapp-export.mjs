@@ -37,6 +37,9 @@
  *   --start-index <n>   first photo sequence number (default 1) — use this to
  *                       build an OVERLAPPING archive that shares some photos
  *                       with an earlier one and adds new ones
+ *   --media-dir <dir>   use REAL photographs from this directory instead of
+ *                       synthetic ones. Needed only when pointing the harness
+ *                       at a live OCR service, which has to see actual receipts
  *   --extra <spec>      add a non-photo entry, repeatable. Specs:
  *                         voice        → PTT-20260712-WA0004.opus (skipped type)
  *                         video        → VID-20260712-WA0009.mp4  (skipped type)
@@ -44,7 +47,7 @@
  *                         huge-jpeg    → a single photo over the per-file cap
  *                         traversal    → an entry named ../escape.jpg
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { deflateRawSync } from 'node:zlib';
 import path from 'node:path';
@@ -116,11 +119,16 @@ function attachmentBody(format, name) {
  * entry looked new.)
  */
 export function photoPlanFor({ seed, sequence, meanBytes, minBytes, maxBytes }) {
-  const rng = makeRng((seed * 2654435761 + sequence * 40503) >>> 0);
-  const spread = 0.55 + rng() * 0.9;
+  // Golden-ratio low-discrepancy sequence rather than a plain PRNG: it is still
+  // a pure function of the sequence number, but its average converges on 0.5
+  // far faster, so an archive asked for 28.5 MB actually lands near 28.5 MB
+  // instead of a few percent under.
+  const phase = ((seed * 0.7548776662466927 + sequence * 0.6180339887498949) % 1 + 1) % 1;
+  const spread = 0.55 + phase * 0.9;
   const bytes = Math.max(minBytes, Math.min(maxBytes, Math.round(meanBytes * spread)));
   // Monotonic, deterministic clock: photos arrive a few minutes apart.
-  const offsetMs = sequence * 6 * 60_000 + Math.round(rng() * 4 * 60_000);
+  const jitter = makeRng((seed * 2654435761 + sequence * 40503) >>> 0)();
+  const offsetMs = sequence * 6 * 60_000 + Math.round(jitter * 4 * 60_000);
   return { bytes, offsetMs };
 }
 
@@ -224,6 +232,8 @@ export function buildWhatsappExport(options = {}) {
     chatName = '_chat.txt',
     startIndex = 1,
     extras = [],
+    /** Real photograph buffers to use instead of synthetic ones — see below. */
+    media = null,
   } = options;
 
   // The mean is the archive-level knob; each photo's own size comes from its
@@ -255,7 +265,14 @@ export function buildWhatsappExport(options = {}) {
     // Seeded off the SEQUENCE, not the loop index, so photo #31 is the same
     // bytes in every archive that contains photo #31 — that is what makes an
     // overlapping archive genuinely overlapping.
-    const data = buildJpeg({ targetBytes: plan.bytes, seed: (seed * 1_000_003 + sequence) >>> 0 });
+    //
+    // `media` (from --media-dir) replaces the synthetic photo with a real
+    // photograph, cycled by sequence so the same slot always gets the same
+    // file. Use it when the OCR service is real rather than stubbed.
+    const data =
+      media && media.length > 0
+        ? media[sequence % media.length]
+        : buildJpeg({ targetBytes: plan.bytes, seed: (seed * 1_000_003 + sequence) >>> 0 });
     const sender = SENDERS[sequence % SENDERS.length];
     const vendor = VENDORS[sequence % VENDORS.length];
     const amount = (500 + ((sequence * 337) % 12_000)) / 100;
@@ -352,6 +369,15 @@ function parseArgs(argv) {
   return out;
 }
 
+/** Load real photographs from a directory, sorted so runs are reproducible. */
+export async function loadMediaDir(dir) {
+  const names = (await readdir(dir))
+    .filter((name) => /\.(jpe?g|png|webp|heic)$/i.test(name))
+    .sort();
+  if (names.length === 0) throw new Error(`--media-dir ${dir} contains no images`);
+  return Promise.all(names.map((name) => readFile(path.join(dir, name))));
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.out) {
@@ -359,6 +385,7 @@ async function main() {
     process.exit(2);
   }
   const options = {
+    media: args['media-dir'] ? await loadMediaDir(args['media-dir']) : null,
     images: args.images ? Number(args.images) : 120,
     totalBytes: Math.round((args['total-mb'] ? Number(args['total-mb']) : 28.5) * 1024 * 1024),
     minBytes: args['min-kb'] ? Number(args['min-kb']) * 1024 : WHATSAPP_MIN_PHOTO_BYTES,

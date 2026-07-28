@@ -29,6 +29,13 @@ export const TRANSPORT_ITEM = 'per-item';
 
 /** Mirrors DEFAULT_ITEM_CONCURRENCY in the real browser client. */
 export const DEFAULT_ITEM_CONCURRENCY = 3;
+/**
+ * Mirrors MAX_ITEM_BYTES in src/lib/ingest-limits.ts. The real browser client
+ * plans the run first and drops entries over this cap locally, so they never
+ * become a request. The harness does the same — otherwise it would post a file
+ * the real UI never posts, and measure a code path the operator never reaches.
+ */
+const MAX_ITEM_BYTES = 4 * 1024 * 1024;
 /** Mirrors RATE_LIMIT_ATTEMPTS / RATE_LIMIT_BACKOFF_MS in the real client. */
 const RATE_LIMIT_ATTEMPTS = 3;
 const RATE_LIMIT_BACKOFF_MS = 4000;
@@ -136,11 +143,25 @@ export async function uploadPerItem({
   cookieForItem,
 }) {
   const started = Date.now();
-  const entries = expandArchive(zipBuffer);
+  const allEntries = expandArchive(zipBuffer);
+  // Client-side plan, as the browser does it: anything over the per-file cap is
+  // never uploaded at all. Tracked separately because the operator IS shown
+  // these, while the server-side batch summary can never know about them.
+  const clientSkipped = allEntries
+    .filter((entry) => entry.data.length > MAX_ITEM_BYTES)
+    .map((entry) => ({ name: entry.name, reason: 'over the per-file limit; not uploaded' }));
+  const entries = allEntries.filter((entry) => entry.data.length <= MAX_ITEM_BYTES);
   const results = [];
   const transportErrors = [];
   let posted = 0;
   let aborted = false;
+  /**
+   * Every 429 the server returned, including ones the client recovered from.
+   * Counting only the uploads that ran out of retries would hide the real cost:
+   * a legitimate import that survives only because it waited out the limiter is
+   * still an import the operator watched crawl.
+   */
+  let rateLimitHits = 0;
 
   const postOne = async (entry) => {
     const form = new FormData();
@@ -161,6 +182,7 @@ export async function uploadPerItem({
         transportErrors.push({ name: entry.name, error: String(err?.message ?? err) });
         return null;
       }
+      if (res.status === 429) rateLimitHits += 1;
       if (res.status === 429 && attempt < RATE_LIMIT_ATTEMPTS) {
         const retryAfter = Number(res.headers.get('retry-after'));
         const wait = Number.isFinite(retryAfter) && retryAfter > 0
@@ -201,7 +223,7 @@ export async function uploadPerItem({
   });
   await Promise.all(workers);
 
-  const tally = { created: 0, deduped: 0, failed: 0, skipped: 0, chatFiles: 0 };
+  const tally = { created: 0, deduped: 0, failed: 0, skipped: clientSkipped.length, chatFiles: 0 };
   for (const r of results) {
     const item = r.body?.item;
     if (!item) {
@@ -239,18 +261,18 @@ export async function uploadPerItem({
     aborted,
     elapsedMs: Date.now() - started,
     transportErrors,
-    // The number the OPERATOR is shown comes from the batch summary when the
-    // run completes; the per-item tally is what the browser accumulated live.
-    reported: batchResult?.tally
-      ? {
-          created: batchResult.tally.created,
-          deduped: batchResult.tally.deduped,
-          failed: batchResult.tally.failed,
-          skipped: batchResult.tally.skipped,
-          chatFiles: batchResult.tally.chatFiles,
-        }
-      : tally,
+    clientSkipped,
+    rateLimitHits,
+    /**
+     * What the OPERATOR is shown: the browser's own running tally, which
+     * includes entries it never uploaded. Deliberately not the server's batch
+     * summary — that is the AUDIT record and is reported separately, precisely
+     * so the harness can tell the two apart when they disagree.
+     */
+    reported: tally,
     liveTally: tally,
+    /** The permanent audit summary the server recomputed for itself. */
+    auditTally: batchResult?.tally ?? null,
     batchResult,
     perItem: results,
   };

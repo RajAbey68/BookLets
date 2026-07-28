@@ -410,6 +410,30 @@ async function runScenarios(ctx) {
     `expected ${expectedTotal.toFixed(2)}, ledger ${actualDebits.toFixed(2)}`,
   );
 
+  // The operator's on-screen number and the permanent audit row are produced by
+  // two different pieces of code from two different sources. They must agree on
+  // the money-bearing number, or the books and the audit trail tell different
+  // stories about the same import.
+  if (bulk.auditTally) {
+    check(
+      bulk.auditTally.created === facts.draftCount,
+      'the permanent audit record states the same number of created entries as the database',
+      `audit says ${bulk.auditTally.created}, database ${facts.draftCount}`,
+      bulk.auditTally,
+    );
+    if (bulk.auditTally.skipped !== bulk.reported.skipped) {
+      warn(
+        'the on-screen report and the audit record disagree about skipped files',
+        `the page shows ${bulk.reported.skipped} skipped, the WHATSAPP_BATCH_COMPLETED audit row records ` +
+          `${bulk.auditTally.skipped}. Files the browser refuses to upload (over the per-file cap) never ` +
+          'reach the server, so they cannot appear in a summary the server recomputes from its own ' +
+          'evidence rows. The created/deduped counts are unaffected — but an auditor reading the ' +
+          'evidence log will not see that files were dropped.',
+        { onScreen: bulk.reported, audit: bulk.auditTally, clientSkipped: bulk.clientSkipped },
+      );
+    }
+  }
+
   const rateLimited = (bulk.perItem ?? []).filter((r) => r.status === 429);
   if (rateLimited.length > 0) {
     warn(
@@ -428,13 +452,29 @@ async function runScenarios(ctx) {
   if (primary === TRANSPORT_ZIP) edge.setEnabled(false);
   const beforeIds = new Set(facts.entries.map((e) => e.id));
   ocr.reset();
+  const secondStarted = Date.now();
   const second = await importArchive(primary, {
     baseUrl,
     cookie: session.header,
     zipBuffer: real.zip,
     archiveName: 'WhatsApp Chat - Ko Lake Ops.zip',
   });
+  const secondElapsed = Date.now() - secondStarted;
   edge.setEnabled(true);
+  info(
+    'repeat import',
+    `${secs(secondElapsed)} for ${CONFIG.images} already-known receipts` +
+      (second.rateLimitHits ? `; the server answered 429 to ${second.rateLimitHits} of them` : ''),
+  );
+  if (second.rateLimitHits > 0 && secondElapsed > bulkElapsed) {
+    warn(
+      're-uploading an archive that is entirely duplicates is SLOWER than importing it',
+      `${secs(secondElapsed)} to recognise ${CONFIG.images} duplicates, against ${secs(bulkElapsed)} to import ` +
+        'them the first time. Deduping is nearly free, so the run outpaces the token bucket and spends most ' +
+        'of its time waiting out 429s. The operator who re-uploads "just to be sure" waits longer than he ' +
+        'did originally, with nothing to show for it.',
+    );
+  }
   const afterSecond = await ledgerFacts(db, ORG.orgId);
   const newIds = afterSecond.entries.filter((e) => !beforeIds.has(e.id));
 
@@ -652,7 +692,9 @@ async function runScenarios(ctx) {
   check(
     skippedCount >= (oversizedIsSkipped ? 4 : 3),
     'the voice note, the video, the fake image (and, where a per-file cap applies, the oversized photo) are reported as skipped',
-    `${skippedCount} skipped`,
+    `${skippedCount} shown to the operator${
+      messyResult.auditTally ? `, ${messyResult.auditTally.skipped} in the audit record` : ''
+    }`,
     messyResult.perItem?.filter((r) => r.body?.item?.outcome === 'skipped').map((r) => r.body.item) ??
       messyResult.body?.report?.skipped,
   );
@@ -740,6 +782,37 @@ async function runScenarios(ctx) {
     { reported: zeroRun.reported },
   );
 
+  // 6g — one receipt whose OCR call never answers. The per-item route budgets
+  // 60 s per request and the OCR client has its own timeout; the question is
+  // whether ONE dead call takes the whole import down with it.
+  await resetLedger(db, ORG.orgId);
+  ocr.reset();
+  ocr.configure({ hangEveryNth: 3 });
+  if (primary === TRANSPORT_ZIP) edge.setEnabled(false);
+  const hangArchive = buildWhatsappExport({ images: 6, totalBytes: 900 * 1024, seed: 37, startIndex: 7500 });
+  const hangStart = Date.now();
+  const hangRun = await importArchive(primary, {
+    baseUrl,
+    cookie: session.header,
+    zipBuffer: hangArchive.zip,
+    archiveName: 'hanging-ocr.zip',
+  });
+  const hangElapsed = Date.now() - hangStart;
+  ocr.configure({ hangEveryNth: 0 });
+  edge.setEnabled(true);
+  const hangFacts = await ledgerFacts(db, ORG.orgId);
+  check(
+    hangFacts.draftCount >= 4,
+    'one OCR call that never answers does not take the rest of the import with it',
+    `${hangFacts.draftCount} of 6 receipts still landed in ${secs(hangElapsed)}`,
+    { reported: hangRun.reported },
+  );
+  check(
+    hangElapsed < 180_000,
+    'the run ends rather than hanging forever on a dead OCR call',
+    `finished in ${secs(hangElapsed)}`,
+  );
+
   // 6f — expired session
   await resetLedger(db, ORG.orgId);
   ocr.reset();
@@ -799,8 +872,18 @@ async function runScenarios(ctx) {
     const burstFacts = await ledgerFacts(db, ORG.orgId);
     info(
       'fast-OCR bulk run',
-      `${burst.manifest.photoCount} photos in ${secs(elapsed)}, ${throttled} exhausted the 429 retry budget`,
+      `${burst.manifest.photoCount} photos in ${secs(elapsed)}; the server answered 429 to ` +
+        `${run.rateLimitHits ?? 0} uploads, of which ${throttled} ran out of retries`,
     );
+    if ((run.rateLimitHits ?? 0) > 0) {
+      warn(
+        'the rate limiter throttles a legitimate bulk import',
+        `${run.rateLimitHits} of ${burst.manifest.photoCount} uploads were refused with 429 and had to be ` +
+          `retried, stretching the run to ${secs(elapsed)}. Nothing was lost — the client waits out the ` +
+          "limiter's retry-after — but the operator sees a slow import, and only 3 retries per receipt " +
+          'stand between a slower server and receipts genuinely being dropped.',
+      );
+    }
     check(
       burstFacts.draftCount === burst.manifest.photoCount,
       'a fast bulk import still lands every receipt despite the rate limiter',
@@ -813,6 +896,55 @@ async function runScenarios(ctx) {
     );
     finish();
   }
+
+  // ── 9. the impatient operator ─────────────────────────────────────────────
+  // He uploads, nothing seems to happen, he uploads the same file again in a
+  // second tab. Both runs race on the same receipts. Dedup here is not a
+  // pre-check against the database — it is a genuine write-write race, and the
+  // only thing standing between him and double-counted expenses is the unique
+  // constraint on (organizationId, idempotencyKey). Unit tests cannot reach it.
+  scenario('S9', 'The same archive submitted twice at once — a real write-write race on the ledger');
+  await resetLedger(db, ORG.orgId);
+  ocr.reset();
+  const raceArchive = buildWhatsappExport({
+    images: Math.max(6, Math.min(40, CONFIG.images)),
+    totalBytes: 4 * 1024 * 1024,
+    seed: 71,
+    startIndex: 12_000,
+  });
+  if (primary === TRANSPORT_ZIP) edge.setEnabled(false);
+  const [raceA, raceB] = await Promise.all([
+    importArchive(primary, { baseUrl, cookie: session.header, zipBuffer: raceArchive.zip, archiveName: 'race-a.zip' }),
+    importArchive(primary, { baseUrl, cookie: session.header, zipBuffer: raceArchive.zip, archiveName: 'race-b.zip' }),
+  ]);
+  edge.setEnabled(true);
+  const raceFacts = await ledgerFacts(db, ORG.orgId);
+  check(
+    raceFacts.draftCount === raceArchive.manifest.photoCount,
+    'two simultaneous imports of one archive create each receipt exactly once',
+    `${raceFacts.draftCount} rows for ${raceArchive.manifest.photoCount} receipts`,
+  );
+  check(
+    findDuplicateKeys(raceFacts).length === 0,
+    'the unique constraint held under a real race',
+    `${findDuplicateKeys(raceFacts).length} duplicated idempotency keys`,
+  );
+  const raceReported = (raceA.reported?.created ?? 0) + (raceB.reported?.created ?? 0);
+  check(
+    raceReported === raceFacts.draftCount,
+    'the two runs together do not claim to have imported more than exists',
+    `they reported ${raceA.reported?.created} + ${raceB.reported?.created} = ${raceReported}, database has ${raceFacts.draftCount}`,
+    { a: raceA.reported, b: raceB.reported },
+  );
+  const raceFailures = [...collectFailureReasons(raceA), ...collectFailureReasons(raceB)];
+  if (raceFailures.length > 0) {
+    warn(
+      'a racing duplicate was reported to the operator as a failure rather than a duplicate',
+      `${raceFailures.length} entries — e.g. ${raceFailures[0]}`,
+      raceFailures.slice(0, 3),
+    );
+  }
+  finish();
 
   // ── 8. a real browser ──────────────────────────────────────────────────────
   if (!CONFIG.skipBrowser) {
@@ -887,6 +1019,8 @@ const NOT_COVERED = [
   'Real photographs. The generated JPEGs are structurally valid and decode in Chromium, but they are ' +
     'flat grey with random comment padding, not pictures of receipts.',
   'Concurrent operators. Everything runs as one signed-in user in one organisation.',
+  'Approval and posting. The harness stops where the import stops, at DRAFT. It asserts that nothing ' +
+    'was posted to the books, but does not exercise the four-eyes approval flow that promotes a draft.',
 ];
 
 async function writeReport(startedAt, server) {
