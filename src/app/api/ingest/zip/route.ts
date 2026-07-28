@@ -35,6 +35,10 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   PATH_TRAVERSAL: 422,
   ZIP_BOMB: 422,
   TOO_MANY_IMAGES: 422,
+  // The organisation has no open accounting period, so nothing can be
+  // recorded yet. 422 (not 500): the request was fine, the books are not
+  // ready — and the message tells the operator how to make them ready.
+  NO_FISCAL_PERIOD: 422,
 };
 
 class UploadTooLargeError extends Error {}

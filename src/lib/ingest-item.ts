@@ -55,6 +55,7 @@ import {
   type EvidenceInput,
   type ResolvedLedgerAccounts,
 } from './zip-ingest';
+import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
 import type { JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -145,6 +146,20 @@ export interface ItemIngestDeps {
   findExistingIdempotencyKeys: (organizationId: string, keys: string[]) => Promise<Set<string>>;
   resolveLedgerAccounts: (organizationId: string) => Promise<ResolvedLedgerAccounts>;
   recordEvidence: (input: EvidenceInput) => Promise<void>;
+  /**
+   * True when the organisation has ANY open (not closed, not locked)
+   * FiscalPeriod. Checked BEFORE OCR, because a receipt's date is not known
+   * until OCR has run, whereas "this organisation cannot record anything at
+   * all" is knowable for free — and that is the state a fresh deployment is in.
+   */
+  hasAnyOpenFiscalPeriod: (organizationId: string) => Promise<boolean>;
+  /**
+   * True when an open FiscalPeriod covers `date` — the same test
+   * LedgerService.checkFiscalPeriod applies. Checked once the receipt's date
+   * is known, so the refusal names the date instead of surfacing the ledger's
+   * raw "No fiscal period defined for the date 7/12/2026".
+   */
+  hasOpenFiscalPeriodFor: (organizationId: string, date: Date) => Promise<boolean>;
 }
 
 // ─── name handling ────────────────────────────────────────────────────────────
@@ -353,6 +368,24 @@ async function ingestImage(
     };
   }
 
+  // Fiscal-period pre-flight, mirroring what ocr-bridge.ts already does: an
+  // organisation with NO open accounting period cannot record ANY receipt, so
+  // finding that out here — before the OCR call — is the difference between
+  // "0 imported, nothing spent, here is the one thing to fix" and paying for
+  // 120 extractions to be told the same thing 120 times.
+  //
+  // Reported as `skipped` rather than `failed` deliberately: nothing about the
+  // photo is wrong, no work was done on it, and the operator will re-run the
+  // same import once a period is open.
+  if (!(await deps.hasAnyOpenFiscalPeriod(ctx.organizationId))) {
+    return {
+      ...base,
+      kind: 'image',
+      outcome: 'skipped',
+      reason: NO_OPEN_PERIOD_MESSAGE,
+    };
+  }
+
   let ocrResult: GeminiOcrResult;
   try {
     ocrResult = await deps.ocr(data.toString('base64'));
@@ -380,6 +413,21 @@ async function ingestImage(
     };
   }
 
+  // The date is only knowable now. Ask the same question the ledger will ask,
+  // so the operator is told WHICH date is uncovered instead of receiving
+  // checkFiscalPeriod's "No fiscal period defined for the date 7/12/2026" —
+  // which names no action and, read outside the US, names the wrong month.
+  const entryDate = ocrDateOrNow(extraction.date);
+  if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
+    return {
+      ...base,
+      kind: 'image',
+      outcome: 'failed',
+      stage: 'ledger',
+      reason: dateOutsidePeriodsMessage(entryDate),
+    };
+  }
+
   let accounts: ResolvedLedgerAccounts;
   try {
     accounts = await deps.resolveLedgerAccounts(ctx.organizationId);
@@ -396,7 +444,7 @@ async function ingestImage(
   try {
     const entry = await deps.postEntry({
       organizationId: ctx.organizationId,
-      date: ocrDateOrNow(extraction.date),
+      date: entryDate,
       memo: `ZIP-INGEST: ${extraction.vendorName} [${extraction.categorySuggestion}] — ${base.name}`,
       // DRAFT regardless of confidence — four-eyes promotes, never this module.
       status: ZIP_INGEST_JOURNAL_STATUS,
