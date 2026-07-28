@@ -17,6 +17,7 @@ import {
   type WhatsappImportReport,
 } from '../lib/whatsapp-import-client';
 import { describeElapsed } from '../lib/upload-limits';
+import { FISCAL_PERIOD_PAGE_PATH } from '../lib/fiscal-period';
 
 /**
  * Imports a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
@@ -86,7 +87,14 @@ function interruptedResult(
   };
 }
 
-export const WhatsappZipUploader: React.FC = () => {
+/**
+ * `booksOpen: false` means the organisation has no open accounting period, so
+ * the ledger would refuse every receipt in the archive. The uploader then
+ * offers the fix instead of taking an upload it cannot use — the earliest
+ * possible point to fail, before the archive is even expanded and long before
+ * any OCR is paid for. The server enforces the same rule independently.
+ */
+export const WhatsappZipUploader: React.FC<{ booksOpen?: boolean }> = ({ booksOpen = true }) => {
   const [status, setStatus] = useState<UploaderStatus>('IDLE');
   const [result, setResult] = useState<ZipUploadResult | null>(null);
   const [progress, setProgress] = useState<ZipProgress | null>(null);
@@ -159,6 +167,26 @@ export const WhatsappZipUploader: React.FC = () => {
       setStatus('ERROR');
     }
   };
+
+  if (!booksOpen) {
+    return (
+      <div className="glass-card">
+        <div className="uploader">
+          <div className="uploader-icon">
+            <IconAlert />
+          </div>
+          <h3 className="uploader-title">Importing is paused</h3>
+          <p className="uploader-body">
+            Your books have no open accounting period, so every receipt would be refused.
+            Open one — it takes one click — and this uploader comes back.
+          </p>
+          <Link href={FISCAL_PERIOD_PAGE_PATH} className="btn btn-primary">
+            Open an accounting period
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cardClass}>

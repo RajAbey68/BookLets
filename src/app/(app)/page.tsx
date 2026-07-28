@@ -13,17 +13,24 @@ import { getDashboardMetrics, getRevenueTrend } from '@/app/actions/portfolio.ac
 import { drilldownHref } from '@/lib/metric-drilldown';
 import { getDefaultUploadContext } from '@/app/actions/context.actions';
 import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
+import { fetchFiscalPeriods } from '@/app/actions/fiscal-period.actions';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const [metricsResult, uploadContext, properties, trendResult] = await Promise.all([
+  const [metricsResult, uploadContext, properties, trendResult, periods] = await Promise.all([
     getDashboardMetrics(),
     getDefaultUploadContext(),
     fetchPortfolioMetrics(),
     getRevenueTrend(),
+    fetchFiscalPeriods(),
   ]);
+  // No open accounting period → the ledger refuses every receipt, so the
+  // uploader offers the fix rather than taking an upload it cannot use. On an
+  // outage (`unavailable`) it stays ENABLED: a failed lookup is not evidence
+  // the books are shut, and blocking on it would stop a working import.
+  const booksOpen = periods.coversToday || periods.unavailable;
   const trend = (trendResult.success && trendResult.data) ? trendResult.data : [];
   const trendMax = Math.max(1, ...trend.map((p) => Math.max(p.revenue, p.netIncome)));
   const hasTrend = trend.some((p) => p.revenue !== 0 || p.netIncome !== 0);
@@ -133,7 +140,7 @@ export default async function Home() {
       </div>
 
       <div style={{ marginBottom: '2.5rem' }}>
-        <WhatsappZipUploader />
+        <WhatsappZipUploader booksOpen={booksOpen} />
       </div>
 
       <div className="dashboard-grid">

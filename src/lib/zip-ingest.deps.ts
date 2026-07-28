@@ -14,8 +14,59 @@ import { LedgerService } from './ledger.service';
 import { EvidenceLogService } from './evidence-log.service';
 import type { ResolvedLedgerAccounts, ZipIngestDeps } from './zip-ingest';
 
+/**
+ * The FiscalPeriod lookups the import cores use to fail BEFORE OCR spend.
+ *
+ * Both run exactly the query LedgerService.checkFiscalPeriod runs (an open
+ * period is one that is neither closed nor locked) — they must stay in
+ * lockstep with it, or a receipt passes the pre-flight and is then rejected at
+ * the post, which is the failure mode this whole change exists to remove.
+ *
+ * `hasOpenFiscalPeriodFor` is memoized per UTC day for the lifetime of the
+ * deps object (one request), so an archive whose receipts cluster in one month
+ * does not issue a lookup per photo. Nothing is cached ACROSS requests: a
+ * period opened in another tab must take effect on the very next import.
+ */
+export function buildFiscalPeriodChecks() {
+  const byDay = new Map<string, Promise<boolean>>();
+
+  const coversDate = (organizationId: string, date: Date): Promise<boolean> => {
+    const key = `${organizationId}|${date.toISOString().slice(0, 10)}`;
+    let known = byDay.get(key);
+    if (!known) {
+      known = prisma.fiscalPeriod
+        .findFirst({
+          where: {
+            organizationId,
+            startDate: { lte: date },
+            endDate: { gte: date },
+            isClosed: false,
+            locked: false,
+          },
+          select: { id: true },
+        })
+        .then((period) => period !== null);
+      byDay.set(key, known);
+    }
+    return known;
+  };
+
+  return {
+    async hasAnyOpenFiscalPeriod(organizationId: string): Promise<boolean> {
+      const period = await prisma.fiscalPeriod.findFirst({
+        where: { organizationId, isClosed: false, locked: false },
+        select: { id: true },
+      });
+      return period !== null;
+    },
+    hasOpenFiscalPeriodFor: coversDate,
+  };
+}
+
 export function buildDefaultZipIngestDeps(): ZipIngestDeps {
   return {
+    ...buildFiscalPeriodChecks(),
+
     ocr: (imageBase64) => extractReceipt(imageBase64),
 
     postEntry: (input) => LedgerService.postEntry(input),

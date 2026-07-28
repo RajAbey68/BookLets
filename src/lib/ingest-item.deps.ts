@@ -14,6 +14,7 @@ import { LedgerService } from './ledger.service';
 import { EvidenceLogService } from './evidence-log.service';
 import { RateLimiter } from './upload-guard';
 import { MAX_ZIP_ENTRIES, type ResolvedLedgerAccounts } from './zip-ingest';
+import { buildFiscalPeriodChecks } from './zip-ingest.deps';
 import {
   BATCH_EVIDENCE_EVENT,
   ITEM_EVIDENCE_EVENT,
@@ -47,6 +48,11 @@ export const itemRateLimiter = new RateLimiter({ capacity: 60, refillPerMinute: 
  */
 export function buildDefaultItemIngestDeps(): ItemIngestDeps {
   return {
+    // The fiscal-period pre-flight: shared with the single-shot zip path so
+    // the two transports can never disagree about whether a receipt can be
+    // recorded, and so neither can regress to paying for OCR first.
+    ...buildFiscalPeriodChecks(),
+
     ocr: (imageBase64) => extractReceipt(imageBase64),
 
     /**

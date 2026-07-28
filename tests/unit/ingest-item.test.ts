@@ -58,6 +58,10 @@ function makeDeps(overrides: Partial<ItemIngestDeps> = {}): ItemIngestDeps {
       cashAccountId: 'acct_cash',
     })),
     recordEvidence: vi.fn(async () => {}),
+    // Default: the books are open. The fiscal-period pre-flight has its own
+    // suite (ingest-fiscal-period-preflight.test.ts).
+    hasAnyOpenFiscalPeriod: vi.fn(async () => true),
+    hasOpenFiscalPeriodFor: vi.fn(async () => true),
     ...overrides,
   } as ItemIngestDeps;
 }
