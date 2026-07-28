@@ -155,13 +155,43 @@ export interface OcrStagingParkedCount {
   count: number;
 }
 
+/**
+ * WHY a staging summary could not be produced. `available: false` on its own
+ * conflates two completely different situations, and callers that raise an
+ * alarm must be able to tell them apart:
+ *
+ *  - `unauthenticated` / `not_configured` / `org_mismatch` — the staging pile
+ *    does not APPLY to this caller. Nothing is broken. `OCR_BRIDGE_ORG_ID` is
+ *    optional and is unset in this deployment, so `not_configured` is the
+ *    everyday state; treating it as a fault would put a permanent false alarm
+ *    on every screen that shows it.
+ *  - `query_failed` — the staging query itself broke (table, SELECT grant, or
+ *    database missing/unreachable). This IS a fault and must stay visible.
+ *
+ * Use `isStagingOutage()` rather than testing reasons ad hoc, so a reason
+ * added later cannot silently be read as "calm".
+ */
+export type OcrStagingUnavailableReason =
+  | 'unauthenticated'
+  | 'not_configured'
+  | 'org_mismatch'
+  | 'query_failed';
+
 export interface OcrStagingSummary {
   /**
-   * False when the staging table / grant / database is absent (e.g. local
-   * dev without raj_fin_track) — the sandbox page renders a "staging
-   * unavailable" note instead of crashing.
+   * False when the counts below could not be produced — because the pile does
+   * not apply to this caller, or because the staging table / grant / database
+   * is absent (e.g. local dev without raj_fin_track). The sandbox page renders
+   * a "staging unavailable" note instead of crashing. When false, the counts
+   * are all zero and MUST NOT be rendered as real figures.
    */
   available: boolean;
+  /**
+   * Null when `available`; otherwise which of the two kinds of unavailability
+   * this is (see OcrStagingUnavailableReason). Required, not optional, so no
+   * construction site can forget to say which one it means.
+   */
+  unavailableReason: OcrStagingUnavailableReason | null;
   /** Rows importable right now: well-shaped, open fiscal period, unimported. */
   importable: number;
   /** Unimported rows parked by deterministic reason (nonzero buckets only). */
@@ -170,6 +200,48 @@ export interface OcrStagingSummary {
   alreadyImported: number;
   /** All rows in the staging pool. */
   total: number;
+}
+
+/**
+ * The one degraded summary shape, tagged with why. Every "cannot read the
+ * pile" path builds its result here so the zeroed counts and the reason can
+ * never drift apart.
+ */
+export function unavailableStagingSummary(
+  reason: OcrStagingUnavailableReason,
+): OcrStagingSummary {
+  return {
+    available: false,
+    unavailableReason: reason,
+    importable: 0,
+    parked: [],
+    alreadyImported: 0,
+    total: 0,
+  };
+}
+
+/** Unavailability reasons that mean "not applicable here", i.e. NOT a fault. */
+const BENIGN_STAGING_REASONS: ReadonlySet<OcrStagingUnavailableReason> = new Set([
+  'unauthenticated',
+  'not_configured',
+  'org_mismatch',
+]);
+
+/**
+ * True only when a summary is unavailable because something BROKE.
+ *
+ * Fails loud on purpose: an unavailable summary carrying no reason, or a
+ * reason nobody has classified as benign, counts as an outage. A silent
+ * failure that looks like a healthy, calm screen is exactly the accident this
+ * whole discriminator exists to prevent — the opposite mistake (one honest
+ * warning too many) is recoverable.
+ */
+export function isStagingOutage(
+  summary: Pick<OcrStagingSummary, 'available' | 'unavailableReason'>,
+): boolean {
+  if (summary.available) return false;
+  const reason = summary.unavailableReason;
+  return reason === null || !BENIGN_STAGING_REASONS.has(reason);
 }
 
 /** Raw counts row of the summary query (every column is `::int`). */
@@ -184,14 +256,6 @@ interface StagingSummaryCounts {
   no_fiscal_period: number;
 }
 
-const UNAVAILABLE_STAGING_SUMMARY: OcrStagingSummary = {
-  available: false,
-  importable: 0,
-  parked: [],
-  alreadyImported: 0,
-  total: 0,
-};
-
 /**
  * S11 — read-only counts over the staging pool for the /sandbox pile card.
  *
@@ -204,7 +268,10 @@ const UNAVAILABLE_STAGING_SUMMARY: OcrStagingSummary = {
  *
  * Degrades to `available: false` instead of throwing when the staging table,
  * the SELECT grant (HR-6), or the database itself is missing — a summary
- * card must never take down the page it renders on.
+ * card must never take down the page it renders on. Every such degradation is
+ * tagged `query_failed`: reaching this function means the caller already
+ * passed the org gate, so anything that goes wrong from here really is broken
+ * and callers are expected to surface it.
  */
 export async function summarizeOcrStaging(organizationId: string): Promise<OcrStagingSummary> {
   let counts: StagingSummaryCounts | undefined;
@@ -237,9 +304,11 @@ export async function summarizeOcrStaging(organizationId: string): Promise<OcrSt
     counts = rows[0];
   } catch (error) {
     console.error('[ocr-bridge] summarizeOcrStaging: staging unavailable:', error);
-    return UNAVAILABLE_STAGING_SUMMARY;
+    return unavailableStagingSummary('query_failed');
   }
-  if (!counts) return UNAVAILABLE_STAGING_SUMMARY;
+  // A `count(*)` query always yields exactly one row; no row means the query
+  // did not really run, which is a fault, not an empty pile.
+  if (!counts) return unavailableStagingSummary('query_failed');
 
   // classifyStagingRow precedence order; zero buckets are omitted so the UI
   // only lists reasons that actually occur.
@@ -257,6 +326,7 @@ export async function summarizeOcrStaging(organizationId: string): Promise<OcrSt
 
   return {
     available: true,
+    unavailableReason: null,
     importable: counts.importable,
     parked,
     alreadyImported: counts.already_imported,
