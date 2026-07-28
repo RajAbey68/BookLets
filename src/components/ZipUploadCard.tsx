@@ -1,15 +1,9 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-
-/**
- * Client-side pre-check mirror of MAX_ZIP_UPLOAD_BYTES (src/lib/zip-ingest.ts,
- * 100 MB). Not imported: zip-ingest pulls in adm-zip/node:crypto, which do not
- * belong in the client bundle. The server remains the authority — this only
- * saves Raj from uploading 100 MB just to see a 413.
- */
-const MAX_ZIP_UPLOAD_MB = 100;
+import { preflightZipFile, summarizeZipUploadResponse } from '@/lib/zip-upload-result';
+import { DIRECT_UPLOAD_TIMEOUT_MS, MAX_DIRECT_UPLOAD_MB, describeElapsed } from '@/lib/upload-limits';
 
 /** The fields of ZipIngestReport (src/lib/zip-ingest.ts) this card renders. */
 interface UploadReport {
@@ -34,69 +28,107 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
  * application/zip (the route buffers the body via arrayBuffer() behind its
  * byte-cap guard). All security guards, dedupe, and OCR run server-side; the
  * returned ZipIngestReport is translated to plain English here.
+ *
+ * Size, type and error copy all come from the shared modules (upload-limits /
+ * zip-upload-result) so this card and the dashboard's WhatsappZipUploader can
+ * never again disagree about what the platform will accept.
  */
 export default function ZipUploadCard() {
   const [status, setStatus] = useState<UploadStatus>('IDLE');
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<UploadReport | null>(null);
   const [isDragOver, setDragOver] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  // Visible proof of life while UPLOADING — a static "Uploading…" label cannot
+  // distinguish a slow import from a dead request.
+  // No synchronous tick here: the trigger site already sets elapsedMs to 0
+  // alongside startedAt, and setState in an effect body cascades an extra
+  // render (react-hooks/set-state-in-effect). The first interval tick lands a
+  // second later, which is exactly what a 0-second reading would have shown.
+  useEffect(() => {
+    if (status !== 'UPLOADING' || startedAt === null) return;
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [status, startedAt]);
 
   const upload = async (file: File) => {
     setError(null);
     setReport(null);
 
-    if (!file.name.toLowerCase().endsWith('.zip')) {
+    // Shared preflight: wrong type, empty, or over the platform's request-body
+    // ceiling. An oversized body is killed at the edge before our route runs,
+    // so this is the only chance to say anything truthful about it.
+    const preflight = preflightZipFile(file.name, file.size);
+    if (preflight) {
       setStatus('ERROR');
-      setError(`"${file.name}" is not a .zip file — export the receipts as a zip archive first.`);
-      return;
-    }
-    if (file.size > MAX_ZIP_UPLOAD_MB * 1024 * 1024) {
-      setStatus('ERROR');
-      setError(`Zip too large (max ${MAX_ZIP_UPLOAD_MB} MB). Split the export and upload in parts.`);
+      setError(`${preflight.title} — ${preflight.message}`);
+      if (inputRef.current) inputRef.current.value = '';
       return;
     }
 
     setStatus('UPLOADING');
+    setStartedAt(Date.now());
+    setElapsedMs(0);
+
+    // This card previously had NO timeout: a stalled connection left it on
+    // "Uploading…" forever. Aborting the signal tears the request down at any
+    // stage, so ERROR is always reachable.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), DIRECT_UPLOAD_TIMEOUT_MS);
     try {
       const res = await fetch('/api/ingest/zip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/zip' },
         body: file,
+        signal: controller.signal,
       });
 
-      // Error bodies are JSON ({ error, code? }) when the route answered, but
-      // a proxy/edge 413 may not be — parse defensively.
-      let body: { report?: UploadReport; error?: string } = {};
+      // Error bodies are JSON ({ error, code? }) when the route answered, but a
+      // platform-edge 413 is PLAIN TEXT and res.json() throws — and it can also
+      // resolve to a non-object (null), so never assume a shape.
+      let body: unknown = {};
       try {
         body = await res.json();
       } catch {
-        /* non-JSON body — fall through to the status-based messages */
+        /* non-JSON body — the summarizer stands on the status code alone */
       }
 
       if (!res.ok) {
+        const summary = summarizeZipUploadResponse(res.status, body);
         setStatus('ERROR');
-        if (res.status === 401) setError('Sign in to upload receipts.');
-        else if (res.status === 403) setError("Your role can't upload receipts here.");
-        else if (res.status === 413) setError(body.error ?? `Zip too large (max ${MAX_ZIP_UPLOAD_MB} MB).`);
-        else setError(body.error ?? `Upload failed (HTTP ${res.status}). Try again shortly.`);
+        setError(`${summary.title} — ${summary.message}`);
         return;
       }
 
-      if (!body.report) {
+      const parsedReport =
+        body && typeof body === 'object' && 'report' in body
+          ? ((body as { report?: UploadReport }).report ?? null)
+          : null;
+      if (!parsedReport) {
         setStatus('ERROR');
         setError('Upload succeeded but the server returned no summary. Refresh and check the queue.');
         return;
       }
-      setReport(body.report);
+      setReport(parsedReport);
       setStatus('DONE');
       // Re-render the server-side pieces (consensus queue, staging summary).
       router.refresh();
     } catch (err) {
       setStatus('ERROR');
-      setError(err instanceof Error ? err.message : 'Upload failed. Check your connection and try again.');
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setError(
+          `The server did not answer within ${Math.round(DIRECT_UPLOAD_TIMEOUT_MS / 60000)} minutes, so the ` +
+            'upload was cancelled rather than left hanging. Try again — already-imported receipts are skipped.',
+        );
+      } else {
+        setError(err instanceof Error ? err.message : 'Upload failed. Check your connection and try again.');
+      }
     } finally {
+      clearTimeout(timeout);
       // Allow re-selecting the same file after an error or a second upload.
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -129,8 +161,8 @@ export default function ZipUploadCard() {
       >
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
           {busy
-            ? 'Uploading and reading the receipts — this can take a minute for large exports…'
-            : 'Drag a WhatsApp/receipts export (.zip) here, or pick a file. Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.'}
+            ? `Uploading and reading the receipts — still working, ${describeElapsed(elapsedMs)}.`
+            : `Drag a WhatsApp/receipts export (.zip) here, or pick a file — up to ${MAX_DIRECT_UPLOAD_MB} MB (a hosting-platform limit). Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.`}
         </p>
         <label className="btn btn-primary" style={{ cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}>
           {busy ? 'Uploading…' : 'Choose .zip file'}
