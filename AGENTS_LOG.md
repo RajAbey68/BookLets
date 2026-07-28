@@ -50,6 +50,19 @@ joining this repo should read it before claiming scope here.
   inside the transport (so no caller can forget it). On rebase, keep #132's
   preflight and error copy; drop its timeout wiring in this card, because the
   call it wrapped no longer exists. #132's `upload-limits.ts` is untouched here.
+  **RESOLVED (merge of `main` @ `1d2bfb2`).** #132's timeout wiring is gone from
+  both cards; the inactivity watchdog inside `importWhatsappExport` replaces it.
+  #132's shared preflight, error copy and `upload-limits.ts` are kept as-is.
+  One thing the note did not foresee: #132's `preflightZipFile` rejects anything
+  over `MAX_DIRECT_UPLOAD_BYTES` (4 MB), which is correct for a whole-archive
+  request body and fatal for this transport — it would have rejected every real
+  export and silently undone this PR. `zip-upload-result.ts` therefore now has
+  two preflights over shared shape checks: `preflightZipFile` (unchanged, 4 MB,
+  direct transport) and `preflightExpandedZipFile` (100 MB browser-memory
+  ceiling, per-item transport), with the disagreement pinned by test.
+  Elapsed-time display KEPT alongside the per-item count: the count is static
+  between OCR round-trips and absent entirely while the archive decompresses,
+  so the two cues cover different silences.
 - **No schema change. No migration. No production data touched.** Batch-close
   idempotency is enforced at application level, deliberately without a DB
   unique index — see the completeBatch docstring for the residual race.

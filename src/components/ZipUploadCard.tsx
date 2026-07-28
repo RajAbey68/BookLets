@@ -1,16 +1,14 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { importWhatsappExport, describeImportFailure } from '@/lib/whatsapp-import-client';
-
-/**
- * Client-side pre-check mirror of MAX_ZIP_UPLOAD_BYTES (src/lib/zip-ingest.ts,
- * 100 MB). Not imported: zip-ingest pulls in adm-zip/node:crypto, which do not
- * belong in the client bundle. The server remains the authority — this only
- * saves Raj from opening a 100 MB archive just to be told it is too big.
- */
-const MAX_ZIP_UPLOAD_MB = 100;
+import { preflightExpandedZipFile } from '@/lib/zip-upload-result';
+import { describeElapsed } from '@/lib/upload-limits';
+import {
+  importWhatsappExport,
+  describeImportFailure,
+  DEFAULT_IDLE_TIMEOUT_MS,
+} from '@/lib/whatsapp-import-client';
 
 /** The fields of ZipIngestReport (src/lib/zip-ingest.ts) this card renders. */
 interface UploadReport {
@@ -37,6 +35,17 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
  * re-checks every item's size, filename and type, and derives the dedupe key
  * from a hash of the bytes it received. All OCR and ledger work stays
  * server-side; the resulting report is translated to plain English here.
+ *
+ * Size, type and error copy all come from the shared modules (upload-limits /
+ * zip-upload-result) so this card and the dashboard's WhatsappZipUploader can
+ * never again disagree about what the platform will accept.
+ *
+ * Two liveness cues run together while it works: the per-item COUNT (proof the
+ * server is answering, but static between round-trips and absent while the
+ * archive is still decompressing) and the ELAPSED clock (ticks every second,
+ * so it covers exactly those gaps). Behind both sits the inactivity watchdog
+ * inside importWhatsappExport, which ends a silent run instead of leaving this
+ * card on "Uploading…" with the file picker disabled.
  */
 export default function ZipUploadCard() {
   const [status, setStatus] = useState<UploadStatus>('IDLE');
@@ -45,26 +54,50 @@ export default function ZipUploadCard() {
   /** Live count, one tick per finished receipt — never an indeterminate spinner. */
   const [progress, setProgress] = useState<string | null>(null);
   const [isDragOver, setDragOver] = useState(false);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  // Visible proof of life while UPLOADING — a static "Uploading…" label cannot
+  // distinguish a slow import from a dead request.
+  // No synchronous tick here: the trigger site already sets elapsedMs to 0
+  // alongside startedAt, and setState in an effect body cascades an extra
+  // render (react-hooks/set-state-in-effect). The first interval tick lands a
+  // second later, which is exactly what a 0-second reading would have shown.
+  useEffect(() => {
+    if (status !== 'UPLOADING' || startedAt === null) return;
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [status, startedAt]);
 
   const upload = async (file: File) => {
     setError(null);
     setReport(null);
 
-    if (!file.name.toLowerCase().endsWith('.zip')) {
+    // Shared preflight and shared error copy, so this card and the dashboard
+    // uploader can never disagree about what is acceptable. The EXPANDED
+    // variant: this transport posts one small request per entry and never
+    // sends the archive as a body, so the platform's 4 MB request-body ceiling
+    // is not the number to check here — see MAX_EXPANDED_ARCHIVE_BYTES.
+    const preflight = preflightExpandedZipFile(file.name, file.size);
+    if (preflight) {
       setStatus('ERROR');
-      setError(`"${file.name}" is not a .zip file — export the receipts as a zip archive first.`);
-      return;
-    }
-    if (file.size > MAX_ZIP_UPLOAD_MB * 1024 * 1024) {
-      setStatus('ERROR');
-      setError(`Zip too large (max ${MAX_ZIP_UPLOAD_MB} MB). Split the export and upload in parts.`);
+      setError(`${preflight.title} — ${preflight.message}`);
+      if (inputRef.current) inputRef.current.value = '';
       return;
     }
 
     setStatus('UPLOADING');
     setProgress(null);
+    setStartedAt(Date.now());
+    setElapsedMs(0);
+
+    // #132 wrapped its single fetch in a fixed DIRECT_UPLOAD_TIMEOUT_MS abort.
+    // That fetch is gone, and a fixed deadline would be wrong for what replaced
+    // it — a 200-receipt run legitimately lasts half an hour. importWhatsappExport
+    // carries an INACTIVITY watchdog instead, inside the transport, so no caller
+    // can forget it and ERROR stays reachable from any stall.
     try {
       const result = await importWhatsappExport(file, {
         onProgress: (p) => setProgress(`Reading receipt ${p.done} of ${p.total} — ${p.name}`),
@@ -92,6 +125,7 @@ export default function ZipUploadCard() {
       setError(describeImportFailure(err).message);
     } finally {
       setProgress(null);
+      setStartedAt(null);
       // Allow re-selecting the same file after an error or a second upload.
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -132,6 +166,18 @@ export default function ZipUploadCard() {
             ? (progress ?? 'Opening the archive…')
             : 'Drag a WhatsApp/receipts export (.zip) here, or pick a file. Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.'}
         </p>
+
+        {busy && (
+          // Outside the aria-live region above on purpose: this ticks every
+          // second and would otherwise spam a screen reader. It is kept
+          // alongside the count because the count is static between receipts
+          // and does not exist at all while the archive is being opened —
+          // exactly the two windows in which a dead run used to look alive.
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
+            Still working — {describeElapsed(elapsedMs)}. If nothing finishes for{' '}
+            {Math.round(DEFAULT_IDLE_TIMEOUT_MS / 60000)} minutes the import stops and tells you.
+          </p>
+        )}
         <label className="btn btn-primary" style={{ cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}>
           {busy ? 'Uploading…' : 'Choose .zip file'}
           <input

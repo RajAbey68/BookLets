@@ -64,17 +64,31 @@ export const MAX_ENTRY_COMPRESSION_RATIO = 100;
 export const RATIO_GUARD_MIN_BYTES = 64 * 1024;
 
 /**
- * Cap on the COMPRESSED upload itself (checked by the route handler).
+ * Server-side cap on the COMPRESSED upload itself (checked by the route
+ * handler). This is a MEMORY guard for deployments that can actually receive
+ * a body this large (the Docker/standalone target) — it is NOT the number a
+ * browser should trust, and it is NOT a statement about what the hosting
+ * platform will carry.
  *
  * REACHABILITY WARNING: on Vercel this ceiling is unreachable. The platform
- * edge rejects any request body over ~4.5 MB with 413
- * FUNCTION_PAYLOAD_TOO_LARGE *before* this function runs (measured against
- * production: a 4 MB body reaches the handler, a 5 MB body does not), so
- * POST /api/ingest/zip can only ever accept a small archive. A real WhatsApp
- * "Export Chat → Attach Media" export is tens of MB and must go through the
- * per-item transport instead: the browser expands it (src/lib/zip-reader.ts)
- * and POSTs each entry to /api/ingest/item. This route is kept for small
- * archives, curl and the existing test suite.
+ * edge rejects any request body over ~4.5 MB with `413
+ * FUNCTION_PAYLOAD_TOO_LARGE` *before* this route is ever invoked (measured
+ * against production: a 4 MB body reaches the handler, a 5 MB body does not),
+ * so POST /api/ingest/zip can only ever accept a small archive there. The
+ * route is kept for small archives, curl and the existing test suite.
+ *
+ * Two different client-side numbers follow from that, and mirroring THIS
+ * constant into the browser instead is what caused the July silent-failure
+ * incident:
+ *
+ *  - A client that posts the whole archive in one body must pre-check against
+ *    MAX_DIRECT_UPLOAD_BYTES (src/lib/upload-limits.ts, 4 MB).
+ *  - A real WhatsApp "Export Chat → Attach Media" export is tens of MB, so it
+ *    cannot use that transport at all and must go per item instead: the
+ *    browser expands the archive (src/lib/zip-reader.ts) and POSTs each entry
+ *    to /api/ingest/item, where MAX_ITEM_BYTES (src/lib/ingest-limits.ts)
+ *    is the per-request ceiling. The archive's own bytes never cross the
+ *    network, so what bounds it is browser memory, not this route.
  */
 export const MAX_ZIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 

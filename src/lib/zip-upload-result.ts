@@ -1,4 +1,10 @@
 import type { ZipIngestReport, IngestFailure } from './zip-ingest';
+import {
+  MAX_DIRECT_UPLOAD_BYTES,
+  OVERSIZE_UPLOAD_HELP,
+  describeOversizeUpload,
+  formatMb,
+} from './upload-limits';
 
 /**
  * Turns the raw HTTP response from POST /api/ingest/zip into a single,
@@ -22,10 +28,24 @@ export interface ZipUploadResult {
   showReviewLink: boolean;
 }
 
-const MB_LIMIT_HINT = 'That file is over the 100 MB limit.';
+/**
+ * Lead sentence for a 413 whose body told us nothing. Vercel's edge answers an
+ * oversized body with plain text, not JSON, so `res.json()` throws and the
+ * caller has no server message to show — this must stand on its own.
+ */
+const TOO_LARGE_LEAD =
+  'That file was too big to upload — it was rejected in transit and never reached BookLets.';
 
-/** Mirror of the server's MAX_ZIP_UPLOAD_BYTES so we can reject before uploading. */
-export const MAX_ZIP_BYTES = 100 * 1024 * 1024;
+/**
+ * The single, honest upload ceiling. Kept as a named re-export because the
+ * old name is referenced elsewhere; new code should import
+ * MAX_DIRECT_UPLOAD_BYTES from ./upload-limits directly.
+ *
+ * This is NOT a mirror of the server's MAX_ZIP_UPLOAD_BYTES (100 MB) — that
+ * number is unreachable on Vercel and was the cause of the silent-failure
+ * incident. See src/lib/upload-limits.ts for the measured evidence.
+ */
+export const MAX_ZIP_BYTES = MAX_DIRECT_UPLOAD_BYTES;
 
 /**
  * Mirror of the server's MAX_INGEST_IMAGES (zip-ingest.ts) for client copy.
@@ -69,12 +89,11 @@ export function splitNdjson(buffer: string): { events: unknown[]; rest: string }
 const NO_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
 
 /**
- * Client-side pre-check run before the file leaves the browser. Returns a
- * failure result to display, or `null` when the file is safe to upload — so a
- * 500 MB or wrong-type file never wastes a full multipart round-trip to hit the
- * server's 413/400. The server still enforces the same limits authoritatively.
+ * Checks true of EVERY transport: it has to be a zip, and it has to have
+ * bytes in it. Size ceilings differ per transport and are applied by the two
+ * exported wrappers below.
  */
-export function preflightZipFile(name: string, size: number): ZipUploadResult | null {
+function preflightZipShape(name: string, size: number): ZipUploadResult | null {
   if (!name.toLowerCase().endsWith('.zip')) {
     return {
       ok: false,
@@ -86,11 +105,73 @@ export function preflightZipFile(name: string, size: number): ZipUploadResult | 
   if (size <= 0) {
     return { ok: false, title: 'Empty file', message: 'That file is empty.', ...NO_COUNTS };
   }
-  if (size > MAX_ZIP_BYTES) {
+  return null;
+}
+
+/**
+ * Ceiling for an archive the BROWSER expands itself (the per-item transport
+ * in whatsapp-import-client.ts).
+ *
+ * MAX_DIRECT_UPLOAD_BYTES deliberately does NOT apply here. Those 4 MB are a
+ * limit on one request BODY, and under this transport the archive's own bytes
+ * never cross the network — only its individual entries do, each capped at
+ * MAX_ITEM_BYTES (src/lib/ingest-limits.ts, also 4 MB) by the browser plan and
+ * re-checked by the server. Applying the request-body ceiling to the archive
+ * would reject every real "Export Chat → Attach Media" export (tens of MB) and
+ * so reinstate exactly the dead end this transport exists to remove.
+ *
+ * What still bounds the archive is what a browser tab can decompress without
+ * running out of memory, which is the same 100 MB the server's
+ * MAX_ZIP_UPLOAD_BYTES names. Inlined rather than imported because zip-ingest
+ * pulls in adm-zip/node:crypto and can never enter the client bundle.
+ */
+export const MAX_EXPANDED_ARCHIVE_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Client-side pre-check for the DIRECT transport — the whole archive posted as
+ * one request body to /api/ingest/zip.
+ *
+ * The size branch is load-bearing, not cosmetic: a body over the platform
+ * ceiling is killed at the edge before our route runs, so there is no server
+ * error to fall back on and nothing lands in the runtime logs. Catching it
+ * here is the only place the operator can be told the truth immediately.
+ * The server still enforces every limit authoritatively — this is a courtesy,
+ * never a trust boundary.
+ */
+export function preflightZipFile(name: string, size: number): ZipUploadResult | null {
+  const shape = preflightZipShape(name, size);
+  if (shape) return shape;
+  if (size > MAX_DIRECT_UPLOAD_BYTES) {
+    return {
+      ok: false,
+      title: 'File too large to upload',
+      message: describeOversizeUpload(size),
+      ...NO_COUNTS,
+    };
+  }
+  return null;
+}
+
+/**
+ * Client-side pre-check for the EXPANDED transport — the browser unzips the
+ * archive and posts one small request per entry.
+ *
+ * Same shape checks and same error copy as preflightZipFile; only the size
+ * ceiling differs, and for the reason spelled out on
+ * MAX_EXPANDED_ARCHIVE_BYTES: nothing here is bounded by the platform's
+ * request-body limit, because the archive is never a request body.
+ */
+export function preflightExpandedZipFile(name: string, size: number): ZipUploadResult | null {
+  const shape = preflightZipShape(name, size);
+  if (shape) return shape;
+  if (size > MAX_EXPANDED_ARCHIVE_BYTES) {
     return {
       ok: false,
       title: 'File too large',
-      message: `That file is ${(size / 1024 / 1024).toFixed(1)} MB — over the 100 MB limit.`,
+      message:
+        `That file is ${formatMb(size)} — over the ${MAX_EXPANDED_ARCHIVE_BYTES / 1024 / 1024} MB ` +
+        'limit for one import. Export a shorter date range (a month at a time) and import the ' +
+        'parts one after another — receipts already imported are skipped, never duplicated.',
       ...NO_COUNTS,
     };
   }
@@ -204,8 +285,27 @@ export function summarizeZipUploadResponse(status: number, body: unknown): ZipUp
   switch (status) {
     case 401:
       return { ok: false, title: 'Session expired', message: 'Please sign in again to import.', ...EMPTY_COUNTS };
+    case 403:
+      return {
+        ok: false,
+        title: 'Not allowed',
+        message: errorText(body, "Your role can't upload receipts here."),
+        ...EMPTY_COUNTS,
+      };
+    // 413 arrives from TWO places with two different body shapes:
+    //   • our own route ({ error }) once the request reached the function, and
+    //   • the platform edge, as PLAIN TEXT ("FUNCTION_PAYLOAD_TOO_LARGE"),
+    //     before the function ran at all — `res.json()` throws there, so
+    //     callers hand us `{}` / a raw string / null / undefined.
+    // Either way the operator needs the workaround, so it is always appended
+    // and the raw platform text is never surfaced.
     case 413:
-      return { ok: false, title: 'File too large', message: errorText(body, MB_LIMIT_HINT), ...EMPTY_COUNTS };
+      return {
+        ok: false,
+        title: 'File too large to upload',
+        message: `${errorText(body, TOO_LARGE_LEAD)} ${OVERSIZE_UPLOAD_HELP}`,
+        ...EMPTY_COUNTS,
+      };
     case 400:
       return {
         ok: false,

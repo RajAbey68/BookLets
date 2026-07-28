@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import {
   summarizeZipUploadResponse,
-  preflightZipFile,
+  preflightExpandedZipFile,
   describeProgress,
   type ZipUploadResult,
   type ZipProgress,
@@ -13,8 +13,10 @@ import {
   importWhatsappExport,
   describeImportFailure,
   toUploadReport,
+  DEFAULT_IDLE_TIMEOUT_MS,
   type WhatsappImportReport,
 } from '../lib/whatsapp-import-client';
+import { describeElapsed } from '../lib/upload-limits';
 
 /**
  * Imports a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
@@ -27,6 +29,15 @@ import {
  * time budget and makes the progress count real (never a spinner: a spinner
  * can't tell a slow import from a stuck one). Every entry lands as DRAFT;
  * nothing posts to the ledger until approved in the review queue.
+ *
+ * Two independent liveness cues run side by side while it works, because they
+ * fail in different places: the per-item COUNT proves the server is answering
+ * but only moves when an item finishes (an OCR round-trip, sometimes a minute
+ * apart, and not at all while the archive is still being decompressed), while
+ * the ELAPSED clock ticks every second and so covers precisely those gaps. If
+ * both stall, the inactivity watchdog inside importWhatsappExport ends the run
+ * and says so. There is no state in which this card shows progress while
+ * nothing is happening — that dead end is the whole reason this code exists.
  */
 
 type UploaderStatus = 'IDLE' | 'UPLOADING' | 'DONE' | 'ERROR';
@@ -79,6 +90,20 @@ export const WhatsappZipUploader: React.FC = () => {
   const [status, setStatus] = useState<UploaderStatus>('IDLE');
   const [result, setResult] = useState<ZipUploadResult | null>(null);
   const [progress, setProgress] = useState<ZipProgress | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  // A number that visibly moves is the only way to tell a slow import from a
+  // dead one. The original bug looked exactly like "working" for hours.
+  // No synchronous tick here: the trigger site already sets elapsedMs to 0
+  // alongside startedAt, and setState in an effect body cascades an extra
+  // render (react-hooks/set-state-in-effect). The first interval tick lands a
+  // second later, which is exactly what a 0-second reading would have shown.
+  useEffect(() => {
+    if (status !== 'UPLOADING' || startedAt === null) return;
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [status, startedAt]);
 
   const cardClass = ['glass-card', status === 'DONE' ? 'is-success' : ''].filter(Boolean).join(' ');
 
@@ -86,6 +111,8 @@ export const WhatsappZipUploader: React.FC = () => {
     setStatus('IDLE');
     setResult(null);
     setProgress(null);
+    setStartedAt(null);
+    setElapsedMs(0);
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -95,7 +122,10 @@ export const WhatsappZipUploader: React.FC = () => {
     if (!file) return;
 
     // Reject wrong-type / empty / oversized files before spending a round-trip.
-    const preflight = preflightZipFile(file.name, file.size);
+    // The EXPANDED variant: this transport never posts the archive as a request
+    // body, so the platform's 4 MB body ceiling is not the number to check —
+    // see MAX_EXPANDED_ARCHIVE_BYTES.
+    const preflight = preflightExpandedZipFile(file.name, file.size);
     if (preflight) {
       setResult(preflight);
       setStatus('ERROR');
@@ -105,10 +135,16 @@ export const WhatsappZipUploader: React.FC = () => {
     setStatus('UPLOADING');
     setResult(null);
     setProgress(null);
+    setStartedAt(Date.now());
+    setElapsedMs(0);
 
     try {
-      // The inactivity watchdog lives inside importWhatsappExport, so it
-      // applies to every caller and cannot be forgotten here.
+      // #132 wrapped its single fetch in a fixed DIRECT_UPLOAD_TIMEOUT_MS abort.
+      // That call no longer exists, and a fixed deadline is the wrong mechanism
+      // for this transport anyway: a 200-receipt run legitimately lasts half an
+      // hour. The replacement is an INACTIVITY watchdog living inside
+      // importWhatsappExport, so it applies to every caller and cannot be
+      // forgotten here.
       const report = await importWhatsappExport(file, { onProgress: setProgress });
 
       const summary = summarizeZipUploadResponse(200, { report: toUploadReport(report) });
@@ -145,6 +181,21 @@ export const WhatsappZipUploader: React.FC = () => {
           {(status === 'DONE' || status === 'ERROR') && result?.message}
         </p>
 
+        {status === 'UPLOADING' && (
+          // Deliberately outside the aria-live region above: it ticks every
+          // second and would otherwise spam a screen reader.
+          <p
+            className="uploader-elapsed"
+            style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}
+          >
+            Still working — {describeElapsed(elapsedMs)}. Kept alongside the count above because
+            the count only moves when a receipt finishes; this moves every second, so silence is
+            always visible. If nothing finishes for{' '}
+            {Math.round(DEFAULT_IDLE_TIMEOUT_MS / 60000)} minutes the import stops and tells you,
+            rather than waiting forever.
+          </p>
+        )}
+
         {status === 'IDLE' && (
           <>
             <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
@@ -160,7 +211,8 @@ export const WhatsappZipUploader: React.FC = () => {
               In WhatsApp: open the chat → Export Chat → <strong>Attach Media</strong> → save the .zip.
               Keep this tab open while it runs — receipts are imported one at a time and you can see
               the count. If it stops early, just upload the same file again: it picks up where it
-              left off and never imports the same receipt twice.
+              left off and never imports the same receipt twice. Exporting <em>Without Media</em>{' '}
+              keeps the file small but contains no receipt photos, so it creates no entries.
             </p>
           </>
         )}

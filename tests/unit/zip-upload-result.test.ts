@@ -2,10 +2,13 @@ import { describe, it, expect } from 'vitest';
 import {
   summarizeZipUploadResponse,
   preflightZipFile,
+  preflightExpandedZipFile,
   MAX_ZIP_BYTES,
+  MAX_EXPANDED_ARCHIVE_BYTES,
   describeProgress,
   splitNdjson,
 } from '@/lib/zip-upload-result';
+import { MAX_DIRECT_UPLOAD_BYTES, OVERSIZE_UPLOAD_HELP } from '@/lib/upload-limits';
 import type { ZipIngestReport } from '@/lib/zip-ingest';
 
 /**
@@ -88,11 +91,52 @@ describe('summarizeZipUploadResponse', () => {
 
   it('maps 413 to a file-too-large result and surfaces the server limit text', () => {
     const result = summarizeZipUploadResponse(413, {
-      error: 'Upload exceeds the 100 MB zip limit.',
+      error: 'Upload exceeds the 4 MB zip limit.',
     });
 
     expect(result.ok).toBe(false);
-    expect(result.message).toContain('100 MB');
+    expect(result.message).toContain('4 MB');
+  });
+
+  /**
+   * The incident. Vercel's edge answers an oversized body with
+   * `413 FUNCTION_PAYLOAD_TOO_LARGE` in a PLAIN-TEXT body, before the route
+   * runs — so `res.json()` throws and the caller passes whatever it managed
+   * to salvage. Every one of these shapes must still render a clear,
+   * actionable error, never a blank and never something that looks like
+   * progress.
+   */
+  describe('413 from the platform edge (plain-text body, not JSON)', () => {
+    const NON_JSON_BODIES: [string, unknown][] = [
+      ['res.json() threw, caller kept its `{}` default', {}],
+      ['caller passed the raw text', 'Request Entity Too Large\nFUNCTION_PAYLOAD_TOO_LARGE'],
+      ['caller passed nothing', undefined],
+      ['res.json() resolved to JSON null', null],
+      ['an HTML error page was parsed away to an array', []],
+    ];
+
+    it.each(NON_JSON_BODIES)('degrades cleanly when %s', (_label, body) => {
+      const result = summarizeZipUploadResponse(413, body);
+
+      expect(result.ok).toBe(false);
+      expect(result.title.toLowerCase()).toContain('large');
+      expect(result.message.length).toBeGreaterThan(0);
+      // The honest limit, and the workaround — not the 100 MB fiction.
+      expect(result.message).not.toContain('100 MB');
+      expect(result.message).toContain(OVERSIZE_UPLOAD_HELP);
+    });
+
+    it('never leaks the platform\'s raw plain-text body to the operator', () => {
+      const result = summarizeZipUploadResponse(413, 'FUNCTION_PAYLOAD_TOO_LARGE');
+      expect(result.message).not.toContain('FUNCTION_PAYLOAD_TOO_LARGE');
+    });
+  });
+
+  it('degrades cleanly on a non-JSON 500 (proxy/HTML error page)', () => {
+    const result = summarizeZipUploadResponse(500, '<html>502 Bad Gateway</html>');
+    expect(result.ok).toBe(false);
+    expect(result.message.length).toBeGreaterThan(0);
+    expect(result.message).not.toContain('<html>');
   });
 
   it('maps 400 (empty / not a zip / missing file) to an invalid-file result', () => {
@@ -119,6 +163,13 @@ describe('summarizeZipUploadResponse', () => {
     expect(result.title.toLowerCase()).toMatch(/sign|session/);
   });
 
+  it('maps 403 to a role/permission result (shared by both uploaders)', () => {
+    const result = summarizeZipUploadResponse(403, {});
+
+    expect(result.ok).toBe(false);
+    expect(result.message.toLowerCase()).toMatch(/role|allowed|permission/);
+  });
+
   it('maps 500 and unknown statuses to a generic failure', () => {
     const result = summarizeZipUploadResponse(500, { error: 'Zip ingestion failed.' });
 
@@ -143,10 +194,73 @@ describe('preflightZipFile', () => {
     expect(result?.ok).toBe(false);
   });
 
-  it('rejects a file over the 100 MB cap without uploading it', () => {
-    const result = preflightZipFile('huge.zip', MAX_ZIP_BYTES + 1);
+  it('rejects a file over the real platform ceiling without uploading it', () => {
+    const result = preflightZipFile('huge.zip', MAX_DIRECT_UPLOAD_BYTES + 1);
     expect(result?.ok).toBe(false);
-    expect(result?.message).toContain('100 MB');
+    expect(result?.message).toContain('4 MB');
+    expect(result?.message).toContain(OVERSIZE_UPLOAD_HELP);
+  });
+
+  /**
+   * The exact regression: a 62 MB WhatsApp "Attach Media" export passed the
+   * old 100 MB preflight, was uploaded, and died at the edge with no error
+   * ever reaching the UI. It must now be rejected instantly, in the browser.
+   */
+  it('rejects the 62 MB export that silently died at the edge in production', () => {
+    const result = preflightZipFile('WhatsApp Chat - Ko Lake Petty Cash.zip', 62_411_000);
+    expect(result?.ok).toBe(false);
+    expect(result?.message).toContain('59.5 MB');
+    expect(result?.message).not.toContain('100 MB');
+  });
+
+  it('accepts a file exactly at the ceiling (boundary)', () => {
+    expect(preflightZipFile('edge.zip', MAX_DIRECT_UPLOAD_BYTES)).toBeNull();
+  });
+
+  it('keeps MAX_ZIP_BYTES as an alias of the single shared ceiling', () => {
+    expect(MAX_ZIP_BYTES).toBe(MAX_DIRECT_UPLOAD_BYTES);
+  });
+});
+
+/**
+ * The per-item transport expands the archive in the BROWSER and posts one
+ * small request per entry, so the archive's own bytes never become a request
+ * body. Applying the 4 MB request-body ceiling to it would reject every real
+ * "Export Chat → Attach Media" export and reinstate the dead end the transport
+ * exists to remove — the mirror image of the July incident, and just as silent
+ * from the operator's chair.
+ */
+describe('preflightExpandedZipFile — the browser-expands-it transport', () => {
+  it('ACCEPTS the 62 MB export that the direct transport must reject', () => {
+    const name = 'WhatsApp Chat - Ko Lake Petty Cash.zip';
+    const size = 62_411_000;
+
+    // The two transports must disagree here, and that disagreement is the point.
+    expect(preflightZipFile(name, size)?.ok).toBe(false);
+    expect(preflightExpandedZipFile(name, size)).toBeNull();
+  });
+
+  it('accepts a normal multi-megabyte export', () => {
+    expect(preflightExpandedZipFile('export.zip', 30 * 1024 * 1024)).toBeNull();
+  });
+
+  it('accepts a file exactly at the archive ceiling (boundary)', () => {
+    expect(preflightExpandedZipFile('edge.zip', MAX_EXPANDED_ARCHIVE_BYTES)).toBeNull();
+  });
+
+  it('still rejects an archive past what a browser tab can decompress', () => {
+    const result = preflightExpandedZipFile('vast.zip', MAX_EXPANDED_ARCHIVE_BYTES + 1);
+    expect(result?.ok).toBe(false);
+    expect(result?.title.toLowerCase()).toContain('large');
+    // Must NOT blame the hosting platform — this ceiling is browser memory,
+    // and the 4 MB workaround copy would be a lie here.
+    expect(result?.message).not.toContain(OVERSIZE_UPLOAD_HELP);
+    expect(result?.message).not.toContain('4 MB');
+  });
+
+  it('shares the shape checks with the direct transport (type and empty)', () => {
+    expect(preflightExpandedZipFile('receipt.pdf', 1000)?.title.toLowerCase()).toContain('zip');
+    expect(preflightExpandedZipFile('export.zip', 0)?.ok).toBe(false);
   });
 });
 
