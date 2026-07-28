@@ -163,6 +163,16 @@ export class RateLimiter {
     }
     return false;
   }
+
+  /**
+   * Drop all buckets. Module-level limiters are shared across requests inside
+   * one process, which makes them shared state between unit tests too — this
+   * lets a test start from a known-full bucket instead of inheriting whatever
+   * the previous test drained.
+   */
+  reset(): void {
+    this.buckets.clear();
+  }
 }
 
 /**

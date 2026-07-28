@@ -2,8 +2,13 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { preflightZipFile, summarizeZipUploadResponse } from '@/lib/zip-upload-result';
-import { DIRECT_UPLOAD_TIMEOUT_MS, MAX_DIRECT_UPLOAD_MB, describeElapsed } from '@/lib/upload-limits';
+import { preflightExpandedZipFile } from '@/lib/zip-upload-result';
+import { describeElapsed } from '@/lib/upload-limits';
+import {
+  importWhatsappExport,
+  describeImportFailure,
+  DEFAULT_IDLE_TIMEOUT_MS,
+} from '@/lib/whatsapp-import-client';
 
 /** The fields of ZipIngestReport (src/lib/zip-ingest.ts) this card renders. */
 interface UploadReport {
@@ -23,20 +28,31 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 /**
  * S11 — upload a receipts zip into the sandbox.
  *
- * Sends the archive EXACTLY as /api/ingest/zip expects for a non-multipart
- * request: the raw zip bytes as the request body with Content-Type
- * application/zip (the route buffers the body via arrayBuffer() behind its
- * byte-cap guard). All security guards, dedupe, and OCR run server-side; the
- * returned ZipIngestReport is translated to plain English here.
+ * The archive is expanded in the browser and each entry is POSTed separately
+ * to /api/ingest/item: Vercel's edge rejects any request body over ~4.5 MB
+ * before the function runs, so a real receipts export can never be sent whole.
+ * Expansion moved to the client; the trust boundary did not — the server
+ * re-checks every item's size, filename and type, and derives the dedupe key
+ * from a hash of the bytes it received. All OCR and ledger work stays
+ * server-side; the resulting report is translated to plain English here.
  *
  * Size, type and error copy all come from the shared modules (upload-limits /
  * zip-upload-result) so this card and the dashboard's WhatsappZipUploader can
  * never again disagree about what the platform will accept.
+ *
+ * Two liveness cues run together while it works: the per-item COUNT (proof the
+ * server is answering, but static between round-trips and absent while the
+ * archive is still decompressing) and the ELAPSED clock (ticks every second,
+ * so it covers exactly those gaps). Behind both sits the inactivity watchdog
+ * inside importWhatsappExport, which ends a silent run instead of leaving this
+ * card on "Uploading…" with the file picker disabled.
  */
 export default function ZipUploadCard() {
   const [status, setStatus] = useState<UploadStatus>('IDLE');
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<UploadReport | null>(null);
+  /** Live count, one tick per finished receipt — never an indeterminate spinner. */
+  const [progress, setProgress] = useState<string | null>(null);
   const [isDragOver, setDragOver] = useState(false);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -59,10 +75,12 @@ export default function ZipUploadCard() {
     setError(null);
     setReport(null);
 
-    // Shared preflight: wrong type, empty, or over the platform's request-body
-    // ceiling. An oversized body is killed at the edge before our route runs,
-    // so this is the only chance to say anything truthful about it.
-    const preflight = preflightZipFile(file.name, file.size);
+    // Shared preflight and shared error copy, so this card and the dashboard
+    // uploader can never disagree about what is acceptable. The EXPANDED
+    // variant: this transport posts one small request per entry and never
+    // sends the archive as a body, so the platform's 4 MB request-body ceiling
+    // is not the number to check here — see MAX_EXPANDED_ARCHIVE_BYTES.
+    const preflight = preflightExpandedZipFile(file.name, file.size);
     if (preflight) {
       setStatus('ERROR');
       setError(`${preflight.title} — ${preflight.message}`);
@@ -71,64 +89,43 @@ export default function ZipUploadCard() {
     }
 
     setStatus('UPLOADING');
+    setProgress(null);
     setStartedAt(Date.now());
     setElapsedMs(0);
 
-    // This card previously had NO timeout: a stalled connection left it on
-    // "Uploading…" forever. Aborting the signal tears the request down at any
-    // stage, so ERROR is always reachable.
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), DIRECT_UPLOAD_TIMEOUT_MS);
+    // #132 wrapped its single fetch in a fixed DIRECT_UPLOAD_TIMEOUT_MS abort.
+    // That fetch is gone, and a fixed deadline would be wrong for what replaced
+    // it — a 200-receipt run legitimately lasts half an hour. importWhatsappExport
+    // carries an INACTIVITY watchdog instead, inside the transport, so no caller
+    // can forget it and ERROR stays reachable from any stall.
     try {
-      const res = await fetch('/api/ingest/zip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/zip' },
-        body: file,
-        signal: controller.signal,
+      const result = await importWhatsappExport(file, {
+        onProgress: (p) => setProgress(`Reading receipt ${p.done} of ${p.total} — ${p.name}`),
       });
-
-      // Error bodies are JSON ({ error, code? }) when the route answered, but a
-      // platform-edge 413 is PLAIN TEXT and res.json() throws — and it can also
-      // resolve to a non-object (null), so never assume a shape.
-      let body: unknown = {};
-      try {
-        body = await res.json();
-      } catch {
-        /* non-JSON body — the summarizer stands on the status code alone */
-      }
-
-      if (!res.ok) {
-        const summary = summarizeZipUploadResponse(res.status, body);
-        setStatus('ERROR');
-        setError(`${summary.title} — ${summary.message}`);
-        return;
-      }
-
-      const parsedReport =
-        body && typeof body === 'object' && 'report' in body
-          ? ((body as { report?: UploadReport }).report ?? null)
-          : null;
-      if (!parsedReport) {
-        setStatus('ERROR');
-        setError('Upload succeeded but the server returned no summary. Refresh and check the queue.');
-        return;
-      }
-      setReport(parsedReport);
+      setReport(result);
       setStatus('DONE');
+      if (result.interrupted) {
+        // importWhatsappExport carries the inactivity watchdog, so a stalled
+        // request always ends here with a message instead of leaving this card
+        // stuck on "Uploading…" with the file picker disabled.
+        const total = result.imageCount + result.textCount;
+        setError(
+          (result.interruptedReason === 'idle-timeout'
+            ? `The import stalled after ${result.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging. `
+            : `The import stopped after ${result.attempted} of ${total} files. `) +
+            'Upload the same file again to carry on — nothing is imported twice.',
+        );
+      }
       // Re-render the server-side pieces (consensus queue, staging summary).
       router.refresh();
     } catch (err) {
+      // Only archive-level rejections land here; per-file problems are already
+      // inside the report as skipped/failed entries.
       setStatus('ERROR');
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setError(
-          `The server did not answer within ${Math.round(DIRECT_UPLOAD_TIMEOUT_MS / 60000)} minutes, so the ` +
-            'upload was cancelled rather than left hanging. Try again — already-imported receipts are skipped.',
-        );
-      } else {
-        setError(err instanceof Error ? err.message : 'Upload failed. Check your connection and try again.');
-      }
+      setError(describeImportFailure(err).message);
     } finally {
-      clearTimeout(timeout);
+      setProgress(null);
+      setStartedAt(null);
       // Allow re-selecting the same file after an error or a second upload.
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -159,11 +156,28 @@ export default function ZipUploadCard() {
           marginBottom: '1rem',
         }}
       >
-        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
+        {/* aria-live so the running count is announced during a long import —
+            a screen-reader user must not be left guessing whether it moved. */}
+        <p
+          aria-live="polite"
+          style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}
+        >
           {busy
-            ? `Uploading and reading the receipts — still working, ${describeElapsed(elapsedMs)}.`
-            : `Drag a WhatsApp/receipts export (.zip) here, or pick a file — up to ${MAX_DIRECT_UPLOAD_MB} MB (a hosting-platform limit). Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.`}
+            ? (progress ?? 'Opening the archive…')
+            : 'Drag a WhatsApp/receipts export (.zip) here, or pick a file. Every receipt lands in the sandbox as a draft — nothing touches the books until it is approved.'}
         </p>
+
+        {busy && (
+          // Outside the aria-live region above on purpose: this ticks every
+          // second and would otherwise spam a screen reader. It is kept
+          // alongside the count because the count is static between receipts
+          // and does not exist at all while the archive is being opened —
+          // exactly the two windows in which a dead run used to look alive.
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
+            Still working — {describeElapsed(elapsedMs)}. If nothing finishes for{' '}
+            {Math.round(DEFAULT_IDLE_TIMEOUT_MS / 60000)} minutes the import stops and tells you.
+          </p>
+        )}
         <label className="btn btn-primary" style={{ cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}>
           {busy ? 'Uploading…' : 'Choose .zip file'}
           <input
@@ -180,7 +194,9 @@ export default function ZipUploadCard() {
         </label>
       </div>
 
-      {status === 'ERROR' && error && (
+      {/* Also shown on DONE: a run that stopped early still imported real
+          drafts, and the operator has to be told both facts at once. */}
+      {error && (
         <div role="alert" style={{ fontSize: '0.8125rem', color: 'var(--danger-color)', fontWeight: 600 }}>
           {error}
         </div>

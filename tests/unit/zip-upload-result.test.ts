@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   summarizeZipUploadResponse,
   preflightZipFile,
+  preflightExpandedZipFile,
   MAX_ZIP_BYTES,
+  MAX_EXPANDED_ARCHIVE_BYTES,
   describeProgress,
   splitNdjson,
 } from '@/lib/zip-upload-result';
@@ -220,6 +222,48 @@ describe('preflightZipFile', () => {
   });
 });
 
+/**
+ * The per-item transport expands the archive in the BROWSER and posts one
+ * small request per entry, so the archive's own bytes never become a request
+ * body. Applying the 4 MB request-body ceiling to it would reject every real
+ * "Export Chat → Attach Media" export and reinstate the dead end the transport
+ * exists to remove — the mirror image of the July incident, and just as silent
+ * from the operator's chair.
+ */
+describe('preflightExpandedZipFile — the browser-expands-it transport', () => {
+  it('ACCEPTS the 62 MB export that the direct transport must reject', () => {
+    const name = 'WhatsApp Chat - Ko Lake Petty Cash.zip';
+    const size = 62_411_000;
+
+    // The two transports must disagree here, and that disagreement is the point.
+    expect(preflightZipFile(name, size)?.ok).toBe(false);
+    expect(preflightExpandedZipFile(name, size)).toBeNull();
+  });
+
+  it('accepts a normal multi-megabyte export', () => {
+    expect(preflightExpandedZipFile('export.zip', 30 * 1024 * 1024)).toBeNull();
+  });
+
+  it('accepts a file exactly at the archive ceiling (boundary)', () => {
+    expect(preflightExpandedZipFile('edge.zip', MAX_EXPANDED_ARCHIVE_BYTES)).toBeNull();
+  });
+
+  it('still rejects an archive past what a browser tab can decompress', () => {
+    const result = preflightExpandedZipFile('vast.zip', MAX_EXPANDED_ARCHIVE_BYTES + 1);
+    expect(result?.ok).toBe(false);
+    expect(result?.title.toLowerCase()).toContain('large');
+    // Must NOT blame the hosting platform — this ceiling is browser memory,
+    // and the 4 MB workaround copy would be a lie here.
+    expect(result?.message).not.toContain(OVERSIZE_UPLOAD_HELP);
+    expect(result?.message).not.toContain('4 MB');
+  });
+
+  it('shares the shape checks with the direct transport (type and empty)', () => {
+    expect(preflightExpandedZipFile('receipt.pdf', 1000)?.title.toLowerCase()).toContain('zip');
+    expect(preflightExpandedZipFile('export.zip', 0)?.ok).toBe(false);
+  });
+});
+
 describe('describeProgress — number-by-number line (no spinner)', () => {
   it('renders done/total/name plus running created and failed', () => {
     expect(
@@ -282,5 +326,59 @@ describe('summarizeZipUploadResponse — explicit counts (owner: "how many did i
     expect(res.seen).toBe(0);
     expect(res.title.toLowerCase()).toContain('no receipts');
     expect(res.message.toLowerCase()).toMatch(/chat text|attach media/);
+  });
+});
+
+/**
+ * Transport failures are not OCR failures.
+ *
+ * With the per-item upload transport an entry can fail before the server ever
+ * looks at it (`stage: 'upload'`). Reporting that as "couldn't be read" sends
+ * the operator hunting for an unreadable photo that is perfectly fine — the
+ * request simply never landed. The two need different words.
+ */
+describe('failure wording is stage-accurate', () => {
+  it('does not call an upload failure a reading failure', () => {
+    const body = {
+      report: report({
+        imageCount: 2,
+        created: 1,
+        deduped: 0,
+        failures: [{ name: 'IMG-2.jpg', stage: 'upload' as const, error: 'Failed to fetch' }],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.failed).toBe(1);
+    expect(res.message).not.toMatch(/couldn't be read \(they could not be uploaded\)/);
+    expect(res.message.toLowerCase()).toMatch(/upload/);
+  });
+
+  it('still says "couldn’t be read" for a genuine OCR failure', () => {
+    const body = {
+      report: report({
+        imageCount: 2,
+        created: 1,
+        failures: [{ name: 'IMG-2.jpg', stage: 'ocr' as const, error: 'unreadable' }],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.message).toMatch(/couldn't be read/);
+    expect(res.message).toMatch(/OCR/);
+  });
+
+  it('reports a mixed batch without claiming every failure was one kind', () => {
+    const body = {
+      report: report({
+        imageCount: 3,
+        created: 1,
+        failures: [
+          { name: 'a.jpg', stage: 'ocr' as const, error: 'unreadable' },
+          { name: 'b.jpg', stage: 'upload' as const, error: 'Failed to fetch' },
+        ],
+      }),
+    };
+    const res = summarizeZipUploadResponse(200, body);
+    expect(res.failed).toBe(2);
+    expect(res.message).toMatch(/2 /);
   });
 });

@@ -3,6 +3,7 @@ import {
   MAX_DIRECT_UPLOAD_BYTES,
   OVERSIZE_UPLOAD_HELP,
   describeOversizeUpload,
+  formatMb,
 } from './upload-limits';
 
 /**
@@ -88,17 +89,11 @@ export function splitNdjson(buffer: string): { events: unknown[]; rest: string }
 const NO_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
 
 /**
- * Client-side pre-check run before the file leaves the browser. Returns a
- * failure result to display, or `null` when the file is safe to upload.
- *
- * The size branch is load-bearing, not cosmetic: a body over the platform
- * ceiling is killed at the edge before our route runs, so there is no server
- * error to fall back on and nothing lands in the runtime logs. Catching it
- * here is the only place the operator can be told the truth immediately.
- * The server still enforces every limit authoritatively — this is a courtesy,
- * never a trust boundary.
+ * Checks true of EVERY transport: it has to be a zip, and it has to have
+ * bytes in it. Size ceilings differ per transport and are applied by the two
+ * exported wrappers below.
  */
-export function preflightZipFile(name: string, size: number): ZipUploadResult | null {
+function preflightZipShape(name: string, size: number): ZipUploadResult | null {
   if (!name.toLowerCase().endsWith('.zip')) {
     return {
       ok: false,
@@ -110,11 +105,73 @@ export function preflightZipFile(name: string, size: number): ZipUploadResult | 
   if (size <= 0) {
     return { ok: false, title: 'Empty file', message: 'That file is empty.', ...NO_COUNTS };
   }
+  return null;
+}
+
+/**
+ * Ceiling for an archive the BROWSER expands itself (the per-item transport
+ * in whatsapp-import-client.ts).
+ *
+ * MAX_DIRECT_UPLOAD_BYTES deliberately does NOT apply here. Those 4 MB are a
+ * limit on one request BODY, and under this transport the archive's own bytes
+ * never cross the network — only its individual entries do, each capped at
+ * MAX_ITEM_BYTES (src/lib/ingest-limits.ts, also 4 MB) by the browser plan and
+ * re-checked by the server. Applying the request-body ceiling to the archive
+ * would reject every real "Export Chat → Attach Media" export (tens of MB) and
+ * so reinstate exactly the dead end this transport exists to remove.
+ *
+ * What still bounds the archive is what a browser tab can decompress without
+ * running out of memory, which is the same 100 MB the server's
+ * MAX_ZIP_UPLOAD_BYTES names. Inlined rather than imported because zip-ingest
+ * pulls in adm-zip/node:crypto and can never enter the client bundle.
+ */
+export const MAX_EXPANDED_ARCHIVE_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Client-side pre-check for the DIRECT transport — the whole archive posted as
+ * one request body to /api/ingest/zip.
+ *
+ * The size branch is load-bearing, not cosmetic: a body over the platform
+ * ceiling is killed at the edge before our route runs, so there is no server
+ * error to fall back on and nothing lands in the runtime logs. Catching it
+ * here is the only place the operator can be told the truth immediately.
+ * The server still enforces every limit authoritatively — this is a courtesy,
+ * never a trust boundary.
+ */
+export function preflightZipFile(name: string, size: number): ZipUploadResult | null {
+  const shape = preflightZipShape(name, size);
+  if (shape) return shape;
   if (size > MAX_DIRECT_UPLOAD_BYTES) {
     return {
       ok: false,
       title: 'File too large to upload',
       message: describeOversizeUpload(size),
+      ...NO_COUNTS,
+    };
+  }
+  return null;
+}
+
+/**
+ * Client-side pre-check for the EXPANDED transport — the browser unzips the
+ * archive and posts one small request per entry.
+ *
+ * Same shape checks and same error copy as preflightZipFile; only the size
+ * ceiling differs, and for the reason spelled out on
+ * MAX_EXPANDED_ARCHIVE_BYTES: nothing here is bounded by the platform's
+ * request-body limit, because the archive is never a request body.
+ */
+export function preflightExpandedZipFile(name: string, size: number): ZipUploadResult | null {
+  const shape = preflightZipShape(name, size);
+  if (shape) return shape;
+  if (size > MAX_EXPANDED_ARCHIVE_BYTES) {
+    return {
+      ok: false,
+      title: 'File too large',
+      message:
+        `That file is ${formatMb(size)} — over the ${MAX_EXPANDED_ARCHIVE_BYTES / 1024 / 1024} MB ` +
+        'limit for one import. Export a shorter date range (a month at a time) and import the ' +
+        'parts one after another — receipts already imported are skipped, never duplicated.',
       ...NO_COUNTS,
     };
   }
@@ -148,11 +205,23 @@ function extractReport(body: unknown): ZipIngestReport | null {
   return null;
 }
 
-/** Friendly, specific reason for a batch of failures (surfaced so "1 failed" isn't a blank). */
-function topFailureReason(failures: IngestFailure[]): string {
-  if (failures.some((f) => f.stage === 'ocr')) return 'OCR service could not read them';
-  if (failures.some((f) => f.stage === 'ledger')) return 'could not save to the ledger';
-  return '';
+/**
+ * Friendly, specific phrasing for a batch of failures (surfaced so "1 failed"
+ * isn't a blank).
+ *
+ * The whole clause is stage-derived, not just a parenthetical: with the
+ * per-item transport an entry can fail before the server ever looks at it
+ * (`stage: 'upload'`), and calling that "couldn't be read" sends the operator
+ * hunting for an unreadable photo that is in fact perfectly fine. Mixed stages
+ * get neutral wording rather than the first stage speaking for all of them.
+ */
+function describeFailures(failures: IngestFailure[], failed: number): string {
+  const stages = new Set(failures.map((f) => f.stage));
+  if (stages.size > 1) return `${failed} could not be imported`;
+  if (stages.has('ocr')) return `${failed} couldn't be read (OCR service could not read them)`;
+  if (stages.has('ledger')) return `${failed} couldn't be saved to the ledger`;
+  if (stages.has('upload')) return `${failed} couldn't be uploaded (the request did not reach the server)`;
+  return `${failed} could not be imported`;
 }
 
 function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
@@ -183,8 +252,7 @@ function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
   // Always state, explicitly, what happened to the receipts it saw.
   const parts = [`${created} imported`, `${deduped} already in your books`];
   if (failed > 0) {
-    const reason = topFailureReason(failures);
-    parts.push(`${failed} couldn't be read${reason ? ` (${reason})` : ''}`);
+    parts.push(describeFailures(failures, failed));
   }
   const headline = `Saw ${seen} receipt${seen === 1 ? '' : 's'}`;
   const message = `${headline}: ${parts.join(' · ')}${skippedNote}.`;

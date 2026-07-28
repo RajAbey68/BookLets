@@ -67,13 +67,28 @@ export const RATIO_GUARD_MIN_BYTES = 64 * 1024;
  * Server-side cap on the COMPRESSED upload itself (checked by the route
  * handler). This is a MEMORY guard for deployments that can actually receive
  * a body this large (the Docker/standalone target) — it is NOT the number a
- * browser should trust.
+ * browser should trust, and it is NOT a statement about what the hosting
+ * platform will carry.
  *
- * On Vercel the transport ceiling is far lower: bodies over ~4.5 MB are
- * rejected at the edge with `413 FUNCTION_PAYLOAD_TOO_LARGE` before this route
- * is ever invoked. Client-side pre-checks MUST use MAX_DIRECT_UPLOAD_BYTES
- * from src/lib/upload-limits.ts instead; mirroring this constant into the
- * browser is what caused the July silent-failure incident.
+ * REACHABILITY WARNING: on Vercel this ceiling is unreachable. The platform
+ * edge rejects any request body over ~4.5 MB with `413
+ * FUNCTION_PAYLOAD_TOO_LARGE` *before* this route is ever invoked (measured
+ * against production: a 4 MB body reaches the handler, a 5 MB body does not),
+ * so POST /api/ingest/zip can only ever accept a small archive there. The
+ * route is kept for small archives, curl and the existing test suite.
+ *
+ * Two different client-side numbers follow from that, and mirroring THIS
+ * constant into the browser instead is what caused the July silent-failure
+ * incident:
+ *
+ *  - A client that posts the whole archive in one body must pre-check against
+ *    MAX_DIRECT_UPLOAD_BYTES (src/lib/upload-limits.ts, 4 MB).
+ *  - A real WhatsApp "Export Chat → Attach Media" export is tens of MB, so it
+ *    cannot use that transport at all and must go per item instead: the
+ *    browser expands the archive (src/lib/zip-reader.ts) and POSTs each entry
+ *    to /api/ingest/item, where MAX_ITEM_BYTES (src/lib/ingest-limits.ts)
+ *    is the per-request ceiling. The archive's own bytes never cross the
+ *    network, so what bounds it is browser memory, not this route.
  */
 export const MAX_ZIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 
@@ -168,7 +183,12 @@ export interface ZipIngestContext {
 
 export interface IngestFailure {
   name: string;
-  stage: 'ocr' | 'ledger';
+  /**
+   * 'upload' exists for the per-item transport (whatsapp-import-client.ts):
+   * the request itself failed, so the server never got to judge the receipt.
+   * The single-shot zip path never produces it.
+   */
+  stage: 'ocr' | 'ledger' | 'upload';
   error: string;
 }
 
