@@ -127,6 +127,11 @@ export async function runBrowserLeg({
       return;
     }
 
+    // `outDir` is always the private 0700 directory created by
+    // env.mjs createArtifactDir — never a fixed path under the system temp
+    // directory. Keep it that way: the browser leg writes an archive and a
+    // screenshot here, and a guessable path is a symlink-follow waiting to
+    // happen on a shared CI runner.
     const zipPath = path.join(outDir, 'browser-archive.zip');
     await writeFile(zipPath, archive.zip);
 

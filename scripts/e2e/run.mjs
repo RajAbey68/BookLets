@@ -14,9 +14,8 @@
  *
  * What it does NOT cover is printed at the end of every run, every time.
  */
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 
 import { buildWhatsappExport } from './whatsapp-export.mjs';
 import { startOcrStub, startEdgeProxy, expectedExtraction, VERCEL_BODY_LIMIT_BYTES } from './stubs.mjs';
@@ -34,6 +33,7 @@ import {
 import {
   assertDisposableDatabase,
   assertPortFree,
+  createArtifactDir,
   startPostgres,
   applySchema,
   startNextServer,
@@ -69,7 +69,10 @@ const CONFIG = {
   skipBuild: args['skip-build'] === 'true',
   skipBrowser: args['no-browser'] === 'true',
   keepDb: args['keep-db'] === 'true',
-  outDir: args.out ?? path.join(os.tmpdir(), 'booklets-e2e'),
+  // Resolved in main() by createArtifactDir. Deliberately NOT a fixed path
+  // under the system temp directory — see that function for why.
+  outDirRequested: args.out ?? null,
+  outDir: null,
 };
 
 const PORTS = {
@@ -132,7 +135,7 @@ const info = (title, detail, evidence) => record('INFO', title, detail, evidence
 
 async function main() {
   const startedAt = Date.now();
-  await mkdir(CONFIG.outDir, { recursive: true });
+  CONFIG.outDir = await createArtifactDir(CONFIG.outDirRequested);
 
   log('BookLets end-to-end receipt-import harness');
   log(`  archive under test : ${CONFIG.images} photos, target ${CONFIG.totalMb} MB`);

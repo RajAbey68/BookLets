@@ -39,8 +39,15 @@ Useful flags (pass them after the script name, e.g. `npm run e2e -- --quick`):
 It needs no configuration. It provisions its own Postgres (Docker if a daemon is
 running, otherwise a throwaway local cluster), applies the schema and the raw-SQL
 migrations, builds the app, serves it, and tears everything down at the end.
+
 Artefacts — the generated archive, a screenshot, `report.json`, and the server log
-if anything failed — land in `/tmp/booklets-e2e`.
+if anything failed — go into a fresh private directory created with `mkdtemp`
+(mode 0700, unguessable name). The path is printed at the start and end of every
+run. It is deliberately not a fixed location like `/tmp/booklets-e2e`: on a shared
+machine or a multi-tenant CI runner, a guessable path can be pre-created or
+symlinked by another user and everything written follows the link. Pass `--out`
+to pin the directory yourself; it is still forced to 0700, because the server log
+can carry environment detail.
 
 To point it at an existing disposable database:
 

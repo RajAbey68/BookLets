@@ -15,7 +15,7 @@
  * harness at all.
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, chown, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -53,6 +53,30 @@ export function assertDisposableDatabase(databaseUrl) {
   return true;
 }
 
+/**
+ * Create the directory this run writes its artefacts into: the generated
+ * archive, report.json, the server log, and the browser screenshot.
+ *
+ * NOT a fixed path under the system temp directory. `/tmp/booklets-e2e` is
+ * guessable, so on a shared machine or a multi-tenant CI runner another user
+ * can pre-create it — or plant a symlink at `report.json` — and everything the
+ * harness writes follows the link (CWE-377/378, CodeQL js/insecure-temporary-file).
+ * `mkdtemp` gives an unguessable name, created 0700 and owned by us.
+ *
+ * An explicit `--out` is the operator's own decision about where the files go,
+ * so it is honoured — but still forced to 0700, because the server log can
+ * carry environment detail.
+ */
+export async function createArtifactDir(explicitPath) {
+  if (explicitPath) {
+    const resolved = path.resolve(explicitPath);
+    await mkdir(resolved, { recursive: true, mode: 0o700 });
+    await chmod(resolved, 0o700);
+    return resolved;
+  }
+  return mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-'));
+}
+
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: 'pipe', ...options });
@@ -71,13 +95,35 @@ function run(command, args, options = {}) {
   });
 }
 
-async function commandExists(command) {
+/**
+ * Resolve the `postgres` account's uid/gid, or null when we are not root.
+ *
+ * Used to DROP PRIVILEGES via spawn's own uid/gid options rather than shelling
+ * out to `su postgres -c "<command string>"`. `su -c` takes a command STRING,
+ * which means every path in it is concatenated into something a shell parses —
+ * and those paths come from os.tmpdir(), i.e. from TMPDIR. That is a real
+ * injection shape (CodeQL js/indirect-command-line-injection) even in test
+ * tooling, and there is no reason to accept it when spawn can drop privileges
+ * directly with no shell in the picture.
+ */
+async function resolvePostgresUser() {
+  if (process.getuid?.() !== 0) return null;
   try {
-    await run('sh', ['-c', `command -v ${command}`]);
-    return true;
+    const uid = Number((await run('id', ['-u', 'postgres'])).trim());
+    const gid = Number((await run('id', ['-g', 'postgres'])).trim());
+    if (!Number.isInteger(uid) || !Number.isInteger(gid)) return null;
+    return { uid, gid };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Postgres refuses to run as root, so identifiers get a strict shape check. */
+function assertSafeDatabaseName(database) {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(database)) {
+    throw new Error(`Refusing to use "${database}" as a database name: not a plain SQL identifier.`);
+  }
+  return database;
 }
 
 /**
@@ -87,9 +133,12 @@ async function commandExists(command) {
  * what CI sandboxes and cloud dev boxes usually have.
  */
 export async function startPostgres({ port = 55432, database = 'booklets_e2e', log = console.log }) {
+  assertSafeDatabaseName(database);
   const url = `postgresql://postgres@127.0.0.1:${port}/${database}`;
 
-  const dockerUp = (await commandExists('docker')) && (await run('docker', ['info']).then(() => true, () => false));
+  // `docker info` both proves the binary exists (spawn rejects ENOENT) and that
+  // the daemon is reachable — one probe instead of a `command -v` shell call.
+  const dockerUp = await run('docker', ['info']).then(() => true, () => false);
   if (dockerUp) {
     const name = 'booklets-e2e-pg';
     const exists = await run('docker', ['inspect', name]).then(() => true, () => false);
@@ -123,25 +172,44 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
         'E2E_DATABASE_URL to a disposable local database the harness may write to.',
     );
   }
+  // mkdtemp creates the directory 0700 and owned by us, with an unguessable
+  // suffix — no other user can pre-create or symlink it out from under us.
   const dataDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-pg-'));
   const runDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-sock-'));
-  const asPostgres = process.getuid?.() === 0 ? ['su', 'postgres', '-c'] : null;
-  const shellRun = async (cmd) => (asPostgres ? run(asPostgres[0], [asPostgres[1], asPostgres[2], cmd]) : run('sh', ['-c', cmd]));
 
-  if (asPostgres) await run('chown', ['-R', 'postgres:postgres', dataDir, runDir]);
+  // Drop privileges through spawn, never through a shell.
+  const pgUser = await resolvePostgresUser();
+  const asPg = pgUser ? { uid: pgUser.uid, gid: pgUser.gid } : {};
+  if (pgUser) {
+    await chown(dataDir, pgUser.uid, pgUser.gid);
+    await chown(runDir, pgUser.uid, pgUser.gid);
+  }
+
   log(`[env] initialising local postgres cluster in ${dataDir}`);
-  await shellRun(`${binDir}/initdb -D ${dataDir} -U postgres --auth=trust`);
-  await shellRun(
-    `${binDir}/pg_ctl -D ${dataDir} -o "-p ${port} -k ${runDir} -c listen_addresses=127.0.0.1" -l ${dataDir}/server.log start`,
+  await run(path.join(binDir, 'initdb'), ['-D', dataDir, '-U', 'postgres', '--auth=trust'], asPg);
+  await run(
+    path.join(binDir, 'pg_ctl'),
+    [
+      '-D', dataDir,
+      // pg_ctl's own -o takes ONE string of postgres options. It is parsed by
+      // pg_ctl, not by a shell, so passing it as a single argv element is safe.
+      '-o', `-p ${port} -k ${runDir} -c listen_addresses=127.0.0.1`,
+      '-l', path.join(dataDir, 'server.log'),
+      'start',
+    ],
+    asPg,
   );
-  await run('sh', ['-c', `${binDir}/psql -h 127.0.0.1 -p ${port} -U postgres -c "CREATE DATABASE ${database}"`]).catch(
-    () => {},
-  );
+  await run(
+    path.join(binDir, 'psql'),
+    ['-h', '127.0.0.1', '-p', String(port), '-U', 'postgres', '-c', `CREATE DATABASE "${database}"`],
+    asPg,
+  ).catch(() => {});
+
   return {
     url,
     kind: 'local-cluster',
     async stop() {
-      await shellRun(`${binDir}/pg_ctl -D ${dataDir} -m immediate stop`).catch(() => {});
+      await run(path.join(binDir, 'pg_ctl'), ['-D', dataDir, '-m', 'immediate', 'stop'], asPg).catch(() => {});
       await rm(dataDir, { recursive: true, force: true }).catch(() => {});
       await rm(runDir, { recursive: true, force: true }).catch(() => {});
     },
@@ -172,7 +240,8 @@ export async function applySchema(databaseUrl, { log = console.log } = {}) {
       continue;
     }
     log(`[env] applying migration ${name}`);
-    await run('sh', ['-c', `psql "${databaseUrl}" -v ON_ERROR_STOP=1 -f "${file}"`]);
+    // argv, not a shell string: databaseUrl comes from the environment.
+    await run('psql', [databaseUrl, '-v', 'ON_ERROR_STOP=1', '-f', file]);
   }
 }
 
