@@ -1,22 +1,30 @@
-name: LLM Quorum Review — external four-eyes (Z.AI)
+name: LLM Quorum Review — external four-eyes (multi-model)
 
-# Raj's mandate (AGENTS.md "Operator constraints", 2026-07-13): PR approval
-# comes from a non-Anthropic LLM review signed by the machine account
-# HermesBot (GitHub login RajAbeyBot) — never from Raj personally.
-# This workflow is that mandate, automated:
-#   diff -> Z.AI GLM verdict (PASS/FAIL + rationale) -> on PASS, RajAbeyBot
-#   submits the APPROVE review with the verdict embedded for audit.
+# Raj's mandate (AGENTS.md "Operator constraints"): PR approval comes from a
+# QUORUM of independent non-Anthropic LLMs, signed by the machine account
+# RajAbeyBot — never from Raj personally. A single model is insufficient; this
+# workflow requires consensus.
+#
+#   diff (pinned to HEAD) -> N models via OpenRouter -> strict-JSON PASS/FAIL each
+#   -> APPROVE iff 0 FAIL and >= MIN_PASS PASS; else COMMENT with the dissent.
+#
+# The diff is wrapped in <untrusted_diff> boundary tags and models are told to
+# treat it as data (prompt-injection defense). Oversized diffs are NOT reviewed
+# (manual review required) — never silently truncated. Every network call has a
+# timeout (default 60s, AbortController). HEAD is re-verified immediately before
+# an APPROVE to defeat the force-push race.
 #
 # Required repository secrets (set via `gh secret set <NAME>`):
-#   ZAI_API_KEY       — Z.AI API key (never appears in logs)
-#   RAJABEYBOT_TOKEN  — PAT of the RajAbeyBot account (repo scope)
+#   OPENROUTER_API_KEY  — OpenRouter key (gateway for all quorum models)
+#   RAJABEYBOT_TOKEN    — PAT of the RajAbeyBot account (repo scope)
 # Optional repository variables (Settings -> Variables, or `gh variable set`):
-#   ZAI_BASE_URL — default https://api.z.ai/api/paas/v4
-#   ZAI_MODEL    — default glm-4.6
+#   OPENROUTER_BASE_URL — default https://openrouter.ai/api/v1
+#   MIN_PASS            — default 3 (unanimous across the 3-model default quorum)
+#   TIMEOUT_MS          — default 60000
 #
 # The job SKIPS silently (neutral, no approval, no failure) when secrets are
-# missing, when the PR is a draft, or when the PR head is not in this repo —
-# it must never block merging on its own; it only ever ADDS an approval.
+# missing, when the PR is a draft, or when the PR head is not in this repo — it
+# must never block merging on its own; it only ever ADDS an approval/comment.
 
 on:
   pull_request:
@@ -26,30 +34,32 @@ permissions:
   contents: read
 
 jobs:
-  zai-review:
+  quorum-review:
     runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
-      # SECURITY (CodeRabbit critical): check out the trusted BASE commit, not
-      # the PR head — this job holds bot secrets, and executing head-controlled
-      # script code would let any branch exfiltrate them (pwn-request). The
-      # script fetches the PR diff via the API, so it never needs head files.
+      # SECURITY: check out the trusted BASE commit, not the PR head — this job
+      # holds bot secrets, and executing head-controlled script code would let
+      # any branch exfiltrate them (pwn-request). The script fetches the PR diff
+      # via the API pinned to the event SHAs, so it never needs head files.
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Z.AI verdict + RajAbeyBot approval
+      - name: Quorum verdict + RajAbeyBot review
         env:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           RAJABEYBOT_TOKEN: ${{ secrets.RAJABEYBOT_TOKEN }}
-          ZAI_BASE_URL: ${{ vars.ZAI_BASE_URL }}
-          ZAI_MODEL: ${{ vars.ZAI_MODEL }}
+          OPENROUTER_BASE_URL: ${{ vars.OPENROUTER_BASE_URL }}
+          MIN_PASS: ${{ vars.MIN_PASS }}
+          TIMEOUT_MS: ${{ vars.TIMEOUT_MS }}
+          GITHUB_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         # Bootstrap guard: the trusted-BASE checkout means the script only
         # exists once this workflow's own introducing PR has merged. Absent
         # script = neutral skip (same contract as missing secrets).
