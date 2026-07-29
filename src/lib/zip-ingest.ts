@@ -593,12 +593,15 @@ export async function ingestZip(
     try {
       ocrResult = await deps.ocr(image.data.toString('base64'));
     } catch (err) {
-      // A provider rate limit or credential rejection says nothing about this
-      // receipt — the service never read it. Marking it 'ocr' would report a
-      // perfectly good photo as unreadable, and would do so for every image
-      // left in the archive. Abort instead; entries already created stay, and
-      // re-running dedupes them by content hash and resumes from here.
-      if (err instanceof OcrError && (err.kind === 'rate-limit' || err.kind === 'auth')) {
+      // A SERVICE failure says nothing about this receipt — the service never
+      // read it. Marking it 'ocr' would report a perfectly good photo as
+      // unreadable, and would do so for every image left in the archive. Abort
+      // instead; entries already created stay, and re-running dedupes them by
+      // content hash and resumes from here.
+      //
+      // `retryable || auth` rather than a list of kinds — see the matching
+      // guard in ingest-item.ts for why enumerating kinds is the bug.
+      if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
         throw new ZipIngestError('OCR_UNAVAILABLE', err.message);
       }
       failures.push({

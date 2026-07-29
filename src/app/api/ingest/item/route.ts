@@ -177,9 +177,12 @@ export async function POST(request: Request) {
     // where it stopped: dedup is keyed on content, and a throttled entry never
     // got a journal entry or an evidence row.
     if (err instanceof OcrError && err.kind === 'rate-limit') {
-      const retryAfterSeconds = Math.max(
-        1,
-        Math.ceil((err.retryAfterMs ?? 10_000) / 1000),
+      // Floor keeps the header valid; the ceiling stops a long provider hint
+      // from parking the browser mid-import. A client that waits 60 s and
+      // retries is fine; one that waits five minutes looks hung.
+      const retryAfterSeconds = Math.min(
+        60,
+        Math.max(1, Math.ceil((err.retryAfterMs ?? 10_000) / 1000)),
       );
       console.warn(
         `[ingest/item] OCR rate limited org=${encodeURIComponent(organizationId)} retryAfter=${retryAfterSeconds}s`,
@@ -189,10 +192,20 @@ export async function POST(request: Request) {
         { status: 429, headers: { 'retry-after': String(retryAfterSeconds) } },
       );
     }
-    if (err instanceof OcrError && err.kind === 'auth') {
-      console.error('[ingest/item] OCR credentials rejected upstream:', err.message);
+    if (err instanceof OcrError) {
+      // Timeout / unavailable / auth: the service is the problem, and it has
+      // already exhausted its own retries. 503 with NO retry-after — the run is
+      // over, and inviting a generic proxy or client retry would only produce
+      // more of the same. The browser stops on the code and tells the operator
+      // to re-upload later; nothing was recorded against any receipt.
+      console.error(
+        `[ingest/item] OCR ${encodeURIComponent(err.kind)} org=${encodeURIComponent(organizationId)}: ${err.message}`,
+      );
       return NextResponse.json(
-        { error: err.message, code: 'OCR_AUTH_FAILED' },
+        {
+          error: err.message,
+          code: err.kind === 'auth' ? 'OCR_AUTH_FAILED' : 'OCR_UNAVAILABLE',
+        },
         { status: 503 },
       );
     }

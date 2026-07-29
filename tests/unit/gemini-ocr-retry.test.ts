@@ -130,6 +130,74 @@ describe('extractReceipt — failure handling', () => {
     expect((error as Error).message).not.toMatch(/SymbiOS/i);
   });
 
+  it('uses the SymbiOS fallback when the service is unreachable and a key is set', async () => {
+    // The other half of the gating rule: the fallback is skipped for
+    // rate-limit/auth, but it MUST still run for genuine unreachability.
+    process.env.SYMBIOS_API_KEY = 'test-key';
+    process.env.OCR_RETRY_ATTEMPTS = '1';
+    const fetchMock = vi.fn(async (url: unknown) =>
+      String(url).includes('symbios')
+        ? jsonResponse({
+            extraction: {
+              vendorName: 'FALLBACK VENDOR',
+              date: '2026-07-12',
+              totalAmount: 42,
+              categorySuggestion: 'Other',
+              confidence: 0.5,
+            },
+          })
+        : errorResponse(503, 'UNAVAILABLE'),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { extractReceipt } = await loadExtractReceipt();
+    const result = await extractReceipt('deadbeef');
+
+    expect(result.extraction.vendorName).toBe('FALLBACK VENDOR');
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('symbios'))).toBe(true);
+  });
+
+  it('classifies a malformed 200 as a payload fault, not as unreachable', async () => {
+    // A bad body used to reach classifyOcrTransportError and come back
+    // 'unavailable' — which both diverted it to SymbiOS and told the operator
+    // the service could not be reached, when it had in fact answered.
+    process.env.SYMBIOS_API_KEY = 'test-key';
+    process.env.OCR_RETRY_ATTEMPTS = '1';
+    const fetchMock = vi.fn(async (url: unknown) =>
+      String(url).includes('symbios')
+        ? jsonResponse({ extraction: { vendorName: 'FALLBACK' } })
+        : ({
+            ok: true,
+            status: 200,
+            json: async () => {
+              throw new SyntaxError('Unexpected token < in JSON');
+            },
+          } as unknown as Response),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const { extractReceipt } = await loadExtractReceipt();
+    const error = await extractReceipt('deadbeef').catch((e: unknown) => e);
+
+    expect((error as OcrErrorType).kind).toBe('unknown');
+    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('symbios'))).toBe(true);
+  });
+
+  it('still returns a zero-amount extraction when the receipt itself is illegible', async () => {
+    // A receipt the service genuinely could not read is NOT a service fault:
+    // it must come back as a normal result so the ingest layer can reject that
+    // one photo by name, instead of aborting the whole run.
+    globalThis.fetch = vi.fn(async () =>
+      jsonResponse({ text: 'not json at all', confidence: 0.1 }),
+    ) as unknown as typeof fetch;
+
+    const { extractReceipt } = await loadExtractReceipt();
+    const result = await extractReceipt('deadbeef');
+
+    expect(result.extraction.totalAmount).toBe(0);
+    expect(result.extraction.vendorName).toBe('Unknown');
+  });
+
   it('does not retry a credential rejection', async () => {
     const fetchMock = vi
       .fn()

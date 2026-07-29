@@ -78,6 +78,26 @@ describe('classifyOcrFailure', () => {
     expect(classifyOcrFailure(504, 'upstream timed out').retryable).toBe(true);
   });
 
+  it.each([
+    ['a request id that merely contains the digits', 'req_8f429ab3 failed to process'],
+    ['a byte count', 'image was 429 kilobytes and could not be decoded'],
+    ['a model name', 'model gemini-429-vision is not available'],
+  ])('does not read %s as a rate limit', (_label, body) => {
+    // A false positive here is expensive: the item route turns kind
+    // 'rate-limit' into a real HTTP 429 and the browser halts the whole
+    // import. Numeric markers must be anchored to a status/code context.
+    expect(classifyOcrFailure(400, body).kind).not.toBe('rate-limit');
+  });
+
+  it('still reads the digits when they ARE the status code', () => {
+    expect(classifyOcrFailure(500, '{"code": 429}').kind).toBe('rate-limit');
+    expect(classifyOcrFailure(500, 'HTTP 429 Too Many Requests').kind).toBe('rate-limit');
+  });
+
+  it('does not read an incidental 401 as a credential failure', () => {
+    expect(classifyOcrFailure(400, 'processed 401 receipts').kind).not.toBe('auth');
+  });
+
   it('falls back to a non-retryable unknown rather than guessing', () => {
     const error = classifyOcrFailure(418, 'something entirely new');
 

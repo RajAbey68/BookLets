@@ -35,10 +35,17 @@ export type OcrErrorKind =
   | 'timeout'
   /** Service unreachable or 5xx. Usually transient. */
   | 'unavailable'
-  /** The service ran and genuinely could not read this image. */
-  | 'unreadable'
-  /** Anything unrecognised — treated as non-retryable. */
+  /** Anything unrecognised, including a malformed 200 — non-retryable. */
   | 'unknown';
+
+/*
+ * There is deliberately NO 'unreadable' kind. A receipt the service genuinely
+ * could not read is not a service failure at all: it comes back as a
+ * successful response with a zero amount, and the ingest layer rejects that one
+ * photo by name (see ingest-item.ts) while the rest of the run continues. Every
+ * kind in this union means "the service is the problem", which is precisely
+ * what lets callers treat them differently from a bad photograph.
+ */
 
 /** Kinds where trying the SAME image again later can reasonably succeed. */
 const RETRYABLE: ReadonlySet<OcrErrorKind> = new Set<OcrErrorKind>([
@@ -114,8 +121,15 @@ export function classifyOcrFailure(status: number | undefined, bodyText: string)
 
   // Quota / rate limit. Matched on several independent markers because the
   // provider's wording changes more often than its semantics do.
+  //
+  // The NUMERIC markers are anchored to a status/code context; a bare /\b429\b/
+  // would also fire on an id, a byte count or a model name that merely contains
+  // those digits, and a false positive here is expensive — the item route turns
+  // it into a real 429 and halts the whole import. The SEMANTIC markers stay
+  // unanchored: "RESOURCE_EXHAUSTED" in a body means one thing only.
   if (
-    /\b429\b/.test(body) ||
+    /(?:code|status|error)"?\s*[:=]?\s*429\b/i.test(body) ||
+    /\b(?:HTTP\s*)?429\s+too\s+many/i.test(body) ||
     /RESOURCE_EXHAUSTED/i.test(body) ||
     /too many requests/i.test(body) ||
     /rate.?limit/i.test(body) ||
@@ -134,7 +148,8 @@ export function classifyOcrFailure(status: number | undefined, bodyText: string)
   // Credentials. Distinguished from a rate limit because retrying is futile
   // and the fix is an administrator's, not the operator's.
   if (
-    /\b401\b|\b403\b/.test(body) ||
+    /(?:code|status|error)"?\s*[:=]?\s*40[13]\b/i.test(body) ||
+    /\b(?:HTTP\s*)?40[13]\s+(?:un)?(?:authoriz|authenticat|forbidden)/i.test(body) ||
     /PERMISSION_DENIED|UNAUTHENTICATED/i.test(body) ||
     /api[\s_-]?key.*(invalid|expired|not valid)/i.test(body) ||
     status === 401 ||

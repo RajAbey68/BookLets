@@ -92,6 +92,23 @@ function interruptedResult(
     };
   }
 
+  // The service is down or its credentials are rejected. Same reassurance about
+  // the receipts, but different advice: waiting may not be enough, so say who
+  // can fix it rather than sending the operator round a retry loop.
+  if (report.interruptedReason === 'ocr-unavailable') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Stopped — OCR service is unavailable',
+      message:
+        `The import stopped after ${report.attempted} of ${total} files because the receipt-reading ` +
+        `service could not be reached. Your receipts are fine — they were not read, not rejected. ` +
+        `${summary.message} ` +
+        'Try again shortly; if it keeps happening the OCR service needs attention from an ' +
+        'administrator. Whatever already imported is safe, and re-uploading never duplicates it.',
+    };
+  }
+
   const lead =
     report.interruptedReason === 'idle-timeout'
       ? `The import stalled after ${report.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging.`

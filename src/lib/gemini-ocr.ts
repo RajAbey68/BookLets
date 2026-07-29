@@ -63,6 +63,18 @@ const MAX_INLINE_RETRY_WAIT_MS = 8_000;
 /** Backoff when the provider gave no hint of its own. */
 const DEFAULT_BACKOFF_MS = 1_500;
 
+/**
+ * Wall-clock ceiling on ALL attempts for one image, including backoff.
+ *
+ * Deliberately below the ingest route's `maxDuration = 60` so the classified
+ * error always gets back to the caller: a retry budget that outruns the
+ * function budget produces a platform timeout, which carries none of the
+ * diagnosis (and none of the retry-after) the client needs to pace itself.
+ * Kept in sync with that route by intent, not by import — the route is a Next
+ * entry point and must not be pulled into this module's graph.
+ */
+const OCR_TOTAL_BUDGET_MS = 45_000;
+
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export interface GeminiExtraction {
@@ -88,6 +100,7 @@ export async function extractReceipt(
   imageBase64: string
 ): Promise<GeminiOcrResult> {
   let lastError: OcrError | undefined;
+  const startedAt = Date.now();
 
   for (let attempt = 1; attempt <= OCR_RETRY_ATTEMPTS; attempt += 1) {
     try {
@@ -105,6 +118,14 @@ export async function extractReceipt(
       // invocation sleeping through its budget.
       const wait = classified.retryAfterMs ?? DEFAULT_BACKOFF_MS * attempt;
       if (wait > MAX_INLINE_RETRY_WAIT_MS) break;
+
+      // Wall-clock deadline. Without this the retry budget can outlast the
+      // route's own maxDuration (3 attempts × 15 s timeout + 2 × 8 s backoff =
+      // 61 s, and 107 s at the OCR_RETRY_ATTEMPTS ceiling of 5) — the platform
+      // then kills the invocation mid-retry and the browser sees a generic
+      // timeout instead of the classified 429 + retry-after this whole path
+      // exists to deliver. Losing the diagnosis is worse than losing a retry.
+      if (Date.now() - startedAt + wait + OCR_TIMEOUT_MS > OCR_TOTAL_BUDGET_MS) break;
 
       await delay(wait);
     }
@@ -144,53 +165,78 @@ async function callMicroservice(imageBase64: string): Promise<GeminiOcrResult> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OCR_TIMEOUT_MS);
 
-  let response: Response;
+  // The timeout is cleared only once the BODY has been read, not when headers
+  // arrive: a service that answers instantly and then stalls mid-body would
+  // otherwise hang with no deadline at all.
   try {
-    response = await fetch(`${OCR_MICROSERVICE_URL}/ocr`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageBase64,
-        mode: 'receipt',
-      }),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    throw classifyOcrTransportError(err);
+    let response: Response;
+    try {
+      response = await fetch(`${OCR_MICROSERVICE_URL}/ocr`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64,
+          mode: 'receipt',
+        }),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      throw classifyOcrTransportError(err);
+    }
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => '');
+      // The microservice wraps upstream provider errors in its OWN 5xx, so the
+      // body — not the status — is where a rate limit is legible. See
+      // classifyOcrFailure.
+      throw classifyOcrFailure(response.status, errorText);
+    }
+
+    // A malformed 200 is a PAYLOAD fault, not a reachability fault. Letting it
+    // reach classifyOcrTransportError would label it 'unavailable', which both
+    // diverts it to the SymbiOS fallback and tells the operator the service
+    // could not be reached — when in fact it answered, just not sensibly.
+    let data: { text?: unknown; confidence?: unknown };
+    try {
+      data = (await response.json()) as { text?: unknown; confidence?: unknown };
+    } catch (err) {
+      throw new OcrError(
+        'unknown',
+        'The OCR service returned a response BookLets could not read.',
+        { status: response.status, cause: err },
+      );
+    }
+
+    // The microservice returns { text: string, confidence: number }
+    // For receipt mode, text is a JSON string matching GeminiExtraction
+    const confidence = typeof data.confidence === 'number' ? data.confidence : 0;
+    let extraction: GeminiExtraction;
+    try {
+      if (typeof data.text !== 'string') throw new Error('missing text');
+      const parsed: unknown = JSON.parse(data.text);
+      if (!parsed || typeof parsed !== 'object') throw new Error('not an object');
+      extraction = parsed as GeminiExtraction;
+    } catch {
+      // Still not fatal: a receipt the service genuinely could not read comes
+      // back here, and the ingest layer rejects it on the zero amount with a
+      // message naming the file. That path is about ONE photo, so it must not
+      // abort the run the way a service fault does.
+      extraction = {
+        vendorName: 'Unknown',
+        date: '',
+        totalAmount: 0,
+        categorySuggestion: 'Other',
+        confidence,
+      };
+    }
+
+    // Validate and clean the extraction
+    validateExtraction(extraction);
+
+    return { extraction };
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '');
-    // The microservice wraps upstream provider errors in its OWN 5xx, so the
-    // body — not the status — is where a rate limit is legible. See
-    // classifyOcrFailure.
-    throw classifyOcrFailure(response.status, errorText);
-  }
-
-  const data = await response.json();
-
-  // The microservice returns { text: string, confidence: number }
-  // For receipt mode, text is a JSON string matching GeminiExtraction
-  let extraction: GeminiExtraction;
-  try {
-    extraction = JSON.parse(data.text);
-  } catch {
-    // If it's not valid JSON, create a default extraction
-    extraction = {
-      vendorName: 'Unknown',
-      date: '',
-      totalAmount: 0,
-      categorySuggestion: 'Other',
-      confidence: data.confidence || 0,
-    };
-  }
-
-  // Validate and clean the extraction
-  validateExtraction(extraction);
-
-  return { extraction };
 }
 
 /**
