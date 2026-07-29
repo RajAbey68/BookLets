@@ -184,8 +184,13 @@ export async function POST(request: Request) {
     // and the operator is told the account limit is the problem. Nothing is
     // recorded against the receipt — the service never looked at it.
     if (err instanceof OcrError && err.kind === 'quota-exhausted') {
+      // `err.message` is deliberately NOT logged here: for this kind it is our
+      // own fixed operator-facing paragraph, so it would add a wall of static
+      // text per line and no diagnosis. The upstream status and the cause are
+      // the parts that differ between incidents, so those are what get logged.
       console.error(
-        `[ingest/item] OCR quota exhausted org=${encodeURIComponent(organizationId)}`,
+        `[ingest/item] OCR quota exhausted org=${encodeURIComponent(organizationId)} upstream=${err.status ?? 'none'}`,
+        err.cause ?? '',
       );
       return NextResponse.json(
         { error: err.message, code: 'OCR_QUOTA_EXHAUSTED' },

@@ -4,7 +4,7 @@
 > gate-approved *target design* (ingest library, `booklets_staging` schema,
 > promotion function, lockstep). **This file is the *as-built* reality** — what
 > is actually deployed, wired, and configured in production — so every service
-> we call (OCR microservice, DevServer, SymbiOS) and every agent works from the
+> we call (OCR microservice, DevServer) and every agent works from the
 > same truth. Where the two disagree, that gap is tracked in §8.
 >
 > **Verified against production `2026-07-19`.** Deployed SHA `7a8fc3b`.
@@ -83,7 +83,7 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
                                        │   magic bytes, per-org rate limit (429)
                                        ├─ dedup: sha256(entry bytes) per org — SAME key
                                        │   fn as the zip path (+ DB unique constraint)
-                                       ├─ extractReceipt(b64) ─► OCR microservice ─(fallback)─► SymbiOS
+                                       ├─ extractReceipt(b64) ─► OCR microservice (only provider)
                                        └─ LedgerService.postEntryWithOutcome(DRAFT)
                                              debit Suspense 9999 / credit Cash 1000
                                                 │
@@ -107,7 +107,7 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 | Service | Role | Prod-effective endpoint | Env override | Auth | Prod status 2026-07-19 |
 |---------|------|-------------------------|--------------|------|------------------------|
 | **OCR microservice** | receipt OCR (primary) | `https://ocr-microservice-gamma.vercel.app/ocr` | `OCR_MICROSERVICE_URL` | none observed | **UNSET → hardcoded default; default is LIVE** (`POST /ocr` empty → 400) |
-| ~~**SymbiOS**~~ | ~~receipt OCR (fallback)~~ | — | — | — | **REMOVED 2026-07-29.** Never configured anywhere; `api.symbios.ai` is a **parked domain listed for sale** (301 → Sedo). Do NOT set `SYMBIOS_API_KEY` — it would post receipt images and a bearer token to a domain anyone can buy. There is now exactly **one** OCR provider. |
+| ~~**SymbiOS**~~ | ~~receipt OCR (fallback)~~ | — | — | — | **REMOVED 2026-07-29.** Never configured anywhere, so the fallback never once ran; `api.symbios.ai` is a **parked domain listed for sale** (301 → Sedo). No code reads these variables any more. Do NOT reintroduce them — setting `SYMBIOS_API_KEY` would have posted receipt images and a bearer token to a domain anyone can buy. There is now exactly **one** OCR provider. |
 | ~~**DevServer** (Hermes-built)~~ | — | — | — | — | **Does not exist** — all-repo search 2026-07-19. Gamma is canonical (§8.1) |
 | **Hostaway** | PMS bookings sync | `https://api.hostaway.com/v1` | `HOSTAWAY_ACCOUNT_ID`, `STRICT_HOSTAWAY` | `HOSTAWAY_CLIENT_ID/SECRET`, `HOSTAWAY_API_KEY` | ⚠️ **LIVE data — revert test bookings** |
 | **Google OAuth** | sign-in | `accounts.google.com` | — | `AUTH_GOOGLE_ID/SECRET` | configured |
@@ -118,9 +118,11 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 `extractReceipt(imageBase64)` → `POST {OCR_MICROSERVICE_URL}/ocr`
 - **Request:** `{"imageBase64":"<base64, no data-URI prefix>","mode":"receipt"}`, JSON, aborts after `OCR_TIMEOUT_MS` (default **15000 ms**).
 - **Response 200:** `{"extraction":{vendorName,date(ISO-8601|""),totalAmount(number),categorySuggestion,confidence(0–1)}}`.
-- **Non-200 / unreachable:** there is **no second provider**. The failure is classified (`src/lib/ocr-errors.ts`) into `rate-limit` / `quota-exhausted` / `auth` / `timeout` / `unavailable` / `unknown` — all of which mean *the service*, never the photo — and the whole import **stops** with that diagnosis (`429 OCR_RATE_LIMITED`, or `503` with `OCR_QUOTA_EXHAUSTED` / `OCR_AUTH_FAILED` / `OCR_UNAVAILABLE`). Nothing is recorded against the receipt, and re-running resumes by content hash.
+- **Non-200 / unreachable:** there is **no second provider**. The failure is classified (`src/lib/ocr-errors.ts`) into `rate-limit` / `quota-exhausted` / `auth` / `timeout` / `unavailable` / `unknown` — all of which mean *the service*, never the photo. Nothing is recorded against the receipt in any case, and re-running resumes by content hash. What happens next depends on whether waiting can help:
+  - **Retryable — `429 OCR_RATE_LIMITED` with `retry-after`.** A passing throttle. The route hands back the provider's own pacing hint and the browser waits it out, so the import **continues**. A 20-per-minute ceiling makes a large export slow, not impossible.
+  - **Terminal — `503` with `OCR_QUOTA_EXHAUSTED` / `OCR_AUTH_FAILED` / `OCR_UNAVAILABLE`.** Waiting inside the run cannot fix these, so the import **stops** with that diagnosis rather than spending a request per receipt to relearn it.
 - **A receipt the service genuinely cannot read** is NOT a service failure: it comes back `200` with a zero amount and is the only thing that becomes `stage:'ocr'`. Never silently mis-booked.
-- **Quota:** the microservice calls Gemini with its own key. On the free tier that allowance is a few dozen requests, so a large WhatsApp export exhausts it; BookLets then reports an exhausted quota and stops after **one** request rather than paying to relearn it per receipt. Raising it is a billing change on the OCR service's key, in that service's project.
+- **Quota:** the microservice calls Gemini with its own key. The free tier is throttled per MINUTE (observed: `limit: 20` with a ~3.5 s retry hint) as well as capped per day; a per-minute throttle is paced and the import continues, but if the daily allowance is genuinely spent BookLets reports an exhausted quota and stops after **one** request rather than paying to relearn it per receipt. Raising it is a billing change on the OCR service's key, in that service's project.
 
 **To make DevServer the OCR backend:** implement `POST /ocr` (above) and set
 `OCR_MICROSERVICE_URL=<devserver-url>` on the `booklets` Vercel project (production), then redeploy.
