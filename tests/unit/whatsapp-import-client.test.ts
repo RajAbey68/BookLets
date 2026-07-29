@@ -447,9 +447,11 @@ describe('rate-limit backoff', () => {
 
     expect(report.failures).toHaveLength(1);
     expect(report.failures[0].stage).toBe('upload');
-    // Three attempts for the item (+ at most the batch close) — bounded, not a
-    // retry loop that could hammer a struggling server forever.
-    expect(callCount(fetchImpl)).toBeLessThanOrEqual(4);
+    // Five attempts for the item (+ at most the batch close) — bounded, not a
+    // retry loop that could hammer a struggling server forever. Raised from
+    // three when upstream OCR throttling began surfacing as a real 429: a
+    // per-minute provider quota is worth riding out, not giving up on.
+    expect(callCount(fetchImpl)).toBeLessThanOrEqual(6);
   });
 
   it('observes an abort DURING the backoff wait instead of sleeping it out', async () => {
@@ -612,5 +614,104 @@ describe('describeImportFailure', () => {
     const out = describeImportFailure(new Error('boom'));
     expect(out.ok).toBe(false);
     expect(out.message.length).toBeGreaterThan(0);
+  });
+});
+
+describe('upstream OCR rate limiting', () => {
+  /**
+   * The failure this whole change exists to prevent.
+   *
+   * When the OCR PROVIDER throttles, the receipts were never looked at. The
+   * old behaviour recorded each one as a per-item failure, which surfaced as
+   * "225 couldn't be read (OCR service could not read them)" — a verdict on
+   * 225 photographs that were all perfectly legible, and an instruction to go
+   * fix something that was not broken.
+   *
+   * The run must instead STOP, keep whatever genuinely landed, and say why.
+   */
+  it('stops the run instead of blaming every remaining receipt', async () => {
+    const clock = manualClock();
+    let calls = 0;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) {
+        return new Response('{}', { status: 200 });
+      }
+      calls += 1;
+      // The chat transcript goes through; every receipt is throttled upstream.
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ item: { name: '_chat.txt', kind: 'text', outcome: 'created' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          error: 'The OCR service is rate limited right now.',
+          code: 'OCR_RATE_LIMITED',
+        }),
+        { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '30' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const run = importWhatsappExport(exportZip(8), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    await waitFor(() => calls >= 1);
+    for (let i = 0; i < 12 && !settled; i += 1) {
+      clock.advance(30_000);
+      await flushIo();
+    }
+    const report = await tracked;
+
+    // No receipt is accused of being unreadable — none was ever read.
+    expect(report.failures).toHaveLength(0);
+    // The run is reported as stopped, with the specific, actionable reason.
+    expect(report.interrupted).toBe(true);
+    expect(report.interruptedReason).toBe('ocr-rate-limited');
+    expect(report.interruptedDetail).toMatch(/rate limited/i);
+    // It stopped early rather than grinding through all 8 receipts.
+    expect(report.attempted).toBeLessThan(report.imageCount + report.textCount);
+  });
+
+  it('still reports an ordinary 429 from our own bucket as an upload failure', async () => {
+    // BookLets' own token bucket sends 429 WITHOUT the OCR code. That one is a
+    // genuine per-item transport failure and must keep its existing behaviour.
+    const clock = manualClock();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'Too many uploads at once', code: 'RATE_LIMITED' }), {
+          status: 429,
+        }),
+    ) as unknown as typeof fetch;
+
+    const run = importWhatsappExport(exportZip(0), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+
+    await waitFor(() => callCount(fetchImpl) >= 1);
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    for (let i = 0; i < 8 && !settled; i += 1) {
+      clock.advance(30_000);
+      await flushIo();
+    }
+    const report = await tracked;
+
+    expect(report.interruptedReason).not.toBe('ocr-rate-limited');
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].stage).toBe('upload');
   });
 });

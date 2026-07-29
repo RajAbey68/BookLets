@@ -39,6 +39,12 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   // recorded yet. 422 (not 500): the request was fine, the books are not
   // ready — and the message tells the operator how to make them ready.
   NO_FISCAL_PERIOD: 422,
+  // The OCR provider is rate limiting us, or rejecting our credentials. 503
+  // (not 422): nothing is wrong with this archive, so the operator must not be
+  // told it was rejected — the very same upload will work once the service is
+  // free again. Entries created before the abort are already saved, and
+  // re-running dedupes them by content hash.
+  OCR_UNAVAILABLE: 503,
 };
 
 class UploadTooLargeError extends Error {}

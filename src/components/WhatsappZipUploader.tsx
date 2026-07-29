@@ -73,6 +73,25 @@ function interruptedResult(
   report: WhatsappImportReport,
 ): ZipUploadResult {
   const total = report.imageCount + report.textCount;
+
+  // A rate-limited run gets its own heading and its own first sentence. The
+  // operator's next action is "wait, then re-run", and — critically — he must
+  // NOT be told his receipts were unreadable, go hunting for bad photos, or
+  // re-shoot them. Nothing was wrong with them; the provider was throttling.
+  if (report.interruptedReason === 'ocr-rate-limited') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Paused — OCR service is rate limited',
+      message:
+        `The import paused after ${report.attempted} of ${total} files because the OCR service ` +
+        `hit its rate limit. Your receipts are fine — they were not read, not rejected. ` +
+        `${summary.message} ` +
+        'Wait a minute or two and upload the same export again to carry on where it stopped — ' +
+        'receipts already imported are skipped, never duplicated.',
+    };
+  }
+
   const lead =
     report.interruptedReason === 'idle-timeout'
       ? `The import stalled after ${report.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging.`

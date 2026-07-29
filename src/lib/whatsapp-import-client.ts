@@ -48,11 +48,36 @@ export const BATCH_ENDPOINT = '/api/ingest/batch';
  */
 export const DEFAULT_ITEM_CONCURRENCY = 3;
 
-/** Attempts per item when the server answers 429 (rate limited). */
-const RATE_LIMIT_ATTEMPTS = 3;
+/**
+ * Attempts per item when the server answers 429 (rate limited).
+ *
+ * A 429 now has two distinct causes, and both are legitimately survivable:
+ * BookLets' own per-organisation token bucket (retry-after 10 s), and the OCR
+ * provider throttling us upstream (retry-after from the provider's own hint).
+ * Five attempts is enough to ride out a per-minute provider quota without
+ * turning one slow photo into a stalled run.
+ */
+const RATE_LIMIT_ATTEMPTS = 5;
 const RATE_LIMIT_BACKOFF_MS = 4000;
 /** Ceiling on an honoured `retry-after`, so a bad header cannot park a run. */
 const RATE_LIMIT_MAX_WAIT_MS = 30_000;
+
+/** Server code accompanying a 429 caused by the OCR provider, not by us. */
+const OCR_RATE_LIMITED_CODE = 'OCR_RATE_LIMITED';
+
+/**
+ * Raised when an item exhausted its 429 retries because the OCR PROVIDER is
+ * throttling. Distinct from an ordinary upload failure: it says nothing about
+ * the receipt, it will not improve within this run, and every remaining item
+ * would hit the same wall. The run stops and says so instead of grinding
+ * through the rest producing false "couldn't be read" verdicts.
+ */
+export class OcrRateLimitedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OcrRateLimitedError';
+  }
+}
 
 /**
  * Inactivity watchdog. NOT a total-run budget: a 200-receipt import
@@ -64,7 +89,7 @@ const RATE_LIMIT_MAX_WAIT_MS = 30_000;
 export const DEFAULT_IDLE_TIMEOUT_MS = 3 * 60 * 1000;
 
 /** Why a run stopped before attempting every item. */
-export type ImportInterruptedReason = 'cancelled' | 'idle-timeout';
+export type ImportInterruptedReason = 'cancelled' | 'idle-timeout' | 'ocr-rate-limited';
 
 /**
  * The clock this module measures its two delays with: the inactivity watchdog
@@ -163,6 +188,11 @@ export interface WhatsappImportReport {
    * responded for three minutes" — those need different advice.
    */
   interruptedReason: ImportInterruptedReason | null;
+  /**
+   * The provider's own explanation, when there is one worth repeating
+   * verbatim (currently only 'ocr-rate-limited'). Null otherwise.
+   */
+  interruptedDetail: string | null;
 }
 
 /**
@@ -239,13 +269,27 @@ function sleep(ms: number, signal: AbortSignal | undefined, timers: ImportTimers
 }
 
 async function readErrorText(response: Response, fallback: string): Promise<string> {
+  return (await readErrorBody(response, fallback)).message;
+}
+
+/**
+ * Like readErrorText, but also returns the server's machine-readable `code`
+ * so the caller can tell WHICH kind of 429 this was — ours or the provider's.
+ */
+async function readErrorBody(
+  response: Response,
+  fallback: string,
+): Promise<{ message: string; code?: string }> {
   try {
-    const body = (await response.json()) as { error?: unknown };
-    if (typeof body?.error === 'string' && body.error.trim().length > 0) return body.error;
+    const body = (await response.json()) as { error?: unknown; code?: unknown };
+    const message =
+      typeof body?.error === 'string' && body.error.trim().length > 0 ? body.error : fallback;
+    const code = typeof body?.code === 'string' ? body.code : undefined;
+    return { message, code };
   } catch {
     /* non-JSON error page (a proxy/edge response) — use the fallback */
+    return { message: fallback };
   }
-  return fallback;
 }
 
 /**
@@ -268,17 +312,31 @@ async function uploadItem(
 
     const response = await fetchImpl(endpoint, { method: 'POST', body: form, signal });
 
-    if (response.status === 429 && attempt < RATE_LIMIT_ATTEMPTS) {
-      const retryAfter = Number(response.headers?.get?.('retry-after'));
-      const waitMs =
-        Number.isFinite(retryAfter) && retryAfter > 0
-          ? Math.min(retryAfter * 1000, RATE_LIMIT_MAX_WAIT_MS)
-          : Math.min(RATE_LIMIT_BACKOFF_MS * attempt, RATE_LIMIT_MAX_WAIT_MS);
-      await sleep(waitMs, signal, timers);
-      if (signal?.aborted) {
-        throw new DOMException('The import was cancelled.', 'AbortError');
+    if (response.status === 429) {
+      if (attempt < RATE_LIMIT_ATTEMPTS) {
+        const retryAfter = Number(response.headers?.get?.('retry-after'));
+        const waitMs =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, RATE_LIMIT_MAX_WAIT_MS)
+            : Math.min(RATE_LIMIT_BACKOFF_MS * attempt, RATE_LIMIT_MAX_WAIT_MS);
+        await sleep(waitMs, signal, timers);
+        if (signal?.aborted) {
+          throw new DOMException('The import was cancelled.', 'AbortError');
+        }
+        continue;
       }
-      continue;
+
+      // Retries exhausted. If the provider is the one throttling, this is a
+      // run-level condition, not an item-level one — surface it as such so the
+      // caller can stop rather than repeat it for every remaining receipt.
+      const { message, code } = await readErrorBody(
+        response,
+        'The OCR service is rate limited right now.',
+      );
+      if (code === OCR_RATE_LIMITED_CODE) {
+        throw new OcrRateLimitedError(message);
+      }
+      throw new Error(message);
     }
 
     if (!response.ok) {
@@ -320,6 +378,8 @@ export async function importWhatsappExport(
   const controller = new AbortController();
   const { signal } = controller;
   let stalled = false;
+  let rateLimited = false;
+  let rateLimitMessage = '';
   let idleTimer: unknown;
 
   const armWatchdog = () => {
@@ -363,6 +423,7 @@ export async function importWhatsappExport(
     attempted: 0,
     interrupted: false,
     interruptedReason: null,
+    interruptedDetail: null,
   };
 
   const total = plan.texts.length + plan.images.length;
@@ -394,6 +455,17 @@ export async function importWhatsappExport(
       if (signal.aborted) return;
       item = await uploadItem(bytes, entry.name, batchId, itemEndpoint, fetchImpl, signal, timers);
     } catch (err) {
+      // The OCR provider is throttling. Every remaining receipt would hit the
+      // same wall, and recording each one as a failure is precisely the lie
+      // that made a rate-limited run look like 225 unreadable photographs.
+      // Stop the run; the report says how far it got and that re-running
+      // resumes. No failure is recorded — this item was never judged.
+      if (err instanceof OcrRateLimitedError) {
+        rateLimited = true;
+        rateLimitMessage = err.message;
+        controller.abort();
+        return;
+      }
       // A cancelled run must not invent a failure for the request it cut off:
       // that item was never judged, so it is neither attempted nor failed. The
       // interrupted report already tells the operator where it stopped.
@@ -479,7 +551,14 @@ export async function importWhatsappExport(
 
   report.interrupted = report.attempted < total;
   if (report.interrupted) {
-    report.interruptedReason = stalled ? 'idle-timeout' : 'cancelled';
+    // Rate limiting is checked first: it is the specific, actionable cause,
+    // and it aborts the same controller a cancellation would.
+    report.interruptedReason = rateLimited
+      ? 'ocr-rate-limited'
+      : stalled
+        ? 'idle-timeout'
+        : 'cancelled';
+    report.interruptedDetail = rateLimited ? rateLimitMessage : null;
   }
 
   // Close the run with a summary the SERVER recounts from its own evidence

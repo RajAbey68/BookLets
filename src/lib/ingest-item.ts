@@ -56,6 +56,7 @@ import {
   type ResolvedLedgerAccounts,
 } from './zip-ingest';
 import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { OcrError } from './ocr-errors';
 import type { JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -390,6 +391,19 @@ async function ingestImage(
   try {
     ocrResult = await deps.ocr(data.toString('base64'));
   } catch (err) {
+    // A rate limit (or a credential rejection) is NOT a verdict on this
+    // receipt — the service never looked at it. Recording it as `failed` was
+    // the bug behind "225 couldn't be read": it wrote 225 evidence rows
+    // blaming photographs that were perfectly legible, and it consumed the
+    // whole run in one doomed pass instead of pausing and resuming.
+    //
+    // Raising it instead means: no evidence row (nothing happened to this
+    // receipt), the route answers 429, and the browser's existing backoff
+    // paces the run. Re-running resumes exactly here, because dedup is keyed
+    // on content and this entry never got one.
+    if (err instanceof OcrError && (err.kind === 'rate-limit' || err.kind === 'auth')) {
+      throw err;
+    }
     return {
       ...base,
       kind: 'image',
