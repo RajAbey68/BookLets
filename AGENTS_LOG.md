@@ -25,6 +25,26 @@ joining this repo should read it before claiming scope here.
 
 ## Active work
 
+### e2e-harness (claude/e2e-upload-harness) — end-to-end receipt-import harness
+- **Started:** 2026-07-28
+- **Goal:** Stop "the unit tests are green" from being the answer to "does the
+  import work". Adds a harness that generates a real WhatsApp export, uploads it
+  over real HTTP to a real build behind a simulated ~4.5 MB platform edge, and
+  asserts against Postgres rather than against the API's own report.
+- **Touching:** `scripts/e2e/**` (new), `docs/E2E-UPLOAD-HARNESS.md` (new),
+  `package.json` (three scripts). **No product code is modified.**
+- **Findings:** (1) a freshly deployed organisation cannot import anything —
+  `LedgerService.checkFiscalPeriod` rejects every entry and nothing outside
+  `prisma/seed.ts` creates a `FiscalPeriod`; (2) Next truncates any request body
+  over 10 MB (`experimental.proxyClientMaxBodySize`, unset in `next.config.ts`)
+  and `/api/ingest/zip` then reports the operator's valid archive as corrupt.
+  Both reproduced on `main` and on #133. Details in the PR.
+- **Relationship to #133 (now merged):** the harness detects which upload route
+  a build serves and runs the same scenarios against either, so it did not need
+  changing when the per-item transport landed. Full-scale results for #133's
+  transport (120 photos / 28.2 MB, counts and money verified in SQL) are in the
+  PR body.
+
 ### upload-transport-fix (claude/upload-transport-fix) — per-item receipt upload transport
 - **Started:** 2026-07-28
 - **Goal:** Make a real WhatsApp export importable at all. Vercel's edge 413s any
