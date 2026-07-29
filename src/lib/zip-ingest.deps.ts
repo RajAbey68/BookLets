@@ -88,7 +88,7 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
       // Drafts debit Suspense — a human reclassifies during four-eyes review.
       const suspense = await prisma.account.findFirst({
         where: { organizationId, code: '9999' },
-        select: { id: true },
+        select: { id: true, currency: true },
       });
       if (!suspense) {
         throw new Error(
@@ -115,6 +115,11 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
       return {
         expenseAccountId: suspense.id,
         cashAccountId: bank.id,
+        // The line currency is a fact about the account, not a database
+        // default. JournalLine.currency defaults to "EUR" at the schema level,
+        // so an omitted value silently stamped EUR onto an all-LKR chart of
+        // accounts — 270 lines before anyone noticed.
+        currency: suspense.currency,
       };
     },
 

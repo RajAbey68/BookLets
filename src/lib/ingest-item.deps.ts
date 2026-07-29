@@ -80,7 +80,7 @@ export function buildDefaultItemIngestDeps(): ItemIngestDeps {
       // goes to Primary Bank (1000) or a "Cash" account.
       const suspense = await prisma.account.findFirst({
         where: { organizationId, code: '9999' },
-        select: { id: true },
+        select: { id: true, currency: true },
       });
       if (!suspense) {
         throw new Error(
@@ -103,7 +103,15 @@ export function buildDefaultItemIngestDeps(): ItemIngestDeps {
           'Receipt import setup error: no bank/cash account (code 1000 or name containing "Cash") is seeded for this organization.',
         );
       }
-      return { expenseAccountId: suspense.id, cashAccountId: bank.id };
+      return {
+        expenseAccountId: suspense.id,
+        cashAccountId: bank.id,
+        // The line currency is a fact about the account, not a database
+        // default. JournalLine.currency defaults to "EUR" at the schema level,
+        // so an omitted value silently stamped EUR onto an all-LKR chart of
+        // accounts — 270 lines before anyone noticed.
+        currency: suspense.currency,
+      };
     },
 
     async recordEvidence(input) {

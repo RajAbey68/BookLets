@@ -228,6 +228,16 @@ export interface EvidenceInput {
 export interface ResolvedLedgerAccounts {
   expenseAccountId: string;
   cashAccountId: string;
+  /**
+   * ISO code of the accounts being posted to (S1b: 'LKR').
+   *
+   * Carried explicitly because `JournalLine.currency` defaults to `"EUR"` at
+   * the schema level, and a line that omits it silently inherits that default
+   * — which is how 270 lines came to be stamped EUR against a chart of
+   * accounts that is entirely LKR. The line's currency must be a fact about
+   * the account it posts to, never a database default nobody chose.
+   */
+  currency: string;
 }
 
 /**
@@ -475,13 +485,34 @@ export function inspectZip(zipBuffer: Buffer, limits: Partial<ZipIngestLimits> =
 
 // ─── ingestion orchestration ──────────────────────────────────────────────────
 
-function ocrDateOrNow(isoDate: string): Date {
+/**
+ * The receipt's own date, or null when it has none.
+ *
+ * DATES ARE NEVER FABRICATED. This used to fall back to `new Date()`, which
+ * silently stamped today onto any receipt whose date the OCR could not read.
+ * In one 225-image import that produced 83 entries dated the day of the
+ * import rather than the day of the expense — roughly 15 million LKR landing
+ * in the wrong month, on a date no document supports, in books that close
+ * monthly.
+ *
+ * The rule is already written down in ocr-bridge.ts, which parks such rows as
+ * NO_DOC_DATE: "doc_date missing — dates are NEVER fabricated from
+ * processed_at; a human assigns them." That contract binds this path too;
+ * having two ingest routes with different standards for the same ledger is
+ * what allowed the divergence in the first place.
+ */
+export function ocrDateOrNull(isoDate: string): Date | null {
   if (/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
     const parsed = new Date(`${isoDate}T00:00:00.000Z`);
     if (!Number.isNaN(parsed.getTime())) return parsed;
   }
-  return new Date();
+  return null;
 }
+
+/** Operator-facing reason for a receipt held back because it carries no date. */
+export const NO_DOC_DATE_MESSAGE =
+  'No date could be read on this receipt. Dates are never guessed — ' +
+  'enter this one by hand with the date shown on the document.';
 
 /**
  * Full pipeline: inspect (guards + split) → dedupe by content-hash key →
@@ -632,7 +663,11 @@ export async function ingestZip(
     // of receiving checkFiscalPeriod's "No fiscal period defined for the date
     // 7/12/2026" — which names no action and, read outside the US, names the
     // wrong month.
-    const entryDate = ocrDateOrNow(extraction.date);
+    const entryDate = ocrDateOrNull(extraction.date);
+    if (entryDate === null) {
+      failures.push({ name: image.name, stage: 'ocr', error: NO_DOC_DATE_MESSAGE });
+      return;
+    }
     if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
       failures.push({
         name: image.name,
@@ -656,8 +691,20 @@ export async function ingestZip(
         source: ZIP_INGEST_SOURCE,
         sourceId: image.sha256,
         lines: [
-          { accountId: accounts!.expenseAccountId, amount: extraction.totalAmount, isDebit: true },
-          { accountId: accounts!.cashAccountId, amount: extraction.totalAmount, isDebit: false },
+          // currency comes from the ACCOUNT, never the schema default — see
+          // ResolvedLedgerAccounts.currency.
+          {
+            accountId: accounts!.expenseAccountId,
+            amount: extraction.totalAmount,
+            isDebit: true,
+            currency: accounts!.currency,
+          },
+          {
+            accountId: accounts!.cashAccountId,
+            amount: extraction.totalAmount,
+            isDebit: false,
+            currency: accounts!.currency,
+          },
         ],
       });
       journalEntryIds.push(entry.id);
