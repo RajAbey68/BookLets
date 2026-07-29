@@ -64,6 +64,15 @@ const RATE_LIMIT_MAX_WAIT_MS = 30_000;
 
 /** Server code accompanying a 429 caused by the OCR provider, not by us. */
 const OCR_RATE_LIMITED_CODE = 'OCR_RATE_LIMITED';
+/**
+ * Server code (503) meaning the OCR account's API quota is SPENT.
+ *
+ * It arrives as a 503 rather than a 429 precisely so it never enters the
+ * backoff ladder below: there is nothing to wait for, and each retry would be
+ * another billable request against an allowance that has already run out. One
+ * request, then the run stops.
+ */
+const OCR_QUOTA_EXHAUSTED_CODE = 'OCR_QUOTA_EXHAUSTED';
 /** Server codes (503) meaning the OCR service itself is down or misconfigured. */
 const OCR_SERVICE_DOWN_CODES = new Set(['OCR_UNAVAILABLE', 'OCR_AUTH_FAILED']);
 
@@ -83,15 +92,9 @@ export class OcrServiceError extends Error {
    * outage as a rate limit. The two need different advice, so they stay
    * distinct all the way to the operator.
    */
-  readonly reason: Extract<
-    ImportInterruptedReason,
-    'ocr-rate-limited' | 'ocr-unavailable'
-  >;
+  readonly reason: OcrStopReason;
 
-  constructor(
-    message: string,
-    reason: Extract<ImportInterruptedReason, 'ocr-rate-limited' | 'ocr-unavailable'>,
-  ) {
+  constructor(message: string, reason: OcrStopReason) {
     super(message);
     this.name = 'OcrServiceError';
     this.reason = reason;
@@ -113,8 +116,22 @@ export type ImportInterruptedReason =
   | 'idle-timeout'
   /** OCR provider throttled us — waiting and re-uploading will work. */
   | 'ocr-rate-limited'
+  /**
+   * The OCR account's API quota is spent. Distinct from 'ocr-rate-limited'
+   * because the advice is opposite: waiting a minute will NOT help, and the
+   * fix (raising the quota / enabling billing on that key) is not the
+   * operator's to perform. Telling him to "wait and try again" here would be a
+   * second false statement on top of "225 couldn't be read".
+   */
+  | 'ocr-quota-exhausted'
   /** OCR service is down or its credentials are rejected — may need an admin. */
   | 'ocr-unavailable';
+
+/** The subset of stop reasons that mean "the OCR service, not this receipt". */
+export type OcrStopReason = Extract<
+  ImportInterruptedReason,
+  'ocr-rate-limited' | 'ocr-quota-exhausted' | 'ocr-unavailable'
+>;
 
 /**
  * The clock this module measures its two delays with: the inactivity watchdog
@@ -381,6 +398,13 @@ async function uploadItem(
         response,
         `The server rejected this file (HTTP ${response.status}).`,
       );
+      // The account's OCR quota is spent. Reaching this line means exactly ONE
+      // request was spent discovering it — no backoff ladder was entered,
+      // because the server answered 503 rather than 429. Every remaining
+      // receipt would buy the same answer, so the run stops here.
+      if (code === OCR_QUOTA_EXHAUSTED_CODE) {
+        throw new OcrServiceError(message, 'ocr-quota-exhausted');
+      }
       // The OCR service is down or misconfigured. Not this receipt's fault, and
       // not survivable by retrying the next one — stop the whole run.
       if (code && OCR_SERVICE_DOWN_CODES.has(code)) {
@@ -422,7 +446,7 @@ export async function importWhatsappExport(
   const controller = new AbortController();
   const { signal } = controller;
   let stalled = false;
-  let ocrDownReason: 'ocr-rate-limited' | 'ocr-unavailable' | null = null;
+  let ocrDownReason: OcrStopReason | null = null;
   let ocrDownMessage = '';
   let idleTimer: unknown;
 

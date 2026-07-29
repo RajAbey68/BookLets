@@ -27,8 +27,19 @@
  */
 
 export type OcrErrorKind =
-  /** Provider quota / rate limit. The receipt is fine. Wait and retry. */
+  /**
+   * A PASSING throttle: the provider briefly said "slow down" and named a
+   * short wait. The receipt is fine and waiting genuinely fixes it.
+   */
   | 'rate-limit'
+  /**
+   * The account's ALLOWANCE is spent — the free-tier quota is used up, not a
+   * burst exceeded. The receipt is fine, but no amount of waiting inside this
+   * import will help, and every further request deepens the hole. Told apart
+   * from 'rate-limit' because the two need opposite advice: "wait a moment"
+   * is honest for one and false for the other.
+   */
+  | 'quota-exhausted'
   /** Bad or missing API credentials upstream. Retrying cannot help. */
   | 'auth'
   /** Request timed out. Usually transient. */
@@ -47,7 +58,17 @@ export type OcrErrorKind =
  * what lets callers treat them differently from a bad photograph.
  */
 
-/** Kinds where trying the SAME image again later can reasonably succeed. */
+/**
+ * Kinds where trying the SAME image again shortly can reasonably succeed.
+ *
+ * 'quota-exhausted' is deliberately ABSENT. Retrying a spent allowance cannot
+ * work, and it is not free: each attempt is another billable request against a
+ * quota that has already run out, which is precisely how "receipt 3 of 225
+ * pays to discover what receipt 2 already learned" happens. Membership of this
+ * set is what stops both retry loops in the system — the inline one in
+ * gemini-ocr.ts and the browser's backoff ladder — so it is the single place
+ * that decision is made.
+ */
 const RETRYABLE: ReadonlySet<OcrErrorKind> = new Set<OcrErrorKind>([
   'rate-limit',
   'timeout',
@@ -109,6 +130,66 @@ export function parseRetryAfterMs(bodyText: string): number | undefined {
 }
 
 /**
+ * Markers that separate a SPENT ALLOWANCE from a passing burst throttle.
+ *
+ * Both arrive as 429 / RESOURCE_EXHAUSTED, so the status cannot tell them
+ * apart — but the wording can, and the difference decides whether "wait a
+ * moment and try again" is helpful advice or a second lie:
+ *
+ *  • Google appends "check your plan and billing details" only when the
+ *    ALLOWANCE is the constraint. A momentary rate exceedance never says it.
+ *  • A per-day/daily WINDOW named outright — including the `PerDay` in a
+ *    quotaId such as `GenerateRequestsPerDayPerProjectPerModel`.
+ *
+ * The free-tier metric name (`…free_tier_requests`) is deliberately NOT a
+ * marker, though an earlier draft of this file used one. It names the TIER,
+ * not the WINDOW, and Google emits it in the per-MINUTE violation too: the
+ * body from the 225-receipt import carried `free_tier_requests` alongside
+ * `Please retry in 3.485s`, and the same image succeeded seconds later. Had
+ * that string been sufficient, a burst throttle would have been reported as a
+ * spent allowance and the import stopped after one receipt — which is the
+ * precise failure this file exists to prevent, in the precise case that
+ * motivated it.
+ *
+ * Neither direction of error is cheap. A false negative sends the operator
+ * round a retry loop against a quota that is gone; a false positive tells him
+ * to go and enable billing he does not need, and stops an import that waiting
+ * would have completed. So the classification rests on evidence that actually
+ * distinguishes the two, and where the provider states a window directly (see
+ * the retry hint below) that statement wins.
+ */
+const QUOTA_EXHAUSTED_MARKERS: readonly RegExp[] = [
+  /check your (?:plan|account)[^.]{0,60}billing/i,
+  /per[_\s-]?day|\bdaily\b|requests? per day/i,
+];
+
+/**
+ * A retry hint longer than this is not something to pace an import against:
+ * whatever the provider calls it, an allowance that needs minutes to recover
+ * is spent for the purposes of this run.
+ */
+const LONG_THROTTLE_MS = 60_000;
+
+/**
+ * Operator-facing copy for a spent allowance.
+ *
+ * Every clause is load-bearing. It exonerates the receipts explicitly (the
+ * operator spent time hunting for bad photographs that did not exist), names
+ * the real constraint as an account limit on a key that is not his, says where
+ * that limit is actually raised, and — critically — does NOT invent an action
+ * he can take right now, because there is not one. It carries no provider text:
+ * the raw body names internal metrics and console URLs that mean nothing to him
+ * and disclose our upstream layout.
+ */
+const QUOTA_EXHAUSTED_MESSAGE =
+  'The receipt-reading service has used up its API quota, so it stopped reading receipts. ' +
+  'Your receipts are fine — they were not read, and none was rejected. ' +
+  'This is an account limit on the OCR service’s own API key, not a problem with your photos ' +
+  'and not something to change in BookLets: the free tier allows only a few dozen receipts, ' +
+  'and raising it means enabling billing on that key. Waiting a few minutes will not be enough. ' +
+  'Anything already imported is safe, and re-uploading the same export later carries on where it stopped.';
+
+/**
  * Decide what an OCR failure actually was, from the HTTP status plus the
  * response body.
  *
@@ -136,12 +217,34 @@ export function classifyOcrFailure(status: number | undefined, bodyText: string)
     /exceeded your current quota/i.test(body) ||
     status === 429
   ) {
+    const retryAfterMs = parseRetryAfterMs(body);
+
+    // A provider that names a moment to come back has NOT run out — it is
+    // pacing us, and it is the most direct evidence available about which
+    // failure this is. So a short hint settles the question on its own and
+    // outranks the wording markers, which describe the account rather than
+    // the window. Without this precedence, `…free_tier_requests` beside
+    // "retry in 3.485s" would read as a spent allowance.
+    const pacedByProvider = retryAfterMs !== undefined && retryAfterMs <= LONG_THROTTLE_MS;
+
+    // A spent allowance is a different failure from a burst throttle, and gets
+    // different advice. No retry hint is carried: the item route turns a hint
+    // into an HTTP `retry-after`, which would invite the browser to keep
+    // asking a provider that has already run out.
+    if (
+      !pacedByProvider &&
+      (QUOTA_EXHAUSTED_MARKERS.some((marker) => marker.test(body)) ||
+        (retryAfterMs !== undefined && retryAfterMs > LONG_THROTTLE_MS))
+    ) {
+      return new OcrError('quota-exhausted', QUOTA_EXHAUSTED_MESSAGE, { status });
+    }
+
     return new OcrError(
       'rate-limit',
       'The OCR service is rate limited right now — this receipt was not read. ' +
         'Nothing is wrong with the photo. Wait a moment and import again; ' +
         'receipts already imported are skipped automatically.',
-      { retryAfterMs: parseRetryAfterMs(body), status },
+      { retryAfterMs, status },
     );
   }
 

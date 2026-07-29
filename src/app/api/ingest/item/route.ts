@@ -176,6 +176,27 @@ export async function POST(request: Request) {
     // never spoke the status that triggers it. Re-running the import resumes
     // where it stopped: dedup is keyed on content, and a throttled entry never
     // got a journal entry or an evidence row.
+    // A SPENT allowance is answered 503, deliberately NOT 429 + retry-after.
+    // A 429 is an instruction to try again shortly, and the browser obeys it:
+    // that is right for a passing throttle and false for an exhausted quota,
+    // where every obedient retry is another billable request against a quota
+    // that has already run out. 503 with its own code stops the run instead,
+    // and the operator is told the account limit is the problem. Nothing is
+    // recorded against the receipt — the service never looked at it.
+    if (err instanceof OcrError && err.kind === 'quota-exhausted') {
+      // `err.message` is deliberately NOT logged here: for this kind it is our
+      // own fixed operator-facing paragraph, so it would add a wall of static
+      // text per line and no diagnosis. The upstream status and the cause are
+      // the parts that differ between incidents, so those are what get logged.
+      console.error(
+        `[ingest/item] OCR quota exhausted org=${encodeURIComponent(organizationId)} upstream=${err.status ?? 'none'}`,
+        err.cause ?? '',
+      );
+      return NextResponse.json(
+        { error: err.message, code: 'OCR_QUOTA_EXHAUSTED' },
+        { status: 503 },
+      );
+    }
     if (err instanceof OcrError && err.kind === 'rate-limit') {
       // Floor keeps the header valid; the ceiling stops a long provider hint
       // from parking the browser mid-import. A client that waits 60 s and

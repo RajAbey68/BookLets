@@ -8,14 +8,26 @@ import type { OcrError as OcrErrorType } from '@/lib/ocr-errors';
  *
  *   1. a rate limit is raised as a rate limit, not flattened
  *   2. the provider's own diagnosis survives all the way to the caller
- *   3. the SymbiOS fallback cannot overwrite that diagnosis
+ *   3. an EXHAUSTED quota is never retried — retrying spends money and makes
+ *      the very condition it is reacting to worse
  *   4. short throttles are absorbed by an inline retry
+ *   5. there is exactly ONE provider: nothing here may quietly call another
  */
 
-const QUOTA_BODY = JSON.stringify({
+/** A momentary burst throttle — short hint, no tier/plan wording. Retryable. */
+const THROTTLE_BODY = JSON.stringify({
   error:
     'Gemini OCR API Error: 429 Too Many Requests — {"error":{"code":429,' +
     '"status":"RESOURCE_EXHAUSTED","message":"Please retry in 0.01s."}}',
+});
+
+/** The real production body: free-tier allowance spent. NOT retryable. */
+const QUOTA_EXHAUSTED_BODY = JSON.stringify({
+  error:
+    'Gemini OCR API Error: 429 Too Many Requests — {"error":{"code":429,"message":' +
+    '"You exceeded your current quota, please check your plan and billing details. ' +
+    'Quota exceeded for metric: generativelanguage.googleapis.com/' +
+    'generate_content_free_tier_requests, limit: 20","status":"RESOURCE_EXHAUSTED"}}',
 });
 
 const OK_BODY = {
@@ -56,7 +68,10 @@ describe('extractReceipt — failure handling', () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    delete process.env.SYMBIOS_API_KEY;
+    // Deliberately SET, to prove it is inert: the second-provider fallback was
+    // removed, so no environment variable can bring a second provider back.
+    process.env.SYMBIOS_API_KEY = 'test-key';
+    process.env.SYMBIOS_URL = 'https://api.symbios.ai';
     process.env.OCR_RETRY_ATTEMPTS = '3';
   });
 
@@ -64,13 +79,14 @@ describe('extractReceipt — failure handling', () => {
     globalThis.fetch = originalFetch;
     delete process.env.OCR_RETRY_ATTEMPTS;
     delete process.env.SYMBIOS_API_KEY;
+    delete process.env.SYMBIOS_URL;
     vi.restoreAllMocks();
   });
 
   it('retries a short throttle inline and succeeds without the caller ever seeing it', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce(errorResponse(500, QUOTA_BODY))
+      .mockResolvedValueOnce(errorResponse(500, THROTTLE_BODY))
       .mockResolvedValueOnce(jsonResponse(OK_BODY));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -85,7 +101,7 @@ describe('extractReceipt — failure handling', () => {
   it('raises a rate limit as a rate limit once retries are spent', async () => {
     globalThis.fetch = vi
       .fn()
-      .mockResolvedValue(errorResponse(500, QUOTA_BODY)) as unknown as typeof fetch;
+      .mockResolvedValue(errorResponse(500, THROTTLE_BODY)) as unknown as typeof fetch;
 
     const { extractReceipt, OcrError } = await loadExtractReceipt();
     const error = await extractReceipt('deadbeef').catch((e: unknown) => e);
@@ -94,26 +110,22 @@ describe('extractReceipt — failure handling', () => {
     expect((error as OcrErrorType).kind).toBe('rate-limit');
   });
 
-  it('does not divert a rate limit to the fallback provider', async () => {
-    // The fallback answers ONLY the /api/v1/automation/extract-receipt path;
-    // if the implementation wrongly routed a rate limit there, the call would
-    // succeed and this expectation would fail.
-    process.env.SYMBIOS_API_KEY = 'test-key';
-    const fetchMock = vi.fn(async (url: unknown) =>
-      String(url).includes('symbios')
-        ? jsonResponse({ extraction: { vendorName: 'FALLBACK' } })
-        : errorResponse(500, QUOTA_BODY),
-    );
+  it('spends exactly ONE call on an exhausted quota, then stops', async () => {
+    // Receipt 3 of 225 must not pay to discover what receipt 2 already learned.
+    // The allowance is gone; a retry cannot succeed, and every extra attempt
+    // deepens the hole and costs real money.
+    const fetchMock = vi.fn().mockResolvedValue(errorResponse(500, QUOTA_EXHAUSTED_BODY));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const { extractReceipt } = await loadExtractReceipt();
+    const { extractReceipt, OcrError } = await loadExtractReceipt();
     const error = await extractReceipt('deadbeef').catch((e: unknown) => e);
 
-    expect((error as OcrErrorType).kind).toBe('rate-limit');
-    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('symbios'))).toBe(true);
+    expect(error).toBeInstanceOf(OcrError);
+    expect((error as OcrErrorType).kind).toBe('quota-exhausted');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the real diagnosis when the fallback is unconfigured', async () => {
+  it('keeps the real diagnosis instead of a fallback’s complaint', async () => {
     // The regression: EVERY failure used to fall through to SymbiOS, which then
     // threw "no SymbiOS API key configured" — discarding the upstream
     // explanation the operator actually needed.
@@ -130,49 +142,47 @@ describe('extractReceipt — failure handling', () => {
     expect((error as Error).message).not.toMatch(/SymbiOS/i);
   });
 
-  it('uses the SymbiOS fallback when the service is unreachable and a key is set', async () => {
-    // The other half of the gating rule: the fallback is skipped for
-    // rate-limit/auth, but it MUST still run for genuine unreachability.
-    process.env.SYMBIOS_API_KEY = 'test-key';
+  it.each([
+    ['an exhausted quota', 500, QUOTA_EXHAUSTED_BODY],
+    ['a throttle', 500, THROTTLE_BODY],
+    ['an unreachable service', 503, 'UNAVAILABLE'],
+    ['a credential rejection', 500, 'PERMISSION_DENIED: API key not valid'],
+  ])('never calls a second provider on %s', async (_label, status, body) => {
+    // There is ONE OCR provider. The old SymbiOS fallback pointed at a domain
+    // that is parked for sale, was never exercised against a real key, and
+    // returned an unvalidated body straight into the ledger path. Receipt
+    // images must never be posted anywhere except OCR_MICROSERVICE_URL.
     process.env.OCR_RETRY_ATTEMPTS = '1';
-    const fetchMock = vi.fn(async (url: unknown) =>
-      String(url).includes('symbios')
-        ? jsonResponse({
-            extraction: {
-              vendorName: 'FALLBACK VENDOR',
-              date: '2026-07-12',
-              totalAmount: 42,
-              categorySuggestion: 'Other',
-              confidence: 0.5,
-            },
-          })
-        : errorResponse(503, 'UNAVAILABLE'),
-    );
+    const urls: string[] = [];
+    const fetchMock = vi.fn(async (url: unknown) => {
+      urls.push(String(url));
+      return errorResponse(status, body);
+    });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const { extractReceipt } = await loadExtractReceipt();
-    const result = await extractReceipt('deadbeef');
+    await extractReceipt('deadbeef').catch(() => undefined);
 
-    expect(result.extraction.vendorName).toBe('FALLBACK VENDOR');
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('symbios'))).toBe(true);
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) {
+      expect(url).not.toMatch(/symbios/i);
+    }
   });
 
   it('classifies a malformed 200 as a payload fault, not as unreachable', async () => {
     // A bad body used to reach classifyOcrTransportError and come back
-    // 'unavailable' — which both diverted it to SymbiOS and told the operator
-    // the service could not be reached, when it had in fact answered.
-    process.env.SYMBIOS_API_KEY = 'test-key';
+    // 'unavailable' — which told the operator the service could not be
+    // reached, when it had in fact answered.
     process.env.OCR_RETRY_ATTEMPTS = '1';
-    const fetchMock = vi.fn(async (url: unknown) =>
-      String(url).includes('symbios')
-        ? jsonResponse({ extraction: { vendorName: 'FALLBACK' } })
-        : ({
-            ok: true,
-            status: 200,
-            json: async () => {
-              throw new SyntaxError('Unexpected token < in JSON');
-            },
-          } as unknown as Response),
+    const fetchMock = vi.fn(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError('Unexpected token < in JSON');
+          },
+        }) as unknown as Response,
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -180,7 +190,6 @@ describe('extractReceipt — failure handling', () => {
     const error = await extractReceipt('deadbeef').catch((e: unknown) => e);
 
     expect((error as OcrErrorType).kind).toBe('unknown');
-    expect(fetchMock.mock.calls.every(([url]) => !String(url).includes('symbios'))).toBe(true);
   });
 
   it('still returns a zero-amount extraction when the receipt itself is illegible', async () => {
