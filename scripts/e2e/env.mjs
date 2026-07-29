@@ -175,17 +175,41 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
       ]);
     } else {
       await run('docker', ['start', name]).catch(() => {});
+      // `-p` is applied at creation only, and the container name is a constant,
+      // so a container left over from a run with a different --db-port starts
+      // fine and passes every check below — `docker exec` reaches Postgres
+      // through the daemon, not through the published port. The URL we hand
+      // back would then point at a port nothing is listening on. Verify the
+      // mapping rather than discovering it as a connection refusal later.
+      const mapped = await run('docker', ['port', name, '5432/tcp']).catch(() => '');
+      // Compare the port numerically: a substring test would accept :5433 for
+      // a requested 543.
+      const publishedPorts = mapped
+        .split('\n')
+        .map((line) => Number(line.trim().split(':').pop()))
+        .filter(Number.isInteger);
+      if (!publishedPorts.includes(port)) {
+        throw new Error(
+          `Docker container "${name}" already exists but publishes 5432 as ` +
+            `"${mapped.trim() || 'nothing'}", not :${port}. Remove it ` +
+            `(docker rm -f ${name}) or pass --db-port=<its port>.`,
+        );
+      }
     }
     // A readiness loop that falls through when its budget runs out hands the
     // caller a database that never came up, and every "test" after that is
     // noise wearing the costume of a result. Never proceed unready.
     // One exit condition, not two: `break` on success, and the loop bound is
-    // just the retry budget. (The sibling loop in startNextServer carried both
+    // just the time budget. (The sibling loop in startNextServer carried both
     // a `break` and a `&& !flag` guard, which CodeQL correctly called a useless
     // negation — the flag can never be true at the test. Both loops now read
     // the same way, so neither invites that alert again.)
+    // Bounded by the clock, like the sibling loop in startNextServer: an
+    // iteration count only equals 60s if every probe is instant, and the
+    // message below promises 60s.
+    const readyBy = Date.now() + 60_000;
     let ready = false;
-    for (let i = 0; i < 60; i += 1) {
+    while (Date.now() < readyBy) {
       ready = await run('docker', ['exec', name, 'pg_isready', '-U', 'postgres']).then(() => true, () => false);
       if (ready) break;
       await new Promise((r) => setTimeout(r, 1000));
@@ -238,12 +262,21 @@ export async function startPostgres({ port = 55432, database = 'booklets_e2e', l
     );
   }
 
-  // mkdtemp creates the directory 0700 and owned by us, with an unguessable
-  // suffix — no other user can pre-create or symlink it out from under us.
-  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'booklets-e2e-pg-'));
-
   // Drop privileges through spawn, never through a shell.
   const pgUser = await resolvePostgresUser();
+
+  // chown fixes the leaf directory, not the path to it. When TMPDIR is a
+  // per-user location (`/run/user/1000/...`, macOS `/var/folders/...`) its
+  // parents are 0700 for US, so the postgres uid cannot traverse them and
+  // initdb fails with a permission error that names the data dir it can in
+  // fact read. Put the cluster somewhere world-traversable when — and only
+  // when — we are handing it to another user.
+  const tmpRoot = pgUser ? '/tmp' : os.tmpdir();
+  // mkdtemp creates the directory 0700 and owned by us, with an unguessable
+  // suffix — no other user can pre-create or symlink it out from under us,
+  // which is what makes a shared /tmp safe to use here.
+  const dataDir = await mkdtemp(path.join(tmpRoot, 'booklets-e2e-pg-'));
+
   const asPg = pgUser ? { uid: pgUser.uid, gid: pgUser.gid } : {};
   if (pgUser) await chown(dataDir, pgUser.uid, pgUser.gid);
 
@@ -372,9 +405,21 @@ export async function startNextServer({ port, databaseUrl, env, log = console.lo
   // hand every scenario a server that never came up, and they would then
   // "fail" for reasons that have nothing to do with the product. Refuse to
   // return anything but a server that answered.
+  // Bound the wait by the clock, not by an iteration count. `fetch` has no
+  // default timeout, so a server that accepts the socket and then never
+  // answers — a wedged `next start`, not a dead one — parks this loop in a
+  // single iteration forever. Counting iterations would also let a slow probe
+  // stretch a "60s" budget into ten minutes, and the message below would be
+  // stating a limit the code never enforced. Both are the same bug the harness
+  // exists to catch, so neither is allowed here.
+  const READY_TIMEOUT_MS = 60_000;
+  const readyBy = Date.now() + READY_TIMEOUT_MS;
   let serving = false;
-  for (let i = 0; i < 120; i += 1) {
-    serving = await fetch(`${base}/api/health`).then((r) => r.status < 500, () => false);
+  while (Date.now() < readyBy) {
+    serving = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(5_000) }).then(
+      (r) => r.status < 500,
+      () => false,
+    );
     if (serving) break;
     if (child.exitCode !== null) throw new Error(`next start exited ${child.exitCode}\n${logLines.join('')}`);
     await new Promise((r) => setTimeout(r, 500));
