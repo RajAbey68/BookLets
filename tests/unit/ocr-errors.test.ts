@@ -25,10 +25,23 @@ const REAL_QUOTA_BODY = JSON.stringify({
 });
 
 /**
- * A momentary burst throttle, as opposed to a spent allowance. Google sends
- * this shape when a project briefly exceeds its per-minute rate: RESOURCE_
- * EXHAUSTED with a short retry hint, and NO mention of a plan, a tier or a
- * daily window. Waiting really does fix it, so it must stay a 'rate-limit'.
+ * A genuinely spent allowance: the per-DAY window named outright in the
+ * quotaId, and no short retry hint to pace against. This — not the body from
+ * the 225-receipt import — is the shape that must stop a run and send the
+ * operator to enable billing.
+ */
+const EXHAUSTED_ALLOWANCE_BODY = JSON.stringify({
+  error:
+    'Gemini OCR API Error: 429 Too Many Requests — {"error":{"code":429,' +
+    '"status":"RESOURCE_EXHAUSTED","message":"You exceeded your current quota, ' +
+    'please check your plan and billing details.",' +
+    '"details":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel"}]}}',
+});
+
+/**
+ * A momentary burst throttle with no account wording at all: RESOURCE_
+ * EXHAUSTED and a short retry hint, nothing about a plan or a window. Waiting
+ * really does fix it, so it must stay a 'rate-limit'.
  */
 const BURST_THROTTLE_BODY = JSON.stringify({
   error:
@@ -38,13 +51,35 @@ const BURST_THROTTLE_BODY = JSON.stringify({
 });
 
 describe('classifyOcrFailure', () => {
-  it('reads the production quota body as an exhausted account quota, not a passing throttle', () => {
-    // The body Google actually sent during the 225-receipt import names the
-    // free tier and points at plan/billing. That is an ALLOWANCE that is
-    // spent, not a burst the operator can wait out — and telling him to "wait
-    // a moment and try again" would be a second false statement on top of the
-    // first one this whole change exists to remove.
+  it('reads the production quota body as a passing throttle, because that is what it was', () => {
+    // This assertion previously expected 'quota-exhausted', on the strength of
+    // the free-tier metric name and the "check your plan and billing details"
+    // sentence. Both are present — and both are misleading. Google appends the
+    // plan/billing sentence to EVERY quota error, and emits the free-tier
+    // metric for the per-minute window as well as the per-day one.
+    //
+    // The decisive evidence is in the same body: "Please retry in 3.485s". A
+    // provider that names a moment to come back has not run out. It was
+    // confirmed empirically — the identical image succeeded seconds later, and
+    // the service answers normally today. `limit: 20` is 20 per MINUTE.
+    //
+    // Getting this wrong is not academic: the operator's real import is 225
+    // receipts against a 20/minute ceiling, which paced backoff completes in
+    // about twelve minutes. Classifying it as a spent allowance would stop the
+    // run after one receipt and send him to enable billing he does not need.
     const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+
+    expect(error.kind).toBe('rate-limit');
+    expect(error.retryable).toBe(true);
+    // The provider's hint is carried through so the import paces against it.
+    expect(error.retryAfterMs).toBe(3486);
+  });
+
+  it('still reads a genuinely spent allowance as exhausted', () => {
+    // The same provider, the same status — but a per-day WINDOW named outright
+    // and no short hint to pace against. Waiting inside the run cannot fix
+    // this one, so it must not be retried.
+    const error = classifyOcrFailure(500, EXHAUSTED_ALLOWANCE_BODY);
 
     expect(error.kind).toBe('quota-exhausted');
     // Retrying cannot help, so nothing may retry it — not the inline loop in
@@ -61,7 +96,7 @@ describe('classifyOcrFailure', () => {
   });
 
   it('names the account limit, and where it is raised, for an exhausted quota', () => {
-    const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+    const error = classifyOcrFailure(500, EXHAUSTED_ALLOWANCE_BODY);
 
     // The receipts must be exonerated explicitly...
     expect(error.message).toMatch(/your receipts are fine/i);
@@ -87,11 +122,18 @@ describe('classifyOcrFailure', () => {
     // Operator-facing text is composed here; the raw body carries internal
     // metric names and console URLs that mean nothing to him and disclose our
     // upstream layout. Every classified message must be OUR words only.
-    for (const body of [REAL_QUOTA_BODY, BURST_THROTTLE_BODY]) {
-      const message = classifyOcrFailure(500, body).message;
-      expect(message).not.toMatch(/googleapis\.com/i);
-      expect(message).not.toMatch(/generativelanguage|generate_content|gemini-/i);
-      expect(message).not.toMatch(/RESOURCE_EXHAUSTED/);
+    const leaks = [
+      'googleapis.com',
+      'generativelanguage',
+      'generate_content',
+      'gemini-',
+      'RESOURCE_EXHAUSTED',
+    ];
+    for (const body of [REAL_QUOTA_BODY, EXHAUSTED_ALLOWANCE_BODY, BURST_THROTTLE_BODY]) {
+      const message = classifyOcrFailure(500, body).message.toLowerCase();
+      for (const leak of leaks) {
+        expect(message).not.toContain(leak.toLowerCase());
+      }
     }
   });
 
@@ -115,7 +157,7 @@ describe('classifyOcrFailure', () => {
     // A retry-after on a spent allowance is an invitation to keep hammering a
     // provider that has already said no — and the item route turns a hint into
     // an HTTP retry-after header the browser obeys.
-    expect(classifyOcrFailure(500, REAL_QUOTA_BODY).retryAfterMs).toBeUndefined();
+    expect(classifyOcrFailure(500, EXHAUSTED_ALLOWANCE_BODY).retryAfterMs).toBeUndefined();
   });
 
   it.each([

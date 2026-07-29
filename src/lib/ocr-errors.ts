@@ -138,19 +138,28 @@ export function parseRetryAfterMs(bodyText: string): number | undefined {
  *
  *  • Google appends "check your plan and billing details" only when the
  *    ALLOWANCE is the constraint. A momentary rate exceedance never says it.
- *  • The free-tier metric name (`…free_tier_requests`) appears when the key is
- *    on the tier whose daily allowance is a few dozen requests — the exact
- *    situation behind the 225-receipt import.
- *  • A per-day/daily window named outright.
+ *  • A per-day/daily WINDOW named outright — including the `PerDay` in a
+ *    quotaId such as `GenerateRequestsPerDayPerProjectPerModel`.
  *
- * A false positive here costs one paused import that a wait would have fixed;
- * a false NEGATIVE sends the operator round a retry loop against a quota that
- * is gone, spending money each time. The asymmetry is why these are matched
- * generously.
+ * The free-tier metric name (`…free_tier_requests`) is deliberately NOT a
+ * marker, though an earlier draft of this file used one. It names the TIER,
+ * not the WINDOW, and Google emits it in the per-MINUTE violation too: the
+ * body from the 225-receipt import carried `free_tier_requests` alongside
+ * `Please retry in 3.485s`, and the same image succeeded seconds later. Had
+ * that string been sufficient, a burst throttle would have been reported as a
+ * spent allowance and the import stopped after one receipt — which is the
+ * precise failure this file exists to prevent, in the precise case that
+ * motivated it.
+ *
+ * Neither direction of error is cheap. A false negative sends the operator
+ * round a retry loop against a quota that is gone; a false positive tells him
+ * to go and enable billing he does not need, and stops an import that waiting
+ * would have completed. So the classification rests on evidence that actually
+ * distinguishes the two, and where the provider states a window directly (see
+ * the retry hint below) that statement wins.
  */
 const QUOTA_EXHAUSTED_MARKERS: readonly RegExp[] = [
   /check your (?:plan|account)[^.]{0,60}billing/i,
-  /free[_\s-]?tier/i,
   /per[_\s-]?day|\bdaily\b|requests? per day/i,
 ];
 
@@ -210,13 +219,22 @@ export function classifyOcrFailure(status: number | undefined, bodyText: string)
   ) {
     const retryAfterMs = parseRetryAfterMs(body);
 
+    // A provider that names a moment to come back has NOT run out — it is
+    // pacing us, and it is the most direct evidence available about which
+    // failure this is. So a short hint settles the question on its own and
+    // outranks the wording markers, which describe the account rather than
+    // the window. Without this precedence, `…free_tier_requests` beside
+    // "retry in 3.485s" would read as a spent allowance.
+    const pacedByProvider = retryAfterMs !== undefined && retryAfterMs <= LONG_THROTTLE_MS;
+
     // A spent allowance is a different failure from a burst throttle, and gets
     // different advice. No retry hint is carried: the item route turns a hint
     // into an HTTP `retry-after`, which would invite the browser to keep
     // asking a provider that has already run out.
     if (
-      QUOTA_EXHAUSTED_MARKERS.some((marker) => marker.test(body)) ||
-      (retryAfterMs !== undefined && retryAfterMs > LONG_THROTTLE_MS)
+      !pacedByProvider &&
+      (QUOTA_EXHAUSTED_MARKERS.some((marker) => marker.test(body)) ||
+        (retryAfterMs !== undefined && retryAfterMs > LONG_THROTTLE_MS))
     ) {
       return new OcrError('quota-exhausted', QUOTA_EXHAUSTED_MESSAGE, { status });
     }
