@@ -617,6 +617,44 @@ describe('describeImportFailure', () => {
   });
 });
 
+
+/**
+ * Drive ONLY the armed rate-limit backoffs forward, until `settled()`.
+ *
+ * Two earlier shapes of this helper were flaky on CI and clean locally, both
+ * for the same reason: they advanced virtual time on a schedule of their own
+ * (a fixed slice, then a fixed slice per turn) rather than in response to the
+ * run actually arming a backoff. The watchdog is armed from t=0 — before the
+ * archive is even decompressed — so every advance made while no backoff is
+ * pending is spent against the watchdog's budget instead. A slow runner takes
+ * more turns to reach the first request, so it burns more of that budget, and
+ * eventually the watchdog fires and the run reports 'idle-timeout' for a stall
+ * that never happened. Machine speed decided the assertion.
+ *
+ * The fix is to make virtual time move ONLY on an observed event: wait (on the
+ * real event loop, which is free — nothing can time out while the injected
+ * clock is frozen) until a SHORT timer is actually armed, then advance by
+ * exactly that. The result no longer depends on how fast anything runs.
+ */
+async function drainBackoffs(
+  clock: ReturnType<typeof manualClock>,
+  settled: () => boolean,
+) {
+  const backoffArmed = () =>
+    clock.armedIn !== null && clock.armedIn <= RATE_LIMIT_MAX_WAIT_MS_FOR_TESTS;
+
+  for (;;) {
+    // Spin until the run either finishes or genuinely parks on a backoff.
+    await waitFor(() => settled() || backoffArmed());
+    if (settled()) return;
+    clock.advance(clock.armedIn as number);
+    await flushIo();
+  }
+}
+
+/** Mirror of the client's RATE_LIMIT_MAX_WAIT_MS clamp (30 s). */
+const RATE_LIMIT_MAX_WAIT_MS_FOR_TESTS = 30_000;
+
 describe('upstream OCR rate limiting', () => {
   /**
    * The failure this whole change exists to prevent.
@@ -665,10 +703,7 @@ describe('upstream OCR rate limiting', () => {
       return r;
     });
     await waitFor(() => calls >= 1);
-    for (let i = 0; i < 12 && !settled; i += 1) {
-      clock.advance(30_000);
-      await flushIo();
-    }
+    await drainBackoffs(clock, () => settled);
     const report = await tracked;
 
     // No receipt is accused of being unreadable — none was ever read.
@@ -716,17 +751,12 @@ describe('upstream OCR rate limiting', () => {
       return r;
     });
     await waitFor(() => calls >= 1);
-    // Advance by EXACTLY one backoff per turn. Over-advancing lets unconsumed
-    // virtual time pile up against the 180 s watchdog and makes the assertion
-    // race real IO — the coupling this file's ImportTimers docstring warns
-    // about. One backoff per turn keeps it deterministic under load.
-    for (let i = 0; i < 40 && !settled; i += 1) {
-      clock.advance(30_000);
-      await flushIo();
-    }
+    await drainBackoffs(clock, () => settled);
     const report = await tracked;
 
-    // The cause must survive: rate limited, NOT a spurious stall.
+    // The cause must survive: rate limited, NOT a spurious stall. (clock.fired
+    // counts every timer, backoff sleeps included, so it cannot stand in for
+    // "the watchdog stayed quiet" — the reason IS that assertion.)
     expect(report.interruptedReason).toBe('ocr-rate-limited');
   });
 
