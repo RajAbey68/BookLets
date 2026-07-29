@@ -13,6 +13,7 @@
  * proper Decimal handling; repeating figures here would just create a second
  * place for them to be wrong.
  */
+import { FISCAL_PERIOD_PAGE_PATH } from './fiscal-period';
 import { parkReasonLabel } from './park-reason-labels';
 
 /**
@@ -68,6 +69,15 @@ export interface ActionCentreInputs {
   recentEvents: ActionCentreEvent[];
   /** Injected so relative times are deterministic under test. */
   now: Date;
+  /**
+   * True when an OPEN accounting period covers today.
+   *
+   * When it is false NOTHING can be recorded — every receipt import fails at
+   * the ledger — so this is the one condition that outranks approvals on the
+   * panel. It is a fact about the org, not a count, because the fix is a
+   * single act (open a period), not a queue to work through.
+   */
+  hasOpenPeriodForToday: boolean;
 }
 
 /**
@@ -150,6 +160,7 @@ function describeEvent(event: ActionCentreEvent): string {
 
 /**
  * The priority ladder, top first:
+ *   0. no open accounting period       → urgent; nothing else can proceed
  *   1. drafts awaiting approval        → urgent, links to the consensus queue
  *   2. staged receipts ready to import → attention
  *   3. parked receipts by reason       → attention (shared park-reason wording)
@@ -158,6 +169,19 @@ function describeEvent(event: ActionCentreEvent): string {
  */
 export function deriveActionItems(inputs: ActionCentreInputs): ActionItem[] {
   const items: ActionItem[] = [];
+
+  // Above everything else: with no open accounting period the ledger refuses
+  // every entry, so approving, importing and feeding into the books are all
+  // dead ends until this is fixed. Worded as a consequence ("no receipt can be
+  // imported") rather than as a rule, because the person reading it does not
+  // know what a fiscal period is — that is precisely why the books stalled.
+  if (!inputs.hasOpenPeriodForToday) {
+    items.push({
+      priority: 'urgent',
+      text: 'Your books have no open accounting period — no receipt can be imported until you open one.',
+      href: FISCAL_PERIOD_PAGE_PATH,
+    });
+  }
 
   if (inputs.draftsAwaitingApproval > 0) {
     const n = inputs.draftsAwaitingApproval;

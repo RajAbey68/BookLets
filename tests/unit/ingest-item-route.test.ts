@@ -32,6 +32,10 @@ const mockDeps = {
     cashAccountId: 'acct_cash',
   })),
   recordEvidence: vi.fn(async () => {}),
+  // The books are open: the fiscal-period pre-flight (which now runs before any
+  // OCR spend) has its own suite — these route tests are about transport.
+  hasAnyOpenFiscalPeriod: vi.fn(async () => true),
+  hasOpenFiscalPeriodFor: vi.fn(async () => true),
 };
 // The rate limiter is real (its behaviour is under test); only the prisma/OCR
 // backed deps are replaced, so no unit test touches a live DB or the OCR

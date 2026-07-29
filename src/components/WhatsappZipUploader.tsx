@@ -17,6 +17,7 @@ import {
   type WhatsappImportReport,
 } from '../lib/whatsapp-import-client';
 import { describeElapsed } from '../lib/upload-limits';
+import { FISCAL_PERIOD_PAGE_PATH } from '../lib/fiscal-period';
 
 /**
  * Imports a WhatsApp finance/petty-cash export (.zip of _chat.txt + receipt
@@ -72,6 +73,42 @@ function interruptedResult(
   report: WhatsappImportReport,
 ): ZipUploadResult {
   const total = report.imageCount + report.textCount;
+
+  // A rate-limited run gets its own heading and its own first sentence. The
+  // operator's next action is "wait, then re-run", and — critically — he must
+  // NOT be told his receipts were unreadable, go hunting for bad photos, or
+  // re-shoot them. Nothing was wrong with them; the provider was throttling.
+  if (report.interruptedReason === 'ocr-rate-limited') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Paused — OCR service is rate limited',
+      message:
+        `The import paused after ${report.attempted} of ${total} files because the OCR service ` +
+        `hit its rate limit. Your receipts are fine — they were not read, not rejected. ` +
+        `${summary.message} ` +
+        'Wait a minute or two and upload the same export again to carry on where it stopped — ' +
+        'receipts already imported are skipped, never duplicated.',
+    };
+  }
+
+  // The service is down or its credentials are rejected. Same reassurance about
+  // the receipts, but different advice: waiting may not be enough, so say who
+  // can fix it rather than sending the operator round a retry loop.
+  if (report.interruptedReason === 'ocr-unavailable') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Stopped — OCR service is unavailable',
+      message:
+        `The import stopped after ${report.attempted} of ${total} files because the receipt-reading ` +
+        `service could not be reached. Your receipts are fine — they were not read, not rejected. ` +
+        `${summary.message} ` +
+        'Try again shortly; if it keeps happening the OCR service needs attention from an ' +
+        'administrator. Whatever already imported is safe, and re-uploading never duplicates it.',
+    };
+  }
+
   const lead =
     report.interruptedReason === 'idle-timeout'
       ? `The import stalled after ${report.attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging.`
@@ -86,7 +123,14 @@ function interruptedResult(
   };
 }
 
-export const WhatsappZipUploader: React.FC = () => {
+/**
+ * `booksOpen: false` means the organisation has no open accounting period, so
+ * the ledger would refuse every receipt in the archive. The uploader then
+ * offers the fix instead of taking an upload it cannot use — the earliest
+ * possible point to fail, before the archive is even expanded and long before
+ * any OCR is paid for. The server enforces the same rule independently.
+ */
+export const WhatsappZipUploader: React.FC<{ booksOpen?: boolean }> = ({ booksOpen = true }) => {
   const [status, setStatus] = useState<UploaderStatus>('IDLE');
   const [result, setResult] = useState<ZipUploadResult | null>(null);
   const [progress, setProgress] = useState<ZipProgress | null>(null);
@@ -159,6 +203,26 @@ export const WhatsappZipUploader: React.FC = () => {
       setStatus('ERROR');
     }
   };
+
+  if (!booksOpen) {
+    return (
+      <div className="glass-card">
+        <div className="uploader">
+          <div className="uploader-icon">
+            <IconAlert />
+          </div>
+          <h3 className="uploader-title">Importing is paused</h3>
+          <p className="uploader-body">
+            Your books have no open accounting period, so every receipt would be refused.
+            Open one — it takes one click — and this uploader comes back.
+          </p>
+          <Link href={FISCAL_PERIOD_PAGE_PATH} className="btn btn-primary">
+            Open an accounting period
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cardClass}>

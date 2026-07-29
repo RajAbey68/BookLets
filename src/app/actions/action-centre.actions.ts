@@ -62,7 +62,8 @@ export async function fetchActionCentre(): Promise<ActionCentreData> {
 
     const { organizationId } = resolved.context;
 
-    const [draftsAwaitingApproval, staging, recentEvents] = await Promise.all([
+    const now = new Date();
+    const [draftsAwaitingApproval, staging, recentEvents, openPeriodForToday] = await Promise.all([
       prisma.journalEntry.count({ where: { organizationId, status: 'DRAFT' } }),
       fetchOcrStagingSummary(),
       prisma.evidenceLog.findMany({
@@ -70,6 +71,20 @@ export async function fetchActionCentre(): Promise<ActionCentreData> {
         orderBy: { createdAt: 'desc' },
         take: EVIDENCE_SLICE,
         select: { eventType: true, createdAt: true, description: true, payload: true },
+      }),
+      // Exactly the lookup LedgerService.checkFiscalPeriod performs. A
+      // rejection lands in the catch below and degrades the whole panel: the
+      // alternative — treating an unreadable table as "no period" — would pin
+      // a false blocker to the dashboard during any outage.
+      prisma.fiscalPeriod.findFirst({
+        where: {
+          organizationId,
+          startDate: { lte: now },
+          endDate: { gte: now },
+          isClosed: false,
+          locked: false,
+        },
+        select: { id: true },
       }),
     ]);
 
@@ -87,7 +102,8 @@ export async function fetchActionCentre(): Promise<ActionCentreData> {
         draftsAwaitingApproval,
         staging,
         recentEvents,
-        now: new Date(),
+        now,
+        hasOpenPeriodForToday: openPeriodForToday !== null,
       }),
     };
   } catch (error) {

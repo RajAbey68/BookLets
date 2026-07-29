@@ -34,6 +34,8 @@ function makeInputs(overrides: Partial<ActionCentreInputs> = {}): ActionCentreIn
     staging: { available: true, importable: 0, parked: [] },
     recentEvents: [],
     now: NOW,
+    // Default: the books are open. The blocker line has its own cases below.
+    hasOpenPeriodForToday: true,
     ...overrides,
   };
 }
@@ -59,6 +61,30 @@ describe('formatRelativeTime', () => {
 });
 
 // ─── priority rules ───────────────────────────────────────────────────────────
+
+describe('deriveActionItems — the no-open-period blocker', () => {
+  it('leads with it: nothing else on the panel can happen until it is fixed', () => {
+    const items = deriveActionItems(
+      makeInputs({ hasOpenPeriodForToday: false, draftsAwaitingApproval: 3 }),
+    );
+    expect(items[0].priority).toBe('urgent');
+    expect(items[0].text).toMatch(/accounting period/i);
+    expect(items[0].href).toBe('/periods');
+    // Approvals still appear — they are just no longer the first thing.
+    expect(items[1].text).toBe('3 entries await your approval');
+  });
+
+  it('explains the consequence in the operator\'s own terms, not the ledger\'s', () => {
+    const [item] = deriveActionItems(makeInputs({ hasOpenPeriodForToday: false }));
+    expect(item.text).toMatch(/receipt/i);
+    expect(item.text).not.toMatch(/fiscal|checkFiscalPeriod|DRAFT/i);
+  });
+
+  it('says nothing at all when a period is open — no permanent nagging', () => {
+    const items = deriveActionItems(makeInputs({ hasOpenPeriodForToday: true }));
+    expect(items).toEqual([{ priority: 'info', text: 'All caught up — nothing needs you.' }]);
+  });
+});
 
 describe('deriveActionItems — rules', () => {
   it('surfaces drafts awaiting approval as the urgent item, linked to the queue', () => {
@@ -370,6 +396,10 @@ interface SetupOverrides {
   evidenceFails?: boolean;
   /** fetchOcrStagingSummary itself rejects (rather than degrading politely). */
   stagingRejects?: boolean;
+  /** No OPEN FiscalPeriod covers today — the production blocker state. */
+  noOpenPeriod?: boolean;
+  /** prisma.fiscalPeriod.findFirst rejects. */
+  periodLookupFails?: boolean;
   /** The summary fetchOcrStagingSummary resolves with. */
   staging?: ReturnType<typeof stagingUnavailable> | typeof STAGING_OK;
 }
@@ -386,6 +416,11 @@ function setup(overrides: SetupOverrides = {}) {
       findMany: overrides.evidenceFails
         ? vi.fn().mockRejectedValue(new Error('evidence log unreadable'))
         : vi.fn().mockResolvedValue([EVIDENCE_ROW]),
+    },
+    fiscalPeriod: {
+      findFirst: overrides.periodLookupFails
+        ? vi.fn().mockRejectedValue(new Error('db down'))
+        : vi.fn().mockResolvedValue(overrides.noOpenPeriod ? null : { id: 'fp-1' }),
     },
   };
   const setRlsOrgContext = vi.fn().mockResolvedValue(undefined);
@@ -420,6 +455,33 @@ async function importAction() {
 const DEGRADED = { unavailable: true, items: [] };
 
 beforeEach(() => vi.resetModules());
+
+describe('fetchActionCentre — the fiscal-period blocker', () => {
+  it('asks whether an OPEN period covers today, scoped to the session org', async () => {
+    const { prisma } = setup({ noOpenPeriod: true });
+    const { fetchActionCentre } = await importAction();
+
+    const result = await fetchActionCentre();
+
+    expect(prisma.fiscalPeriod.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          organizationId: ORG,
+          isClosed: false,
+          locked: false,
+        }),
+      }),
+    );
+    expect(result.items[0].href).toBe('/periods');
+  });
+
+  it('degrades the panel rather than claiming the books are shut when the lookup fails', async () => {
+    setup({ periodLookupFails: true });
+    const { fetchActionCentre } = await importAction();
+
+    expect(await fetchActionCentre()).toEqual(DEGRADED);
+  });
+});
 
 describe('fetchActionCentre', () => {
   it('gathers org-scoped inputs: DRAFT count, staging summary, bounded evidence slice', async () => {

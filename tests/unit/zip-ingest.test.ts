@@ -123,6 +123,11 @@ function makeDeps(overrides: Partial<ZipIngestDeps> = {}): ZipIngestDeps & {
   const postedInputs: JournalEntryInput[] = [];
   let n = 0;
   const deps: ZipIngestDeps = {
+    // Default: the books are open. The fiscal-period pre-flight has its own
+    // suite (ingest-fiscal-period-preflight.test.ts); here it must simply not
+    // interfere with the guards these tests are about.
+    hasAnyOpenFiscalPeriod: vi.fn(async () => true),
+    hasOpenFiscalPeriodFor: vi.fn(async () => true),
     ocr: vi.fn(async () => OCR_RESULT),
     postEntry: vi.fn(async (input: JournalEntryInput) => {
       postedInputs.push(input);

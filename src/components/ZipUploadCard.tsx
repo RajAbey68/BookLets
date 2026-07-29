@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import { FISCAL_PERIOD_PAGE_PATH } from '@/lib/fiscal-period';
 import { preflightExpandedZipFile } from '@/lib/zip-upload-result';
 import { describeElapsed } from '@/lib/upload-limits';
 import {
@@ -47,7 +49,15 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
  * inside importWhatsappExport, which ends a silent run instead of leaving this
  * card on "Uploading…" with the file picker disabled.
  */
-export default function ZipUploadCard() {
+/**
+ * `booksOpen: false` means the organisation has no open accounting period, so
+ * the ledger would refuse every receipt in the archive. The card then refuses
+ * to start at all — the earliest possible point to fail, before the browser
+ * even expands the zip and long before any OCR is paid for. The server still
+ * enforces the same rule (ingest-item.ts / zip-ingest.ts); this is the part
+ * that saves the operator the wasted twenty minutes.
+ */
+export default function ZipUploadCard({ booksOpen = true }: { booksOpen?: boolean }) {
   const [status, setStatus] = useState<UploadStatus>('IDLE');
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<UploadReport | null>(null);
@@ -139,6 +149,21 @@ export default function ZipUploadCard() {
   };
 
   const busy = status === 'UPLOADING';
+
+  if (!booksOpen) {
+    return (
+      <div className="glass-card">
+        <h3 style={{ fontSize: '1rem', marginBottom: '0.75rem' }}>Upload receipts zip</h3>
+        <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
+          Importing is paused: your books have no open accounting period, so every receipt
+          would be refused. Open one — it takes one click — and this uploader comes back.
+        </p>
+        <Link href={FISCAL_PERIOD_PAGE_PATH} className="btn btn-primary">
+          Open an accounting period
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="glass-card">

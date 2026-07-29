@@ -26,6 +26,8 @@
 import AdmZip from 'adm-zip';
 import { createHash } from 'node:crypto';
 import { assertImageMagicBytes, UploadGuardError } from './upload-guard';
+import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { OcrError } from './ocr-errors';
 import { JournalStatus, type JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -121,7 +123,10 @@ export type ZipIngestGuardCode =
   | 'TOTAL_SIZE_EXCEEDED'
   | 'PATH_TRAVERSAL'
   | 'ZIP_BOMB'
-  | 'TOO_MANY_IMAGES';
+  | 'TOO_MANY_IMAGES'
+  | 'NO_FISCAL_PERIOD'
+  /** The OCR provider is rate limiting or rejecting us — not a bad archive. */
+  | 'OCR_UNAVAILABLE';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
@@ -236,6 +241,20 @@ export interface ZipIngestDeps {
   findExistingIdempotencyKeys: (organizationId: string, keys: string[]) => Promise<Set<string>>;
   resolveLedgerAccounts: (organizationId: string) => Promise<ResolvedLedgerAccounts>;
   recordEvidence: (input: EvidenceInput) => Promise<void>;
+  /**
+   * True when the organisation has ANY open (not closed, not locked)
+   * FiscalPeriod. Consulted once per archive, BEFORE the OCR fan-out: a
+   * fresh organisation has none, and without this the whole archive was
+   * extracted, paid for, and then rejected entry by entry at the ledger.
+   */
+  hasAnyOpenFiscalPeriod: (organizationId: string) => Promise<boolean>;
+  /**
+   * True when an open FiscalPeriod covers `date` — the same test
+   * LedgerService.checkFiscalPeriod applies. Consulted per receipt once OCR
+   * has read its date, so the failure names the date rather than repeating
+   * the ledger's raw error.
+   */
+  hasOpenFiscalPeriodFor: (organizationId: string, date: Date) => Promise<boolean>;
 }
 
 // ─── pure helpers ─────────────────────────────────────────────────────────────
@@ -549,6 +568,18 @@ export async function ingestZip(
     );
   }
 
+  // Fiscal-period pre-flight (mirrors ocr-bridge.ts, which has always done
+  // this). An organisation with NO open accounting period cannot record any
+  // receipt at all, and checkFiscalPeriod would reject every one of them at
+  // postEntry — after the whole archive had been sent to OCR. Ask once, here,
+  // before a single byte is spent, and reject the archive with copy that says
+  // what to do about it. Skipped entirely when there is nothing fresh to post:
+  // a chat-only or fully-deduped archive touches no ledger, so a missing
+  // period is not that import's problem.
+  if (fresh.length > 0 && !(await deps.hasAnyOpenFiscalPeriod(ctx.organizationId))) {
+    throw new ZipIngestError('NO_FISCAL_PERIOD', NO_OPEN_PERIOD_MESSAGE);
+  }
+
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 
   const processFreshImage = async ({
@@ -562,6 +593,17 @@ export async function ingestZip(
     try {
       ocrResult = await deps.ocr(image.data.toString('base64'));
     } catch (err) {
+      // A SERVICE failure says nothing about this receipt — the service never
+      // read it. Marking it 'ocr' would report a perfectly good photo as
+      // unreadable, and would do so for every image left in the archive. Abort
+      // instead; entries already created stay, and re-running dedupes them by
+      // content hash and resumes from here.
+      //
+      // `retryable || auth` rather than a list of kinds — see the matching
+      // guard in ingest-item.ts for why enumerating kinds is the bug.
+      if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
+        throw new ZipIngestError('OCR_UNAVAILABLE', err.message);
+      }
       failures.push({
         name: image.name,
         stage: 'ocr',
@@ -585,10 +627,25 @@ export async function ingestZip(
       return;
     }
 
+    // The receipt's own date is only knowable now. Ask the ledger's question
+    // before the post so the operator is told WHICH date is uncovered, instead
+    // of receiving checkFiscalPeriod's "No fiscal period defined for the date
+    // 7/12/2026" — which names no action and, read outside the US, names the
+    // wrong month.
+    const entryDate = ocrDateOrNow(extraction.date);
+    if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
+      failures.push({
+        name: image.name,
+        stage: 'ledger',
+        error: dateOutsidePeriodsMessage(entryDate),
+      });
+      return;
+    }
+
     try {
       const entry = await deps.postEntry({
         organizationId: ctx.organizationId,
-        date: ocrDateOrNow(extraction.date),
+        date: entryDate,
         memo: `ZIP-INGEST: ${extraction.vendorName} [${extraction.categorySuggestion}] — ${image.name}`,
         // DRAFT regardless of confidence — four-eyes promotes, never this module.
         status: ZIP_INGEST_JOURNAL_STATUS,

@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import ActionCentre from '@/components/ActionCentre';
 import { fetchDraftReviewQueue } from '@/app/actions/approval.actions';
+import { fetchFiscalPeriods } from '@/app/actions/fiscal-period.actions';
 import { fetchOcrStagingSummary } from '@/app/actions/sandbox.actions';
 import DraftReviewQueue from '@/components/DraftReviewQueue';
 import FeedIntoBooksButton from '@/components/FeedIntoBooksButton';
@@ -24,10 +25,18 @@ const SANDBOX_QUEUE_CAP = 25;
  * the exact same 4-eyes actions as /review, reused, not duplicated.
  */
 export default async function SandboxPage() {
-  const [staging, { items }] = await Promise.all([
+  const [staging, { items }, periods] = await Promise.all([
     fetchOcrStagingSummary(),
     fetchDraftReviewQueue({ limit: SANDBOX_QUEUE_CAP }),
+    fetchFiscalPeriods(),
   ]);
+
+  // No open accounting period → the ledger refuses every receipt, so the zip
+  // uploader offers the fix instead of taking an upload it cannot use. On an
+  // outage (`unavailable`) the uploader is left ENABLED: a failed lookup is not
+  // evidence the books are shut, and disabling on it would block a working
+  // import for the wrong reason.
+  const booksOpen = periods.coversToday || periods.unavailable;
 
   return (
     <>
@@ -55,7 +64,7 @@ export default async function SandboxPage() {
         <strong>CSV</strong> uploads are bank statements.
       </p>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem', marginBottom: '2.5rem' }}>
-        <ZipUploadCard />
+        <ZipUploadCard booksOpen={booksOpen} />
 
         <StatementUploadCard />
 
