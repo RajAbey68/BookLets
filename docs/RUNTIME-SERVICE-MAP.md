@@ -103,6 +103,12 @@ ingest path (`zip-ingest.deps.ts:12`). Note `automation.service.ts` *also* has a
 second, independent SymbiOS fallback at `:64` (its own `SYMBIOS_URL` constant) — see
 drift #1 below.
 
+> **⚠️ The DevServer is NOT a live OCR backend the app calls.** BookLets' runtime OCR
+> goes to gamma (→ SymbiOS). The DevServer is an **offline batch producer**: its
+> `ocr-pipeline-*.py` writes results into the `raj_fin_track.ocr_receipts` staging table,
+> which BookLets later *reads* via `/api/ingest/ocr-bridge`. The app never calls the
+> DevServer. Full two-topology breakdown: `docs/ARCHITECTURE-OCR-PIPELINE.md`.
+
 ## 6. Ko Lake cube integration
 
 `src/lib/kolake-cube.ts` (RAJ-649) reads `scrap.cube_bi` from a **separate** Supabase
@@ -124,6 +130,14 @@ live connection. This is analytics only — it never writes to BookLets' ledger.
 | `OCR_BRIDGE_ORG_ID` | ❌ | no | staging bridge fails closed |
 | `NEXT_PUBLIC_KOLAKE_SUPABASE_URL` / `_ANON_KEY` | ❌ | no | analytics degrades gracefully |
 | `EXTERNAL_FETCH_TIMEOUT_MS` | ❌ | no | default 30 000 ms (`src/lib/http.ts:2`) |
+
+> **Prod-config caveat (honest):** `.env` / `.env.prod` are **gitignored**, so the
+> *actual* Vercel production values of `OCR_BRIDGE_ORG_ID` / `SYMBIOS_API_KEY` cannot be
+> confirmed from this repo. The code paths are **fails-closed by design** — if
+> `OCR_BRIDGE_ORG_ID` is unset in Vercel, `/api/ingest/ocr-bridge` returns 503 and the
+> offline OCR path is inert; if `SYMBIOS_API_KEY` is unset, live OCR stalls at
+> `stage:'ocr'` when gamma is down. Verify live status in the Vercel dashboard
+> (`booklets` project, Production scope), not from the repo.
 
 ---
 
