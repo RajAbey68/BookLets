@@ -56,6 +56,7 @@ import {
   type ResolvedLedgerAccounts,
 } from './zip-ingest';
 import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { OcrError } from './ocr-errors';
 import type { JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -390,6 +391,28 @@ async function ingestImage(
   try {
     ocrResult = await deps.ocr(data.toString('base64'));
   } catch (err) {
+    // A SERVICE failure is not a verdict on this receipt — the service never
+    // looked at it. Recording it as `failed` was the bug behind "225 couldn't
+    // be read": it wrote 225 evidence rows blaming photographs that were
+    // perfectly legible, and consumed the whole run in one doomed pass instead
+    // of pausing and resuming.
+    //
+    // The condition is `retryable || auth`, not a list of kinds: every kind
+    // OcrError marks retryable (rate-limit, timeout, unavailable) is by
+    // definition the service's problem, and auth is the service's problem that
+    // merely cannot be waited out. Enumerating kinds here let 'timeout' and
+    // 'unavailable' keep blaming the photo — the exact failure this removes for
+    // 'rate-limit'. Note these have ALREADY exhausted extractReceipt's internal
+    // retries, so reaching this line means the service is genuinely down, not
+    // that one request was unlucky.
+    //
+    // Raising means: no evidence row (nothing happened to this receipt), the
+    // route answers 429 or 503, and the browser stops the run. Re-running
+    // resumes exactly here, because dedup is keyed on content and this entry
+    // never got a key.
+    if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
+      throw err;
+    }
     return {
       ...base,
       kind: 'image',

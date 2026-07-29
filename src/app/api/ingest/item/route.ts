@@ -7,6 +7,7 @@ import {
   isValidBatchId,
 } from '@/lib/ingest-item';
 import { buildDefaultItemIngestDeps, itemRateLimiter } from '@/lib/ingest-item.deps';
+import { OcrError } from '@/lib/ocr-errors';
 
 export const dynamic = 'force-dynamic';
 /**
@@ -165,6 +166,49 @@ export async function POST(request: Request) {
     });
     return NextResponse.json({ item });
   } catch (err) {
+    // The OCR provider throttled us, or rejected our credentials. Neither is a
+    // fact about this receipt, so it must not come back as a per-item verdict
+    // the client records as "unreadable".
+    //
+    // A rate limit is answered with a real 429 plus retry-after, which is
+    // exactly what uploadItem() in whatsapp-import-client.ts already knows how
+    // to pace itself against — the backoff machinery existed, the server just
+    // never spoke the status that triggers it. Re-running the import resumes
+    // where it stopped: dedup is keyed on content, and a throttled entry never
+    // got a journal entry or an evidence row.
+    if (err instanceof OcrError && err.kind === 'rate-limit') {
+      // Floor keeps the header valid; the ceiling stops a long provider hint
+      // from parking the browser mid-import. A client that waits 60 s and
+      // retries is fine; one that waits five minutes looks hung.
+      const retryAfterSeconds = Math.min(
+        60,
+        Math.max(1, Math.ceil((err.retryAfterMs ?? 10_000) / 1000)),
+      );
+      console.warn(
+        `[ingest/item] OCR rate limited org=${encodeURIComponent(organizationId)} retryAfter=${retryAfterSeconds}s`,
+      );
+      return NextResponse.json(
+        { error: err.message, code: 'OCR_RATE_LIMITED' },
+        { status: 429, headers: { 'retry-after': String(retryAfterSeconds) } },
+      );
+    }
+    if (err instanceof OcrError) {
+      // Timeout / unavailable / auth: the service is the problem, and it has
+      // already exhausted its own retries. 503 with NO retry-after — the run is
+      // over, and inviting a generic proxy or client retry would only produce
+      // more of the same. The browser stops on the code and tells the operator
+      // to re-upload later; nothing was recorded against any receipt.
+      console.error(
+        `[ingest/item] OCR ${encodeURIComponent(err.kind)} org=${encodeURIComponent(organizationId)}: ${err.message}`,
+      );
+      return NextResponse.json(
+        {
+          error: err.message,
+          code: err.kind === 'auth' ? 'OCR_AUTH_FAILED' : 'OCR_UNAVAILABLE',
+        },
+        { status: 503 },
+      );
+    }
     if (err instanceof ItemIngestError) {
       // CodeQL js/log-injection: encode interpolated values so a crafted
       // filename cannot forge extra log lines.

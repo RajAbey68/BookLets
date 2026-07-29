@@ -447,9 +447,11 @@ describe('rate-limit backoff', () => {
 
     expect(report.failures).toHaveLength(1);
     expect(report.failures[0].stage).toBe('upload');
-    // Three attempts for the item (+ at most the batch close) — bounded, not a
-    // retry loop that could hammer a struggling server forever.
-    expect(callCount(fetchImpl)).toBeLessThanOrEqual(4);
+    // Five attempts for the item (+ at most the batch close) — bounded, not a
+    // retry loop that could hammer a struggling server forever. Raised from
+    // three when upstream OCR throttling began surfacing as a real 429: a
+    // per-minute provider quota is worth riding out, not giving up on.
+    expect(callCount(fetchImpl)).toBeLessThanOrEqual(6);
   });
 
   it('observes an abort DURING the backoff wait instead of sleeping it out', async () => {
@@ -612,5 +614,199 @@ describe('describeImportFailure', () => {
     const out = describeImportFailure(new Error('boom'));
     expect(out.ok).toBe(false);
     expect(out.message.length).toBeGreaterThan(0);
+  });
+});
+
+
+/**
+ * Drive ONLY the armed rate-limit backoffs forward, until `settled()`.
+ *
+ * Two earlier shapes of this helper were flaky on CI and clean locally, both
+ * for the same reason: they advanced virtual time on a schedule of their own
+ * (a fixed slice, then a fixed slice per turn) rather than in response to the
+ * run actually arming a backoff. The watchdog is armed from t=0 — before the
+ * archive is even decompressed — so every advance made while no backoff is
+ * pending is spent against the watchdog's budget instead. A slow runner takes
+ * more turns to reach the first request, so it burns more of that budget, and
+ * eventually the watchdog fires and the run reports 'idle-timeout' for a stall
+ * that never happened. Machine speed decided the assertion.
+ *
+ * The fix is to make virtual time move ONLY on an observed event: wait (on the
+ * real event loop, which is free — nothing can time out while the injected
+ * clock is frozen) until a SHORT timer is actually armed, then advance by
+ * exactly that. The result no longer depends on how fast anything runs.
+ */
+async function drainBackoffs(
+  clock: ReturnType<typeof manualClock>,
+  settled: () => boolean,
+) {
+  const backoffArmed = () =>
+    clock.armedIn !== null && clock.armedIn <= RATE_LIMIT_MAX_WAIT_MS_FOR_TESTS;
+
+  for (;;) {
+    // Spin until the run either finishes or genuinely parks on a backoff.
+    await waitFor(() => settled() || backoffArmed());
+    if (settled()) return;
+    clock.advance(clock.armedIn as number);
+    await flushIo();
+  }
+}
+
+/** Mirror of the client's RATE_LIMIT_MAX_WAIT_MS clamp (30 s). */
+const RATE_LIMIT_MAX_WAIT_MS_FOR_TESTS = 30_000;
+
+describe('upstream OCR rate limiting', () => {
+  /**
+   * The failure this whole change exists to prevent.
+   *
+   * When the OCR PROVIDER throttles, the receipts were never looked at. The
+   * old behaviour recorded each one as a per-item failure, which surfaced as
+   * "225 couldn't be read (OCR service could not read them)" — a verdict on
+   * 225 photographs that were all perfectly legible, and an instruction to go
+   * fix something that was not broken.
+   *
+   * The run must instead STOP, keep whatever genuinely landed, and say why.
+   */
+  it('stops the run instead of blaming every remaining receipt', async () => {
+    const clock = manualClock();
+    let calls = 0;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) {
+        return new Response('{}', { status: 200 });
+      }
+      calls += 1;
+      // The chat transcript goes through; every receipt is throttled upstream.
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ item: { name: '_chat.txt', kind: 'text', outcome: 'created' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          error: 'The OCR service is rate limited right now.',
+          code: 'OCR_RATE_LIMITED',
+        }),
+        { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '30' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const run = importWhatsappExport(exportZip(8), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    await waitFor(() => calls >= 1);
+    await drainBackoffs(clock, () => settled);
+    const report = await tracked;
+
+    // No receipt is accused of being unreadable — none was ever read.
+    expect(report.failures).toHaveLength(0);
+    // The run is reported as stopped, with the specific, actionable reason.
+    expect(report.interrupted).toBe(true);
+    expect(report.interruptedReason).toBe('ocr-rate-limited');
+    expect(report.interruptedDetail).toMatch(/rate limited/i);
+    // It stopped early rather than grinding through all 8 receipts.
+    expect(report.attempted).toBeLessThan(report.imageCount + report.textCount);
+  });
+
+  it('does not let a long backoff trip the inactivity watchdog', async () => {
+    // Regression: riding out a provider quota (up to 5 attempts against a
+    // clamped 60 s retry-after) outlasts the 3-minute watchdog. Without
+    // re-arming across a DELIBERATE wait, the run aborted as 'idle-timeout'
+    // and buried the one cause the operator can act on.
+    const clock = manualClock();
+    let calls = 0;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) return new Response('{}', { status: 200 });
+      calls += 1;
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ item: { name: '_chat.txt', kind: 'text', outcome: 'created' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(
+        JSON.stringify({ error: 'rate limited', code: 'OCR_RATE_LIMITED' }),
+        { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '60' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const run = importWhatsappExport(exportZip(4), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+      idleTimeoutMs: 180_000,
+    });
+
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    await waitFor(() => calls >= 1);
+    await drainBackoffs(clock, () => settled);
+    const report = await tracked;
+
+    // The cause must survive: rate limited, NOT a spurious stall. (clock.fired
+    // counts every timer, backoff sleeps included, so it cannot stand in for
+    // "the watchdog stayed quiet" — the reason IS that assertion.)
+    expect(report.interruptedReason).toBe('ocr-rate-limited');
+  });
+
+  it('stops the run when the OCR service is unavailable (503), blaming no receipt', async () => {
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) return new Response('{}', { status: 200 });
+      return new Response(
+        JSON.stringify({ error: 'OCR service unreachable.', code: 'OCR_UNAVAILABLE' }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await importWhatsappExport(exportZip(6), { fetchImpl, concurrency: 1 });
+
+    expect(report.failures).toHaveLength(0);
+    expect(report.interrupted).toBe(true);
+    expect(report.interruptedReason).toBe('ocr-unavailable');
+  });
+
+  it('still reports an ordinary 429 from our own bucket as an upload failure', async () => {
+    // BookLets' own token bucket sends 429 WITHOUT the OCR code. That one is a
+    // genuine per-item transport failure and must keep its existing behaviour.
+    const clock = manualClock();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: 'Too many uploads at once', code: 'RATE_LIMITED' }), {
+          status: 429,
+        }),
+    ) as unknown as typeof fetch;
+
+    const run = importWhatsappExport(exportZip(0), {
+      fetchImpl,
+      concurrency: 1,
+      timers: clock.timers,
+    });
+
+    await waitFor(() => callCount(fetchImpl) >= 1);
+    let settled = false;
+    const tracked = run.then((r) => {
+      settled = true;
+      return r;
+    });
+    for (let i = 0; i < 8 && !settled; i += 1) {
+      clock.advance(30_000);
+      await flushIo();
+    }
+    const report = await tracked;
+
+    expect(report.interruptedReason).not.toBe('ocr-rate-limited');
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].stage).toBe('upload');
   });
 });

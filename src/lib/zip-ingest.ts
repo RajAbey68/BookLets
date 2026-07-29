@@ -27,6 +27,7 @@ import AdmZip from 'adm-zip';
 import { createHash } from 'node:crypto';
 import { assertImageMagicBytes, UploadGuardError } from './upload-guard';
 import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { OcrError } from './ocr-errors';
 import { JournalStatus, type JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -123,7 +124,9 @@ export type ZipIngestGuardCode =
   | 'PATH_TRAVERSAL'
   | 'ZIP_BOMB'
   | 'TOO_MANY_IMAGES'
-  | 'NO_FISCAL_PERIOD';
+  | 'NO_FISCAL_PERIOD'
+  /** The OCR provider is rate limiting or rejecting us — not a bad archive. */
+  | 'OCR_UNAVAILABLE';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
@@ -590,6 +593,17 @@ export async function ingestZip(
     try {
       ocrResult = await deps.ocr(image.data.toString('base64'));
     } catch (err) {
+      // A SERVICE failure says nothing about this receipt — the service never
+      // read it. Marking it 'ocr' would report a perfectly good photo as
+      // unreadable, and would do so for every image left in the archive. Abort
+      // instead; entries already created stay, and re-running dedupes them by
+      // content hash and resumes from here.
+      //
+      // `retryable || auth` rather than a list of kinds — see the matching
+      // guard in ingest-item.ts for why enumerating kinds is the bug.
+      if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
+        throw new ZipIngestError('OCR_UNAVAILABLE', err.message);
+      }
       failures.push({
         name: image.name,
         stage: 'ocr',

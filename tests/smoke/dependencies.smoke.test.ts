@@ -21,12 +21,39 @@ describe('live smoke — OCR (the dependency that was silently broken)', () => {
       body: JSON.stringify({ imageBase64: TINY_JPEG_B64, mode: 'receipt' }),
     });
     const text = await res.text();
+
+    // Quota exhaustion gets its own message. The service wraps the upstream
+    // 429 in its OWN 5xx, so without this the single most common real failure
+    // reads as "OCR is broken" and sends someone debugging the wrong thing.
+    // The provider's limit is the finding; the code is fine.
+    const rateLimited = /RESOURCE_EXHAUSTED|exceeded your current quota|\b429\b/i.test(text);
+    expect(
+      rateLimited,
+      `OCR is RATE LIMITED, not broken: ${OCR_URL} is out of provider quota. ` +
+        'The receipts and this code are fine — the API key behind the OCR ' +
+        `microservice needs a higher quota (billing enabled). Raw: ${text.slice(0, 200)}`,
+    ).toBe(false);
+
     expect(res.status, `OCR ${OCR_URL}/ocr -> ${res.status}: ${text.slice(0, 200)}`).toBe(200);
     expect(text, 'OCR returned a config/key error — the service has no API key set').not.toMatch(
       /GEMINI_API_KEY|api key .*not set|not set in environment/i,
     );
-    const body = JSON.parse(text);
-    expect(body.extraction, 'OCR 200 but response has no { extraction }').toBeTruthy();
+
+    // The service's real contract is { text, confidence }, where `text` is a
+    // JSON string of the extraction — NOT a top-level { extraction }. The old
+    // assertion checked for a key this endpoint has never returned, so it
+    // could not pass even against a perfectly healthy service, which is part
+    // of why the outage it exists to catch went unnoticed.
+    const body = JSON.parse(text) as { text?: unknown; confidence?: unknown };
+    expect(typeof body.text, `OCR 200 but response has no { text }: ${text.slice(0, 200)}`).toBe(
+      'string',
+    );
+    const extraction = JSON.parse(body.text as string) as Record<string, unknown>;
+    expect(extraction, 'OCR { text } did not parse into an extraction object').toBeTruthy();
+    expect(
+      Object.keys(extraction),
+      `extraction is missing the receipt fields: ${body.text}`,
+    ).toEqual(expect.arrayContaining(['vendorName', 'totalAmount']));
   });
 });
 
