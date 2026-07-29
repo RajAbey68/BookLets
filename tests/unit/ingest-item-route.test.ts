@@ -216,3 +216,77 @@ describe('guards', () => {
     expect(body.error).toMatch(/too many|slow down|rate/i);
   });
 });
+
+describe('OCR service failures are never a verdict on the receipt', () => {
+  /**
+   * The 225-receipt import failed because a provider fault was recorded against
+   * each receipt. The route's job is to say WHOSE problem it is, in a code the
+   * browser can act on, and to keep an evidence row off a receipt that nothing
+   * ever looked at.
+   */
+  async function ocrFailsWith(kind: string, message: string, retryAfterMs?: number) {
+    const { OcrError } = await import('../../src/lib/ocr-errors');
+    mockDeps.ocr.mockRejectedValueOnce(
+      new OcrError(kind as 'rate-limit', message, { retryAfterMs }),
+    );
+    return POST(itemRequest(jpeg()));
+  }
+
+  it('answers a short throttle with 429 + retry-after so the browser paces itself', async () => {
+    const res = await ocrFailsWith('rate-limit', 'The OCR service is rate limited right now.', 4000);
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get('retry-after')).toBe('4');
+    expect((await res.json()).code).toBe('OCR_RATE_LIMITED');
+    // Nothing was recorded against this receipt — it was never read.
+    expect(mockDeps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('answers an exhausted quota with 503 and NO retry-after', async () => {
+    // A 429 + retry-after is an instruction to try again shortly. When the
+    // allowance is spent that instruction is false, and obeying it burns more
+    // of a quota that is already gone. 503 with a distinct code stops the run.
+    const res = await ocrFailsWith('quota-exhausted', 'The API quota is used up.');
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBeNull();
+    expect((await res.json()).code).toBe('OCR_QUOTA_EXHAUSTED');
+    expect(mockDeps.postEntry).not.toHaveBeenCalled();
+    expect(mockDeps.recordEvidence).not.toHaveBeenCalled();
+  });
+
+  it('answers an outage with 503 OCR_UNAVAILABLE', async () => {
+    const res = await ocrFailsWith('unavailable', 'The OCR service could not be reached.');
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('OCR_UNAVAILABLE');
+  });
+
+  it('answers a credential rejection with 503 OCR_AUTH_FAILED', async () => {
+    const res = await ocrFailsWith('auth', 'The OCR service rejected our credentials.');
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe('OCR_AUTH_FAILED');
+  });
+
+  it('still reports a genuinely illegible receipt as that one receipt failing', async () => {
+    // The photo really was unreadable: a successful response with no amount.
+    // This one IS about the receipt, so it stays a per-item outcome and the
+    // rest of the run carries on.
+    mockDeps.ocr.mockResolvedValueOnce({
+      extraction: {
+        vendorName: 'Unknown',
+        date: '',
+        totalAmount: 0,
+        categorySuggestion: 'Other',
+        confidence: 0,
+      },
+    });
+    const res = await POST(itemRequest(jpeg()));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.item.outcome).toBe('failed');
+    expect(body.item.stage).toBe('ocr');
+  });
+});

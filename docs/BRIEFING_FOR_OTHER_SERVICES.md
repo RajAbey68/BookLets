@@ -234,8 +234,11 @@ Required environment:
 - **Node 20+** (per `next` 16.2 and `prisma` 7.6 engine requirements).
 - **Postgres** reachable via `DATABASE_URL` (loaded by `prisma.config.ts`).
   Required for runtime; `prisma validate` works without one.
-- **SymbiOS** receipt extraction: env `SYMBIOS_URL` (defaults to
-  `http://localhost:8080`).
+- **Receipt OCR**: env `OCR_MICROSERVICE_URL` (defaults to the gamma
+  deployment). There is exactly ONE provider — the former SymbiOS fallback was
+  removed on 2026-07-29 (never configured; `api.symbios.ai` is a parked domain
+  listed for sale). Do not reintroduce a second provider without a key, a
+  contract test, and validation of what it returns.
 - **Hostaway**: env `HOSTAWAY_CLIENT_ID` + `HOSTAWAY_CLIENT_SECRET` (or
   `HOSTAWAY_API_KEY` legacy fallback) + `HOSTAWAY_ACCOUNT_ID`. Without
   those, sync runs in mock mode unless `STRICT_HOSTAWAY=true` or

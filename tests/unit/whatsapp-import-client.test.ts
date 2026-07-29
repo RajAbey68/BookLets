@@ -760,6 +760,47 @@ describe('upstream OCR rate limiting', () => {
     expect(report.interruptedReason).toBe('ocr-rate-limited');
   });
 
+  it('stops on an exhausted quota after ONE attempt, without retrying it', async () => {
+    // Requirement D, stated as money: receipt 3 of 225 must not pay to discover
+    // what receipt 2 already learned. A spent allowance is answered with 503
+    // (not 429), so the backoff ladder is never entered — one request per
+    // in-flight worker, then the run stops.
+    let imageUploads = 0;
+    let calls = 0;
+    const fetchImpl = vi.fn(async (url: string | URL) => {
+      if (String(url).includes('/api/ingest/batch')) return new Response('{}', { status: 200 });
+      calls += 1;
+      // The chat transcript needs no OCR, so it lands as it would in production.
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({ item: { name: '_chat.txt', kind: 'text', outcome: 'created' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      imageUploads += 1;
+      return new Response(
+        JSON.stringify({
+          error:
+            'The receipt-reading service has used up its API quota, so it stopped reading receipts.',
+          code: 'OCR_QUOTA_EXHAUSTED',
+        }),
+        { status: 503, headers: { 'content-type': 'application/json' } },
+      );
+    }) as unknown as typeof fetch;
+
+    const report = await importWhatsappExport(exportZip(40), { fetchImpl, concurrency: 1 });
+
+    // ONE receipt attempted — not 40, and no retry of that one.
+    expect(imageUploads).toBe(1);
+    // Not a single receipt is accused of anything.
+    expect(report.failures).toHaveLength(0);
+    expect(report.interrupted).toBe(true);
+    expect(report.interruptedReason).toBe('ocr-quota-exhausted');
+    expect(report.interruptedDetail).toMatch(/quota/i);
+    // And the report can say honestly how many were never attempted.
+    expect(report.imageCount + report.textCount - report.attempted).toBeGreaterThan(35);
+  });
+
   it('stops the run when the OCR service is unavailable (503), blaming no receipt', async () => {
     const fetchImpl = vi.fn(async (url: string | URL) => {
       if (String(url).includes('/api/ingest/batch')) return new Response('{}', { status: 200 });

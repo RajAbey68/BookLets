@@ -1,4 +1,5 @@
 import type { ZipIngestReport, IngestFailure } from './zip-ingest';
+import type { ImportInterruptedReason } from './whatsapp-import-client';
 import {
   MAX_DIRECT_UPLOAD_BYTES,
   OVERSIZE_UPLOAD_HELP,
@@ -218,7 +219,15 @@ function extractReport(body: unknown): ZipIngestReport | null {
 function describeFailures(failures: IngestFailure[], failed: number): string {
   const stages = new Set(failures.map((f) => f.stage));
   if (stages.size > 1) return `${failed} could not be imported`;
-  if (stages.has('ocr')) return `${failed} couldn't be read (OCR service could not read them)`;
+  // `stage: 'ocr'` now means ONE thing: the service answered and the amount on
+  // that photo was not legible. Provider faults — throttling, a spent quota, an
+  // outage, rejected credentials — never reach this list at all: they stop the
+  // run and are reported as the service's problem, because they are not facts
+  // about any receipt. The old wording, "(OCR service could not read them)",
+  // described a service failure and was applied to 225 perfectly good photos,
+  // sending the operator to look at the one thing that was not broken.
+  if (stages.has('ocr'))
+    return `${failed} couldn't be read from the photo — enter those by hand`;
   if (stages.has('ledger')) return `${failed} couldn't be saved to the ledger`;
   if (stages.has('upload')) return `${failed} couldn't be uploaded (the request did not reach the server)`;
   return `${failed} could not be imported`;
@@ -270,6 +279,113 @@ function summarizeSuccess(r: ZipIngestReport): ZipUploadResult {
 
   // 4) At least one new draft landed.
   return { ...base, ok: true, title: 'Import complete', message: `${message} Review them before posting.`, showReviewLink: true };
+}
+
+/**
+ * Just enough of a WhatsappImportReport to write the copy for a run that
+ * stopped early. Narrowed to these four fields on purpose: this module is
+ * client-bundle-safe and must not pull in the transport (which imports
+ * zip-reader and its browser-only DecompressionStream).
+ */
+export interface InterruptedImport {
+  /** Items actually attempted before the run stopped. */
+  attempted: number;
+  /** Items the run intended to attempt (images + chat transcripts). */
+  total: number;
+  interruptedReason: ImportInterruptedReason | null;
+  /** The service's own one-line explanation, when there is one. */
+  interruptedDetail: string | null;
+}
+
+/**
+ * Operator-facing copy for a run that stopped before it finished.
+ *
+ * Lives here, next to the rest of the plain-language copy and away from React,
+ * because these sentences are the ENTIRE user-visible difference between the
+ * four ways an import can be cut short — and the one that was wrong sent a
+ * non-developer looking at his photographs for three days. They are testable
+ * only if they are not buried in a component.
+ *
+ * A run that stopped early still imported real drafts, so the counts are kept
+ * and the operator is told exactly how far it got and what to do about it.
+ */
+export function describeInterruptedImport(
+  summary: ZipUploadResult,
+  report: InterruptedImport,
+): ZipUploadResult {
+  const { attempted, total } = report;
+  const notAttempted = Math.max(0, total - attempted);
+
+  // The account's OCR quota is spent. This is the case that produced "225
+  // couldn't be read", and it is the one where the operator must NOT be told
+  // to wait and try again: the allowance is gone, the key is not his, and
+  // there is nothing he can do to read more receipts right now. Say that
+  // plainly instead of inventing a fix he cannot perform.
+  if (report.interruptedReason === 'ocr-quota-exhausted') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Stopped — the OCR service’s API quota is used up',
+      message:
+        `The import stopped after ${attempted} of ${total} files, and ${notAttempted} were not attempted. ` +
+        'Your receipts are fine — they were not read, and none was rejected. ' +
+        'The receipt-reading service has used up its API quota, which is an account limit on that ' +
+        'service’s own key, not anything about your photos or your books. It is raised by enabling ' +
+        'billing on that key; until then a large import cannot finish, however many times it is tried. ' +
+        `${summary.message} ` +
+        'Whatever already imported is safe, and re-uploading the same export later carries on where ' +
+        'it stopped — receipts already imported are skipped, never duplicated.',
+    };
+  }
+
+  // A passing throttle. Here — and only here — "wait, then re-run" is honest.
+  // He must still NOT be told his receipts were unreadable, go hunting for bad
+  // photos, or re-shoot them. Nothing was wrong with them.
+  if (report.interruptedReason === 'ocr-rate-limited') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Paused — OCR service is rate limited',
+      message:
+        `The import paused after ${attempted} of ${total} files because the OCR service ` +
+        `hit its rate limit; ${notAttempted} were not attempted. ` +
+        'Your receipts are fine — they were not read, not rejected. ' +
+        `${summary.message} ` +
+        'Wait a minute or two and upload the same export again to carry on where it stopped — ' +
+        'receipts already imported are skipped, never duplicated.',
+    };
+  }
+
+  // The service is down or its credentials are rejected. Same reassurance about
+  // the receipts, but different advice again: waiting may not be enough, so say
+  // who can fix it rather than sending the operator round a retry loop.
+  if (report.interruptedReason === 'ocr-unavailable') {
+    return {
+      ...summary,
+      ok: false,
+      title: 'Stopped — OCR service is unavailable',
+      message:
+        `The import stopped after ${attempted} of ${total} files because the receipt-reading ` +
+        `service could not be reached; ${notAttempted} were not attempted. ` +
+        'Your receipts are fine — they were not read, not rejected. ' +
+        `${summary.message} ` +
+        'Try again shortly; if it keeps happening the OCR service needs attention from an ' +
+        'administrator. Whatever already imported is safe, and re-uploading never duplicates it.',
+    };
+  }
+
+  const lead =
+    report.interruptedReason === 'idle-timeout'
+      ? `The import stalled after ${attempted} of ${total} files — nothing responded for several minutes, so it was stopped rather than left hanging.`
+      : `The import stopped after ${attempted} of ${total} files.`;
+  return {
+    ...summary,
+    ok: false,
+    title: 'Import stopped early',
+    message:
+      `${lead} ${summary.message} ` +
+      'Re-upload the same export to carry on — receipts already imported are skipped, never duplicated.',
+  };
 }
 
 const EMPTY_COUNTS = { created: 0, deduped: 0, skipped: 0, failed: 0, showReviewLink: false };
