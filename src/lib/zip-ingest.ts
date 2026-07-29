@@ -126,7 +126,13 @@ export type ZipIngestGuardCode =
   | 'TOO_MANY_IMAGES'
   | 'NO_FISCAL_PERIOD'
   /** The OCR provider is rate limiting or rejecting us — not a bad archive. */
-  | 'OCR_UNAVAILABLE';
+  | 'OCR_UNAVAILABLE'
+  /**
+   * The OCR account's API quota is spent. Separate from OCR_UNAVAILABLE
+   * because the operator needs opposite advice: an outage is worth retrying
+   * shortly, a spent allowance is not.
+   */
+  | 'OCR_QUOTA_EXHAUSTED';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
@@ -599,10 +605,15 @@ export async function ingestZip(
       // instead; entries already created stay, and re-running dedupes them by
       // content hash and resumes from here.
       //
-      // `retryable || auth` rather than a list of kinds — see the matching
-      // guard in ingest-item.ts for why enumerating kinds is the bug.
-      if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
-        throw new ZipIngestError('OCR_UNAVAILABLE', err.message);
+      // EVERY OcrError, not a list of kinds — see the matching guard in
+      // ingest-item.ts for why enumerating kinds is the bug. An unreadable
+      // PHOTO never arrives as an OcrError: it is a successful response with a
+      // zero amount, handled a few lines below.
+      if (err instanceof OcrError) {
+        throw new ZipIngestError(
+          err.kind === 'quota-exhausted' ? 'OCR_QUOTA_EXHAUSTED' : 'OCR_UNAVAILABLE',
+          err.message,
+        );
       }
       failures.push({
         name: image.name,

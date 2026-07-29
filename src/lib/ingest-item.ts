@@ -397,20 +397,24 @@ async function ingestImage(
     // perfectly legible, and consumed the whole run in one doomed pass instead
     // of pausing and resuming.
     //
-    // The condition is `retryable || auth`, not a list of kinds: every kind
-    // OcrError marks retryable (rate-limit, timeout, unavailable) is by
-    // definition the service's problem, and auth is the service's problem that
-    // merely cannot be waited out. Enumerating kinds here let 'timeout' and
-    // 'unavailable' keep blaming the photo — the exact failure this removes for
-    // 'rate-limit'. Note these have ALREADY exhausted extractReceipt's internal
-    // retries, so reaching this line means the service is genuinely down, not
-    // that one request was unlucky.
+    // The condition is EVERY OcrError, not a list of kinds. That is the
+    // contract ocr-errors.ts states outright: there is deliberately no
+    // 'unreadable' kind, because a receipt the service genuinely could not
+    // read comes back as a SUCCESSFUL response with a zero amount and is
+    // rejected a few lines below, by name. So an OcrError reaching here always
+    // means the service is the problem — throttled, out of quota, down,
+    // rejecting our credentials, or answering something we cannot parse.
+    //
+    // An earlier version enumerated kinds (`retryable || auth`), and adding
+    // 'quota-exhausted' — which is neither — silently reinstated the original
+    // bug for the single most likely failure in the system. Any new kind is
+    // now covered by construction.
     //
     // Raising means: no evidence row (nothing happened to this receipt), the
     // route answers 429 or 503, and the browser stops the run. Re-running
     // resumes exactly here, because dedup is keyed on content and this entry
     // never got a key.
-    if (err instanceof OcrError && (err.retryable || err.kind === 'auth')) {
+    if (err instanceof OcrError) {
       throw err;
     }
     return {

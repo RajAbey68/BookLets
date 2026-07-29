@@ -2,33 +2,54 @@
  * BookLets OCR client — calls the shared OCR microservice.
  *
  * Instead of calling the Gemini API directly, this module POSTs to the
- * shared OCR microservice at OCR_MICROSERVICE_URL (default http://localhost:3099).
- * Falls back to SymbiOS if the microservice is genuinely unreachable.
+ * shared OCR microservice at OCR_MICROSERVICE_URL.
  *
  * Environment:
- *   OCR_MICROSERVICE_URL — URL of the OCR microservice (default: http://localhost:3099)
+ *   OCR_MICROSERVICE_URL — URL of the OCR microservice
  *   OCR_TIMEOUT_MS — per-attempt timeout (default 15000)
  *   OCR_RETRY_ATTEMPTS — total attempts per image against the microservice (default 3)
- *   SYMBIOS_API_KEY — enables the SymbiOS fallback; without it there is none
+ *
+ * THERE IS EXACTLY ONE OCR PROVIDER. Do not add a second one here without
+ * being able to exercise it.
+ *
+ * This module used to carry a "fallback to SymbiOS" path, and it was worse
+ * than having no fallback at all: it read SYMBIOS_API_KEY, which has never
+ * been set in any environment, so it threw "Microservice unreachable and no
+ * SymbiOS API key configured" — discarding the provider's real explanation
+ * and replacing it with a complaint about our own missing configuration, which
+ * the operator never saw and could not act on. It also made the code (and
+ * anyone reading it) believe the system was resilient when it was not.
+ *
+ * It was removed rather than configured, because it could not be made real:
+ *   • no SYMBIOS_API_KEY exists, in production or anywhere else;
+ *   • its default host, api.symbios.ai, is a PARKED DOMAIN listed for sale —
+ *     posting receipt images and a bearer token there is a data-exfiltration
+ *     risk the moment anyone sets the key, not a safety net;
+ *   • the second implementation of the same fallback (automation.service.ts)
+ *     defaulted to a different host again (http://localhost:8080), so the two
+ *     never agreed on what the fallback even was;
+ *   • its response was cast to GeminiOcrResult with no validation at all.
+ * A provider nobody has a key for, nobody has tested, and whose domain is for
+ * sale is not resilience. If a second provider is ever wanted, it needs a key,
+ * a contract test, and validation of what it returns.
  *
  * FAILURE HANDLING — read before changing
  * A failed OCR call is classified (ocr-errors.ts) rather than flattened into
- * one message, because "the provider is rate limiting us" and "this photo is
- * unreadable" call for opposite responses from the operator and only one of
- * them is about the receipt.
+ * one message, because "the provider is rate limiting us", "the account's
+ * quota is spent" and "this photo is unreadable" call for different responses
+ * from the operator and only one of them is about the receipt.
  *
  * Two rules follow, and both exist because breaking them caused a real
  * 225-receipt import to report 225 unreadable receipts that were all fine:
  *
- *  1. A rate limit is retried briefly here, then RAISED — never converted into
- *     a per-receipt verdict. Sustained back-off belongs at the transport layer
- *     (the route answers 429, the browser paces itself), not inside a function
- *     invocation that has a 60 s budget to spend.
- *  2. The SymbiOS fallback runs ONLY for genuine unreachability, and when it
- *     is unconfigured the ORIGINAL diagnosis is re-raised. Previously any
- *     failure fell through to a fallback that then threw "Microservice
- *     unreachable and no SymbiOS API key configured" — discarding the real
- *     cause, which the provider had spelled out in the body we already had.
+ *  1. A short throttle is retried briefly here, then RAISED — never converted
+ *     into a per-receipt verdict. Sustained back-off belongs at the transport
+ *     layer (the route answers 429, the browser paces itself), not inside a
+ *     function invocation that has a 60 s budget to spend.
+ *  2. An EXHAUSTED quota is not retried at all. It is not retryable
+ *     (ocr-errors.ts RETRYABLE), so the loop below exits on the first
+ *     response — every extra attempt would be another billable request against
+ *     an allowance that has already run out.
  */
 import {
   OcrError,
@@ -133,30 +154,10 @@ export async function extractReceipt(
 
   const error = lastError ?? new OcrError('unknown', 'The OCR service failed.');
 
-  // The fallback exists for one situation only: the primary service could not
-  // be reached at all. Sending a rate-limited or credential-rejected request to
-  // a second provider neither helps nor tells the operator anything new — and
-  // routing every failure through it is what used to replace the provider's
-  // own explanation with "no SymbiOS API key configured".
-  if (error.kind === 'unavailable' || error.kind === 'timeout') {
-    if (process.env.SYMBIOS_API_KEY) {
-      console.warn(
-        '[ocr] microservice unreachable, falling back to SymbiOS:',
-        error.message,
-      );
-      try {
-        return await fallbackToSymbios(imageBase64);
-      } catch (fallbackErr) {
-        console.warn(
-          '[ocr] SymbiOS fallback also failed:',
-          fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
-        );
-      }
-    }
-  }
-
-  // Re-raise the ORIGINAL diagnosis. Callers branch on `kind`; the operator
-  // sees `message`, which names what actually went wrong and what to do.
+  // There is no second provider to try — see the module header for why the
+  // SymbiOS fallback was removed rather than repaired. Raise the ORIGINAL
+  // diagnosis: callers branch on `kind`, and the operator sees `message`,
+  // which names what actually went wrong and what to do about it.
   throw error;
 }
 
@@ -234,56 +235,6 @@ async function callMicroservice(imageBase64: string): Promise<GeminiOcrResult> {
     validateExtraction(extraction);
 
     return { extraction };
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-/**
- * Fallback: Call SymbiOS /api/v1/automation/extract-receipt.
- */
-async function fallbackToSymbios(
-  imageBase64: string
-): Promise<GeminiOcrResult> {
-  const SYMBIOS_URL = process.env.SYMBIOS_URL || 'https://api.symbios.ai';
-  const SYMBIOS_API_KEY = process.env.SYMBIOS_API_KEY || '';
-
-  if (!SYMBIOS_API_KEY) {
-    throw new Error(
-      'OCR: Microservice unreachable and no SymbiOS API key configured.'
-    );
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 30_000);
-
-  try {
-    const cleanBase64 = imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
-
-    const response = await fetch(
-      `${SYMBIOS_URL}/api/v1/automation/extract-receipt`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${SYMBIOS_API_KEY}`,
-        },
-        body: JSON.stringify({ image: cleanBase64 }),
-        signal: controller.signal,
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      throw new Error(
-        `SymbiOS API Error: ${response.status} ${response.statusText}${
-          errorText ? ` — ${errorText.slice(0, 500)}` : ''
-        }`
-      );
-    }
-
-    const data = await response.json();
-    return data as GeminiOcrResult;
   } finally {
     clearTimeout(timeout);
   }

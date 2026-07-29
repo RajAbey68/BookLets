@@ -24,16 +24,79 @@ const REAL_QUOTA_BODY = JSON.stringify({
     '    "status": "RESOURCE_EXHAUSTED"\n  }\n}',
 });
 
+/**
+ * A momentary burst throttle, as opposed to a spent allowance. Google sends
+ * this shape when a project briefly exceeds its per-minute rate: RESOURCE_
+ * EXHAUSTED with a short retry hint, and NO mention of a plan, a tier or a
+ * daily window. Waiting really does fix it, so it must stay a 'rate-limit'.
+ */
+const BURST_THROTTLE_BODY = JSON.stringify({
+  error:
+    'Gemini OCR API Error: 429 Too Many Requests — {"error":{"code":429,' +
+    '"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted. ' +
+    'Please retry in 2s."}}',
+});
+
 describe('classifyOcrFailure', () => {
-  it('reads the production quota body as a rate limit despite the wrapping HTTP 500', () => {
+  it('reads the production quota body as an exhausted account quota, not a passing throttle', () => {
+    // The body Google actually sent during the 225-receipt import names the
+    // free tier and points at plan/billing. That is an ALLOWANCE that is
+    // spent, not a burst the operator can wait out — and telling him to "wait
+    // a moment and try again" would be a second false statement on top of the
+    // first one this whole change exists to remove.
     const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+
+    expect(error.kind).toBe('quota-exhausted');
+    // Retrying cannot help, so nothing may retry it — not the inline loop in
+    // gemini-ocr.ts, and not the browser's backoff ladder.
+    expect(error.retryable).toBe(false);
+  });
+
+  it('keeps a momentary burst throttle separate, and retryable', () => {
+    const error = classifyOcrFailure(500, BURST_THROTTLE_BODY);
 
     expect(error.kind).toBe('rate-limit');
     expect(error.retryable).toBe(true);
+    expect(error.retryAfterMs).toBe(2000);
+  });
+
+  it('names the account limit, and where it is raised, for an exhausted quota', () => {
+    const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+
+    // The receipts must be exonerated explicitly...
+    expect(error.message).toMatch(/your receipts are fine/i);
+    expect(error.message).toMatch(/quota/i);
+    // ...the cause named as an account limit on someone else's key...
+    expect(error.message).toMatch(/api key/i);
+    expect(error.message).toMatch(/billing/i);
+    // ...and no fix invented that the operator cannot perform.
+    expect(error.message).not.toMatch(/re-?(take|shoot|photograph)/i);
+    expect(error.message).not.toMatch(/could not be read|unreadable/i);
+  });
+
+  it('treats a throttle whose own hint is minutes long as an exhausted quota', () => {
+    // No tier wording, but a 300 s hint is not something to sit through inside
+    // an import: the allowance is spent for now, so say so rather than pacing.
+    const error = classifyOcrFailure(429, '{"status":"RESOURCE_EXHAUSTED","retryDelay":"300s"}');
+
+    expect(error.kind).toBe('quota-exhausted');
+    expect(error.retryable).toBe(false);
+  });
+
+  it('never leaks the provider’s error body, quota URLs or metric names', () => {
+    // Operator-facing text is composed here; the raw body carries internal
+    // metric names and console URLs that mean nothing to him and disclose our
+    // upstream layout. Every classified message must be OUR words only.
+    for (const body of [REAL_QUOTA_BODY, BURST_THROTTLE_BODY]) {
+      const message = classifyOcrFailure(500, body).message;
+      expect(message).not.toMatch(/googleapis\.com/i);
+      expect(message).not.toMatch(/generativelanguage|generate_content|gemini-/i);
+      expect(message).not.toMatch(/RESOURCE_EXHAUSTED/);
+    }
   });
 
   it('never blames the photo when the provider is throttling', () => {
-    const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+    const error = classifyOcrFailure(500, BURST_THROTTLE_BODY);
 
     // The operator-facing sentence must not send someone hunting for a bad
     // photograph — that is the exact failure this whole change exists to fix.
@@ -43,10 +106,16 @@ describe('classifyOcrFailure', () => {
   });
 
   it('carries the provider’s own retry hint through', () => {
-    const error = classifyOcrFailure(500, REAL_QUOTA_BODY);
+    const error = classifyOcrFailure(500, BURST_THROTTLE_BODY);
 
-    // "Please retry in 3.485022129s" → rounded up to whole milliseconds.
-    expect(error.retryAfterMs).toBe(3486);
+    expect(error.retryAfterMs).toBe(2000);
+  });
+
+  it('does not attach a retry hint to an exhausted quota', () => {
+    // A retry-after on a spent allowance is an invitation to keep hammering a
+    // provider that has already said no — and the item route turns a hint into
+    // an HTTP retry-after header the browser obeys.
+    expect(classifyOcrFailure(500, REAL_QUOTA_BODY).retryAfterMs).toBeUndefined();
   });
 
   it.each([

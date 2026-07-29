@@ -107,7 +107,7 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 | Service | Role | Prod-effective endpoint | Env override | Auth | Prod status 2026-07-19 |
 |---------|------|-------------------------|--------------|------|------------------------|
 | **OCR microservice** | receipt OCR (primary) | `https://ocr-microservice-gamma.vercel.app/ocr` | `OCR_MICROSERVICE_URL` | none observed | **UNSET → hardcoded default; default is LIVE** (`POST /ocr` empty → 400) |
-| **SymbiOS** | receipt OCR (fallback) | `https://api.symbios.ai/api/v1/automation/extract-receipt` | `SYMBIOS_URL` | `SYMBIOS_API_KEY` | **key UNSET → fallback throws if primary down** |
+| ~~**SymbiOS**~~ | ~~receipt OCR (fallback)~~ | — | — | — | **REMOVED 2026-07-29.** Never configured anywhere; `api.symbios.ai` is a **parked domain listed for sale** (301 → Sedo). Do NOT set `SYMBIOS_API_KEY` — it would post receipt images and a bearer token to a domain anyone can buy. There is now exactly **one** OCR provider. |
 | ~~**DevServer** (Hermes-built)~~ | — | — | — | — | **Does not exist** — all-repo search 2026-07-19. Gamma is canonical (§8.1) |
 | **Hostaway** | PMS bookings sync | `https://api.hostaway.com/v1` | `HOSTAWAY_ACCOUNT_ID`, `STRICT_HOSTAWAY` | `HOSTAWAY_CLIENT_ID/SECRET`, `HOSTAWAY_API_KEY` | ⚠️ **LIVE data — revert test bookings** |
 | **Google OAuth** | sign-in | `accounts.google.com` | — | `AUTH_GOOGLE_ID/SECRET` | configured |
@@ -118,7 +118,9 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 `extractReceipt(imageBase64)` → `POST {OCR_MICROSERVICE_URL}/ocr`
 - **Request:** `{"imageBase64":"<base64, no data-URI prefix>","mode":"receipt"}`, JSON, aborts after `OCR_TIMEOUT_MS` (default **15000 ms**).
 - **Response 200:** `{"extraction":{vendorName,date(ISO-8601|""),totalAmount(number),categorySuggestion,confidence(0–1)}}`.
-- **Non-200 / unreachable:** BookLets falls back to SymbiOS; no key → image recorded as ingest **failure** (`stage:'ocr'`), never silently mis-booked.
+- **Non-200 / unreachable:** there is **no second provider**. The failure is classified (`src/lib/ocr-errors.ts`) into `rate-limit` / `quota-exhausted` / `auth` / `timeout` / `unavailable` / `unknown` — all of which mean *the service*, never the photo — and the whole import **stops** with that diagnosis (`429 OCR_RATE_LIMITED`, or `503` with `OCR_QUOTA_EXHAUSTED` / `OCR_AUTH_FAILED` / `OCR_UNAVAILABLE`). Nothing is recorded against the receipt, and re-running resumes by content hash.
+- **A receipt the service genuinely cannot read** is NOT a service failure: it comes back `200` with a zero amount and is the only thing that becomes `stage:'ocr'`. Never silently mis-booked.
+- **Quota:** the microservice calls Gemini with its own key. On the free tier that allowance is a few dozen requests, so a large WhatsApp export exhausts it; BookLets then reports an exhausted quota and stops after **one** request rather than paying to relearn it per receipt. Raising it is a billing change on the OCR service's key, in that service's project.
 
 **To make DevServer the OCR backend:** implement `POST /ocr` (above) and set
 `OCR_MICROSERVICE_URL=<devserver-url>` on the `booklets` Vercel project (production), then redeploy.
@@ -132,18 +134,19 @@ WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
 | `AUTH_ALLOWED_EMAILS` | ✅ | no | fail-closed allow-list |
 | `DATABASE_URL` | ✅ | yes | Supabase pooled |
 | `OCR_MICROSERVICE_URL` / `OCR_TIMEOUT_MS` | ❌ | no | → gamma default / 15 000 ms |
-| `SYMBIOS_URL` / `SYMBIOS_API_KEY` | ❌ | key=yes | fallback unconfigured |
+| ~~`SYMBIOS_URL` / `SYMBIOS_API_KEY`~~ | ❌ | — | **no longer read by any code** — fallback removed 2026-07-29 |
 | `HOSTAWAY_*` / `OCR_BRIDGE_ORG_ID` | see Vercel | mixed | PMS / bridge |
 
 ## 8. OPEN GAPS — resolve, do not assume (P1 zero-fabrication)
 
 1. **DevServer — RESOLVED (2026-07-19).** All-repo search found **no Hermes-built "DevServer" OCR target**. `ocr-microservice-gamma.vercel.app` is the canonical OCR service: hardcoded default, live. `~/GitHub/ocr-microservice` is its (undeployed) source. No env/URL change needed — gamma is correctly wired.
-2. **OCR single-homed — REAL GAP.** `OCR_MICROSERVICE_URL` has no fallback URL and `SYMBIOS_API_KEY` is unset, so if gamma is down, receipts stall at `stage:'ocr'` (unextracted, not mis-booked). Fix options: (a) set `SYMBIOS_API_KEY`, or (b) deploy `~/GitHub/ocr-microservice` as a 2nd instance + add an `OCR_MICROSERVICE_FALLBACK_URL` tried before SymbiOS.
+2. **OCR single-homed — REAL GAP, now stated honestly.** `OCR_MICROSERVICE_URL` has no fallback, and the SymbiOS "fallback" that appeared to provide one was inert (no key has ever existed) and pointed at a **parked domain for sale**. It was removed rather than configured: an untested provider on a domain anyone can buy is not resilience, and leaving it in place made both the code and the operator believe in a safety net that was not there. If gamma is down the import now **stops with an honest diagnosis** and resumes on re-run. Fix option: deploy `~/GitHub/ocr-microservice` as a second instance and add an `OCR_MICROSERVICE_FALLBACK_URL` — a provider we control and can contract-test.
+   - The **more likely** outage is not gamma being down but its Gemini key being out of quota (see §6). That needs billing, not a second host.
 3. **Design-vs-as-built drift** (this doc vs the canon):
    - Canon §4 specifies a separate `booklets_staging` schema; **as-built** stages as **DRAFT `JournalEntry` rows in the `booklets` schema** (debit Suspense 9999 / credit Cash 1000). The dedicated staging schema is *not yet built*.
    - Canon §6 requires **FORCE RLS on both schemas + DB write-role separation**; as-built has RLS enabled but **FORCE not applied** and no separate `staging_writer`/`ledger_writer` roles yet.
    - Canon §5 specifies an atomic `promote_staging_to_ledger()` DB function; as-built promotion is the app-side DRAFT→POSTED review flow.
-4. **Stale docstring** in `gemini-ocr.ts` (says default `localhost:3099`; actual default is the gamma URL).
+4. ~~**Stale docstring** in `gemini-ocr.ts` (says default `localhost:3099`; actual default is the gamma URL).~~ **Fixed 2026-07-29.**
 
 ## 9. Guardrails (constrain every change here)
 

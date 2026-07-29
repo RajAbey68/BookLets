@@ -6,6 +6,7 @@ import {
   MAX_ZIP_BYTES,
   MAX_EXPANDED_ARCHIVE_BYTES,
   describeProgress,
+  describeInterruptedImport,
   splitNdjson,
 } from '@/lib/zip-upload-result';
 import { MAX_DIRECT_UPLOAD_BYTES, OVERSIZE_UPLOAD_HELP } from '@/lib/upload-limits';
@@ -297,7 +298,7 @@ describe('summarizeZipUploadResponse — explicit counts (owner: "how many did i
         imageCount: 1,
         created: 0,
         deduped: 0,
-        failures: [{ name: 'r.jpg', stage: 'ocr', error: 'Gemini OCR: GEMINI_API_KEY is not set' }],
+        failures: [{ name: 'r.jpg', stage: 'ocr', error: 'OCR returned an unusable amount (0).' }],
         skipped: [{ name: 'x.vcf', reason: 'contact card' }],
       }),
     };
@@ -306,7 +307,7 @@ describe('summarizeZipUploadResponse — explicit counts (owner: "how many did i
     expect(res.ok).toBe(false); // receipts found but none imported → surfaced as a problem, not a bland "nothing new"
     expect(res.message).toContain('Saw 1 receipt');
     expect(res.message).toContain('0 imported');
-    expect(res.message).toContain('OCR service');
+    expect(res.message).toMatch(/couldn't be read/);
     expect(res.message).toContain('1 non-receipt file skipped');
   });
 
@@ -353,17 +354,88 @@ describe('failure wording is stage-accurate', () => {
     expect(res.message.toLowerCase()).toMatch(/upload/);
   });
 
-  it('still says "couldn’t be read" for a genuine OCR failure', () => {
+  it('blames the photo, not the service, for a genuine reading failure', () => {
+    // `stage: 'ocr'` now means ONE thing: the service answered, and the amount
+    // on that photo was not legible. Provider faults never reach here any more
+    // — they stop the run and are reported as the service's problem. So the
+    // copy must name the photo and give the operator the manual next step,
+    // instead of the old "(OCR service could not read them)", which described
+    // a service outage and sent him to the wrong place entirely.
     const body = {
       report: report({
         imageCount: 2,
         created: 1,
-        failures: [{ name: 'IMG-2.jpg', stage: 'ocr' as const, error: 'unreadable' }],
+        failures: [{ name: 'IMG-2.jpg', stage: 'ocr' as const, error: 'unusable amount' }],
       }),
     };
     const res = summarizeZipUploadResponse(200, body);
     expect(res.message).toMatch(/couldn't be read/);
-    expect(res.message).toMatch(/OCR/);
+    // The next step has to be actionable by him, on those receipts.
+    expect(res.message).toMatch(/by hand|manually/i);
+    // And it must NOT read as "the service is broken".
+    expect(res.message).not.toMatch(/OCR service could not read/i);
+  });
+
+  it('names the provider quota, and where it is raised, when a run is cut short by it', () => {
+    // This is the sentence the operator actually read as "225 couldn't be
+    // read (OCR service could not read them)". It has to say four things:
+    // the receipts are fine, the account's API quota is the problem, how many
+    // were never attempted, and that re-uploading later resumes.
+    const res = describeInterruptedImport(
+      summarizeZipUploadResponse(200, {
+        report: report({ imageCount: 225, created: 0, deduped: 0 }),
+      }),
+      {
+        attempted: 1,
+        total: 226,
+        interruptedReason: 'ocr-quota-exhausted',
+        interruptedDetail: 'The receipt-reading service has used up its API quota.',
+      },
+    );
+
+    expect(res.ok).toBe(false);
+    expect(res.title.toLowerCase()).toMatch(/quota/);
+    expect(res.message).toMatch(/your receipts are fine/i);
+    expect(res.message).toMatch(/225 (?:were )?not attempted|225 were never/i);
+    expect(res.message).toMatch(/billing|raised/i);
+    // Never a verdict on the photographs, and never an instruction he can't act on.
+    expect(res.message).not.toMatch(/could not be read|unreadable|re-?take/i);
+  });
+
+  it('keeps a passing throttle separate from a spent quota', () => {
+    const res = describeInterruptedImport(
+      summarizeZipUploadResponse(200, { report: report({ imageCount: 10, created: 4 }) }),
+      {
+        attempted: 5,
+        total: 11,
+        interruptedReason: 'ocr-rate-limited',
+        interruptedDetail: 'The OCR service is rate limited right now.',
+      },
+    );
+
+    expect(res.title.toLowerCase()).toMatch(/rate limit/);
+    expect(res.message).toMatch(/your receipts are fine/i);
+    // A throttle IS waitable — this is the one case where "wait" is honest.
+    expect(res.message).toMatch(/wait/i);
+  });
+
+  it('still distinguishes a stall from a cancellation', () => {
+    const summary = summarizeZipUploadResponse(200, { report: report({ created: 2 }) });
+    const stalled = describeInterruptedImport(summary, {
+      attempted: 3,
+      total: 7,
+      interruptedReason: 'idle-timeout',
+      interruptedDetail: null,
+    });
+    const cancelled = describeInterruptedImport(summary, {
+      attempted: 3,
+      total: 7,
+      interruptedReason: 'cancelled',
+      interruptedDetail: null,
+    });
+
+    expect(stalled.message).toMatch(/stalled|nothing responded/i);
+    expect(cancelled.message).not.toMatch(/nothing responded/i);
   });
 
   it('reports a mixed batch without claiming every failure was one kind', () => {

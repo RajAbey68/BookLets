@@ -45,6 +45,11 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   // free again. Entries created before the abort are already saved, and
   // re-running dedupes them by content hash.
   OCR_UNAVAILABLE: 503,
+  // The OCR account's API quota is spent. Also 503 and for the same reason —
+  // the archive is fine — but a distinct code so the message, which says the
+  // limit is on the service's key and how it is raised, is not confused with
+  // a passing outage the operator could just wait out.
+  OCR_QUOTA_EXHAUSTED: 503,
 };
 
 class UploadTooLargeError extends Error {}
