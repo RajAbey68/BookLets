@@ -1,22 +1,30 @@
-name: LLM Quorum Review — external four-eyes (Z.AI)
+name: LLM Quorum Review — external four-eyes (Z.AI, FAIL-CLOSED)
 
 # Raj's mandate (AGENTS.md "Operator constraints", 2026-07-13): PR approval
 # comes from a non-Anthropic LLM review signed by the machine account
-# HermesBot (GitHub login RajAbeyBot) — never from Raj personally.
-# This workflow is that mandate, automated:
-#   diff -> Z.AI GLM verdict (PASS/FAIL + rationale) -> on PASS, RajAbeyBot
-#   submits the APPROVE review with the verdict embedded for audit.
+# RajAbeyBot (GitHub login RajAbeyBot) — never from Raj personally.
+#
+# FAIL-CLOSED (operator correction, 2026-07-15): a reviewer outage or FAIL
+# verdict MUST block, never silently pass. The job now posts a REQUEST_CHANGES
+# review + a `failure` Check Run on FAIL, and exits 1 on any failure to run.
+# Branch protection SHOULD require the "llm-quorum-review (Z.AI four-eyes)"
+# check so a missing/errored run actually blocks the merge.
 #
 # Required repository secrets (set via `gh secret set <NAME>`):
 #   ZAI_API_KEY       — Z.AI API key (never appears in logs)
-#   RAJABEYBOT_TOKEN  — PAT of the RajAbeyBot account (repo scope)
-# Optional repository variables (Settings -> Variables, or `gh variable set`):
+#   RAJABEYBOT_TOKEN  — PAT of the RajAbeyBot account. MINIMAL scope only:
+#                       `pull-requests:write` (post reviews). Do NOT use a
+#                       broad `repo` token — a compromised job inherits that
+#                       scope (DeepSeek review, 2026-07-15, high severity).
+# Optional repository variables / env:
 #   ZAI_BASE_URL — default https://api.z.ai/api/paas/v4
 #   ZAI_MODEL    — default glm-4.6
+#   FAIL_CLOSED  — set to "false" to revert to non-blocking behaviour (not recommended)
 #
-# The job SKIPS silently (neutral, no approval, no failure) when secrets are
-# missing, when the PR is a draft, or when the PR head is not in this repo —
-# it must never block merging on its own; it only ever ADDS an approval.
+# Neutral (exit 0, no block) ONLY when the job should not run:
+#   - PR is a draft
+#   - PR head is from a fork (external repo)
+# Any other failure (missing secret, API error, unparseable) => exit 1 (block).
 
 on:
   pull_request:
@@ -24,6 +32,8 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
+  checks: write
 
 jobs:
   zai-review:
@@ -34,12 +44,13 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Z.AI verdict + RajAbeyBot approval
+      - name: Z.AI verdict + RajAbeyBot review (fail-closed)
         env:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           RAJABEYBOT_TOKEN: ${{ secrets.RAJABEYBOT_TOKEN }}
           ZAI_BASE_URL: ${{ vars.ZAI_BASE_URL }}
           ZAI_MODEL: ${{ vars.ZAI_MODEL }}
+          FAIL_CLOSED: ${{ vars.FAIL_CLOSED }}
           GH_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
