@@ -19,7 +19,7 @@ so an agent working carefully still went straight past it.
 > There is no fast path, no exception for "clean" data, and no exception for
 > high model confidence.
 
-```
+```text
   source ──▶ sandbox.* ──▶  HUMAN REVIEW  ──▶ public."JournalEntry"
  (WhatsApp,   staging        (four-eyes)         the ledger
   OCR, bank                                    DRAFT → POSTED

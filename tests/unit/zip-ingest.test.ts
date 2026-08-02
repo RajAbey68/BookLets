@@ -37,6 +37,8 @@ import {
   computeEntryIdempotencyKey,
   parseChatText,
   ingestZip,
+  ocrDateOrNull,
+  assertSameCurrency,
   type ZipIngestDeps,
 } from '../../src/lib/zip-ingest';
 import { summarizeZipUploadResponse } from '../../src/lib/zip-upload-result';
@@ -708,6 +710,41 @@ describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
     expect(report.failures[0].error).toMatch(/never guessed|no date/i);
   });
 
+  /**
+   * The subtler half of "dates are never fabricated": a date can be
+   * well-formed, pass a NaN check, and still be one the document cannot have
+   * carried. `new Date("2026-02-31")` does not fail — it rolls forward to
+   * 3 March. A guard that only rejected NaN would therefore invent 3 March out
+   * of an OCR misread, and the invented date would look entirely ordinary
+   * sitting in the ledger. Only the round-trip catches it.
+   */
+  it('refuses a well-formed but impossible calendar date instead of rolling it forward', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, date: '2026-02-31' },
+    }));
+    const deps = makeDeps({ ocr });
+
+    const report = await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs).toHaveLength(0);
+    expect(report.created).toBe(0);
+    expect(report.failures[0].error).toMatch(/never guessed|no date/i);
+  });
+
+  it.each([
+    ['an impossible day-of-month', '2026-02-31'],
+    ['a 31st in a 30-day month', '2026-04-31'],
+    ['a non-leap-year 29 February', '2027-02-29'],
+    ['a month past December', '2026-13-01'],
+  ])('ocrDateOrNull returns null for %s', (_label, value) => {
+    expect(ocrDateOrNull(value)).toBeNull();
+  });
+
+  it('ocrDateOrNull still accepts genuine dates, including a real leap day', () => {
+    expect(ocrDateOrNull('2026-07-12')?.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    expect(ocrDateOrNull('2028-02-29')?.toISOString()).toBe('2028-02-29T00:00:00.000Z');
+  });
+
   it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
     let call = 0;
     const postEntry = vi.fn(async () => {
@@ -872,5 +909,28 @@ describe('ledger integrity — dates and currency', () => {
     for (const line of lines) {
       expect(line.currency).toBe('LKR');
     }
+  });
+
+  /**
+   * Both lines carry ONE currency because the resolver has already refused the
+   * case where the two accounts disagree.
+   *
+   * Stamping each line with its own account's currency looks like the stricter
+   * reading of "currency comes from the account", but it yields an entry that
+   * cannot balance — the same magnitude debited in LKR and credited in USD is
+   * two unrelated numbers in the shape of double-entry. There is no FX rate at
+   * this layer and nowhere to put the difference, and the books are
+   * single-currency by design. A mismatch is a misconfigured chart of
+   * accounts: a setup fault for a human, not a value to guess at import time.
+   */
+  describe('assertSameCurrency', () => {
+    it('accepts two accounts denominated the same way', () => {
+      expect(() => assertSameCurrency('LKR', 'LKR')).not.toThrow();
+    });
+
+    it('refuses to build an entry spanning two currencies, and names both', () => {
+      expect(() => assertSameCurrency('LKR', 'USD')).toThrow(/LKR[\s\S]*USD/);
+      expect(() => assertSameCurrency('LKR', 'USD')).toThrow(/cannot be posted across two currencies/i);
+    });
   });
 });

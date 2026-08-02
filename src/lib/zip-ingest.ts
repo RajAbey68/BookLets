@@ -242,8 +242,37 @@ export interface ResolvedLedgerAccounts {
    * — which is how 270 lines came to be stamped EUR against a chart of
    * accounts that is entirely LKR. The line's currency must be a fact about
    * the account it posts to, never a database default nobody chose.
+   *
+   * One value covers both lines because `assertSameCurrency` has already
+   * refused the case where the two accounts disagree.
    */
   currency: string;
+}
+
+/**
+ * Refuse to build an entry whose two sides are denominated differently.
+ *
+ * Stamping each line with its own account's currency would look like the
+ * stricter reading of "currency comes from the account", but it produces a
+ * journal entry that cannot balance: the same magnitude debited in one
+ * currency and credited in another is two unrelated numbers wearing the shape
+ * of double-entry, and it would balance only in the arithmetic, never in the
+ * money. There is no FX rate at this layer and no place to put the difference.
+ *
+ * The books are single-currency by design — a non-LKR document is parked as
+ * FX_UNSUPPORTED rather than converted (see docs/INGESTION-DESIGN.md). A
+ * mismatch here therefore means the chart of accounts is misconfigured, which
+ * is a setup fault to be fixed by a human, not a value to be guessed at
+ * import time.
+ */
+export function assertSameCurrency(expenseCurrency: string, cashCurrency: string): void {
+  if (expenseCurrency !== cashCurrency) {
+    throw new Error(
+      `Receipt import setup error: the expense account is denominated in ${expenseCurrency} ` +
+        `but the bank/cash account is in ${cashCurrency}. A journal entry cannot be posted ` +
+        'across two currencies. Correct the chart of accounts before importing.',
+    );
+  }
 }
 
 /**
@@ -510,7 +539,14 @@ export function inspectZip(zipBuffer: Buffer, limits: Partial<ZipIngestLimits> =
 export function ocrDateOrNull(isoDate: string): Date | null {
   if (/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
     const parsed = new Date(`${isoDate}T00:00:00.000Z`);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
+    // The round-trip is the real check, not the NaN test. Date rolls an
+    // impossible calendar date forward instead of rejecting it — "2026-02-31"
+    // parses happily and comes back as 3 March — so a NaN test alone would let
+    // this function invent the very thing it exists to prevent, and the
+    // invented date would look entirely ordinary in the ledger.
+    if (!Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === isoDate) {
+      return parsed;
+    }
   }
   return null;
 }
