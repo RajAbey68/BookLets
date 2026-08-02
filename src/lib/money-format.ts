@@ -29,6 +29,24 @@
 export const BOOKS_CURRENCY = 'LKR';
 
 /**
+ * Above this booking value, revenue recognition parks the entry as DRAFT for
+ * a human to approve instead of posting it automatically.
+ *
+ * DENOMINATED IN BOOKS_CURRENCY. This was previously the bare literal 10000
+ * in revenue.service.ts, commented "€10k threshold for manual review" — and
+ * 10,000 rupees is roughly thirty euro. Left as it was, the control would
+ * have caught essentially every booking Ko Lake takes and buried the operator
+ * in an approval queue, while looking like a considered threshold.
+ *
+ * 3,500,000 LKR keeps the original intent — about €10,000 at the rate in
+ * effect when this was written — rather than inventing a new policy. It is a
+ * BUSINESS decision, not a technical one: raise it and large bookings post
+ * without a second pair of eyes; lower it and routine bookings queue up.
+ * Change it here, deliberately.
+ */
+export const HIGH_VALUE_REVIEW_THRESHOLD = 3_500_000;
+
+/**
  * Locale used for grouping and decimal marks.
  *
  * 'en-LK' renders LKR as "Rs 1,550.00" with the thousands/decimal convention

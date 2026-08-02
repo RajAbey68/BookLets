@@ -4,7 +4,7 @@ import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { Decimal } from 'decimal.js';
 import type { AccountType, Booking, Property } from '@prisma/client';
-import { BOOKS_CURRENCY } from './money-format';
+import { BOOKS_CURRENCY, HIGH_VALUE_REVIEW_THRESHOLD } from './money-format';
 
 type BookingWithProperty = Booking & { property: Property };
 
@@ -364,8 +364,12 @@ export class RevenueService {
     const memo = `Revenue Recognition: Guest checkout for Booking #${booking.hostawayId} at ${booking.property.name}`;
 
     // 4-EYES CHECK: Ensure the amount is not unreasonably high before auto-posting
-    const HIGH_VALUE_THRESHOLD = 10000; // €10k threshold for manual review
-    const status = new Decimal(booking.totalAmount.toString()).gt(HIGH_VALUE_THRESHOLD) ? JournalStatus.DRAFT : JournalStatus.POSTED;
+    // Threshold lives in money-format.ts and is denominated in the books'
+    // currency. It used to be a bare 10000 meaning euro, which in rupees is
+    // about thirty euro — every booking would have queued for approval.
+    const status = new Decimal(booking.totalAmount.toString()).gt(HIGH_VALUE_REVIEW_THRESHOLD)
+      ? JournalStatus.DRAFT
+      : JournalStatus.POSTED;
 
     await LedgerService.postEntry({
       organizationId,

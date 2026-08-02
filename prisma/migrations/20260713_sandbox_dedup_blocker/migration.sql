@@ -20,14 +20,23 @@
 --   updated_at timestamptz.
 
 -- Layer 1 (additive): deterministic content hash.
--- Uses ::text casts only (immutable) so the STORED generated column is legal.
--- date::text and numeric::text are immutable; md5() is immutable.
+-- IMMUTABILITY: a STORED generated column requires every function and cast in
+-- its expression to be IMMUTABLE. An earlier version of this file asserted
+-- that date::text qualifies. It does not: the date output function honours
+-- DateStyle, so the same date renders '2026-07-12' or '12.07.2026' depending
+-- on a session setting, and PostgreSQL rejects the column outright with
+-- "generation expression is not immutable" -- aborting this migration and
+-- every migration queued behind it. Verified against PostgreSQL 16.
+--
+-- Subtracting an epoch date yields an integer count of days, which is both
+-- immutable and setting-independent (20646 under any DateStyle). numeric::text
+-- and md5() are genuinely immutable and stay as they are.
 ALTER TABLE sandbox.payment_entries
   ADD COLUMN IF NOT EXISTS content_hash TEXT GENERATED ALWAYS AS (
     md5(
       coalesce(source_type, '') || '|' ||
       coalesce(source_ref, '')  || '|' ||
-      coalesce(payment_date::text, '') || '|' ||
+      coalesce((payment_date - DATE '1970-01-01')::text, '') || '|' ||
       coalesce(amount::text, '') || '|' ||
       coalesce(description, '')
     )
