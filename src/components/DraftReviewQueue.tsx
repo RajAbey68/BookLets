@@ -9,6 +9,7 @@ import {
 } from '@/app/actions/approval.actions';
 import ApprovalDecisionButtons from '@/components/ApprovalDecisionButtons';
 import DraftEditForm from '@/components/DraftEditForm';
+import { formatMoney } from '@/lib/money-format';
 
 interface DraftReviewQueueProps {
   items: DraftReviewItem[];
@@ -21,7 +22,7 @@ const formatDateTime = (iso: string) =>
   new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 
 const formatCurrency = (amount: string) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
+  formatMoney(amount);
 
 const ORIGIN_LABELS: Record<DraftReviewItem['parsed']['origin'], string> = {
   'receipt-automation': 'Receipt OCR',

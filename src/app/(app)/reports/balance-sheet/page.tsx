@@ -2,12 +2,13 @@ import Link from 'next/link';
 import AsOfDateFilter from '@/components/AsOfDateFilter';
 import { getBalanceSheetReport } from '@/lib/balance-sheet-report';
 import type { BalanceSheetSection } from '@/lib/balance-sheet';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 const formatCurrency = (amount: { toString(): string }) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
+  formatMoney(amount);
 
 function SectionTable({ title, section }: { title: string; section: BalanceSheetSection }) {
   return (

@@ -4,6 +4,7 @@ import { LedgerService } from './ledger.service';
 import { JournalStatus } from './types';
 import { Decimal } from 'decimal.js';
 import type { AccountType, Booking, Property } from '@prisma/client';
+import { BOOKS_CURRENCY } from './money-format';
 
 type BookingWithProperty = Booking & { property: Property };
 
@@ -409,7 +410,10 @@ export class RevenueService {
           organizationId,
           name,
           type,
-          currency: "EUR",
+          // Accounts auto-created here inherit the books' currency. This said
+          // "EUR" while every imported ledger line is LKR, so a newly created
+          // account disagreed with every line posted against it.
+          currency: BOOKS_CURRENCY,
         }
       });
     }

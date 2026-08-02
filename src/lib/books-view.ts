@@ -6,6 +6,7 @@
  */
 import { Decimal } from 'decimal.js';
 import { parseDraftEvidence } from './draft-evidence';
+import { BOOKS_CURRENCY } from './money-format';
 
 /** /books shows at most this many most-recent months — the page stays bounded. */
 export const BOOKS_MONTH_CAP = 6;
@@ -97,7 +98,7 @@ export function toBookRow(entry: BooksEntryInput): BookRow {
     memo: entry.memo,
     vendorish: vendorishOf(entry),
     amount: debitTotal.toFixed(2),
-    currency: entry.lines[0]?.currency ?? 'EUR',
+    currency: entry.lines[0]?.currency ?? BOOKS_CURRENCY,
   };
 }
 

@@ -120,7 +120,7 @@ model Account {
   // RAJ-403: header accounts group children for reporting and must not carry
   // direct postings themselves.
   isHeader       Boolean       @default(false)
-  currency       String        @default("EUR")
+  currency       String        @default("LKR")
   closedAt       DateTime?
   locked         Boolean       @default(false)
   createdAt      DateTime      @default(now())
@@ -193,7 +193,7 @@ model JournalLine {
   accountId      String
   amount         Decimal      @db.Decimal(19, 4)
   isDebit        Boolean
-  currency       String       @default("EUR")
+  currency       String       @default("LKR")
   createdAt      DateTime     @default(now())
   createdBy      String?
   journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id])

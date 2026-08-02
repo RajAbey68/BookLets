@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { Decimal } from 'decimal.js';
 import { createManualJournalEntry } from '@/app/actions/ledger.actions';
+import { formatMoney } from '@/lib/money-format';
 
 export interface JournalAccountOption {
   id: string;
@@ -92,7 +93,7 @@ export default function JournalEntryForm({ accounts }: { accounts: JournalAccoun
     setLines((prev) => (prev.length <= 2 ? prev : prev.filter((_, i) => i !== index)));
 
   const fmt = (d: Decimal) =>
-    new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(d.toFixed(2)));
+    formatMoney(d.toFixed(2));
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();

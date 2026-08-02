@@ -1,12 +1,13 @@
 import Link from 'next/link';
 import LedgerPeriodFilter from '@/components/LedgerPeriodFilter';
 import { getTrialBalanceReport } from '@/lib/trial-balance-report';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 const formatCurrency = (amount: { toString(): string }) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
+  formatMoney(amount);
 
 export default async function TrialBalancePage({ searchParams }: { searchParams: Promise<{ period?: string }> }) {
   const { period } = await searchParams;

@@ -8,6 +8,7 @@ import {
   getDrilldownFilter,
   parseDrilldownMetric,
 } from '@/lib/metric-drilldown';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -78,10 +79,7 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
     : null;
 
   const formatCurrency = (amount: number | { toString(): string }) => {
-    return new Intl.NumberFormat('de-DE', {
-      style: 'currency',
-      currency: 'EUR',
-    }).format(Number(amount));
+    return formatMoney(Number(amount));
   };
 
   const formatDate = (date: Date | string) => {
