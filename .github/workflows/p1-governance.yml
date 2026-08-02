@@ -20,10 +20,23 @@ jobs:
       - name: Install dependencies
         run: npm install || true
 
-      - name: "✅ P1.1: RevenueService HIGH_VALUE_THRESHOLD = 10000"
+      # The gate's job is to stop the high-value approval threshold moving
+      # without someone noticing, so it pins the literal. It previously pinned
+      # `HIGH_VALUE_THRESHOLD = 10000` inside revenue.service.ts, where the 10000
+      # meant EUROS while the books are kept in LKR — 10,000 rupees is about
+      # thirty euro, so the control was catching essentially every booking. The
+      # threshold now lives in money-format.ts denominated in the books'
+      # currency; the gate follows it there and pins the new value, keeping the
+      # control intact rather than relaxing it.
+      - name: "✅ P1.1: high-value review threshold is pinned (LKR)"
         run: |
-          grep -q 'HIGH_VALUE_THRESHOLD = 10000' src/lib/revenue.service.ts || (echo "FAIL: Threshold not set" && exit 1)
-          echo "PASS: Revenue threshold enforced"
+          grep -q 'HIGH_VALUE_REVIEW_THRESHOLD = 3_500_000' src/lib/money-format.ts \
+            || (echo "FAIL: high-value threshold changed or moved — this is a financial control; update the gate deliberately" && exit 1)
+          grep -q 'HIGH_VALUE_REVIEW_THRESHOLD' src/lib/revenue.service.ts \
+            || (echo "FAIL: revenue.service.ts no longer applies the threshold" && exit 1)
+          grep -q "BOOKS_CURRENCY = 'LKR'" src/lib/money-format.ts \
+            || (echo "FAIL: books currency changed — the threshold above is denominated in it" && exit 1)
+          echo "PASS: Revenue threshold enforced (3,500,000 LKR)"
 
       - name: "✅ P1.2: RevenueService creates DRAFT for high-value entries"
         run: |

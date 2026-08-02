@@ -78,9 +78,12 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
       )
     : null;
 
-  const formatCurrency = (amount: number | { toString(): string }) => {
-    return formatMoney(Number(amount));
-  };
+  // Per-line currency where the row has one. A ledger line stores its own
+  // currency, and defaulting every row to the books' currency would relabel a
+  // genuinely foreign line as LKR — the same class of bug as the euro signs
+  // this page just lost, pointing the other way.
+  const formatCurrency = (amount: number | { toString(): string }, currency?: string) =>
+    formatMoney(Number(amount), currency);
 
   const formatDate = (date: Date | string) => {
       return new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium' }).format(new Date(date));
@@ -138,6 +141,10 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
             <div style={{ fontSize: '1.5rem', fontWeight: '700', color: 'var(--accent-color)' }}>
+              {/* Aggregate: shown in the books' currency. Summing lines of
+                  different currencies would be meaningless, so if this ledger
+                  ever holds more than one, this total needs a policy rather
+                  than a label. */}
               {formatCurrency(drilldownTotal.toNumber())}
             </div>
             <Link
@@ -210,11 +217,11 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
                     </td>
                     
                     <td data-label="Debit" style={{ textAlign: 'right', fontWeight: 'bold', color: line.isDebit ? 'var(--success-color)' : 'transparent', padding: '1rem' }}>
-                      {line.isDebit ? formatCurrency(line.amount) : '—'}
+                      {line.isDebit ? formatCurrency(line.amount, line.currency) : '—'}
                     </td>
                     
                     <td data-label="Credit" style={{ textAlign: 'right', fontWeight: 'bold', color: !line.isDebit ? 'var(--danger-color)' : 'transparent', padding: '1rem' }}>
-                      {!line.isDebit ? formatCurrency(line.amount) : '—'}
+                      {!line.isDebit ? formatCurrency(line.amount, line.currency) : '—'}
                     </td>
                   </tr>
                 ))
