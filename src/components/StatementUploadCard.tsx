@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   summarizeStatementReport,
@@ -15,6 +15,17 @@ import type { StatementIngestReport } from '@/lib/statement-ingest';
  * the authority — this only saves Raj from uploading just to see a 413.
  */
 const MAX_STATEMENT_UPLOAD_MB = 5;
+
+/**
+ * Client-side deadline for the whole import.
+ *
+ * Sits deliberately ABOVE the route's own `maxDuration` of 60s so that when
+ * the server can answer — including when it fails — its specific message wins
+ * over this generic one. This exists for the case where no answer comes at
+ * all: before it, a killed function left the button reading "Uploading…"
+ * indefinitely, which is exactly the silent hang this card was reported for.
+ */
+const UPLOAD_TIMEOUT_MS = 75_000;
 
 type UploadStatus = 'IDLE' | 'UPLOADING' | 'DONE' | 'ERROR';
 
@@ -43,8 +54,19 @@ export default function StatementUploadCard() {
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<StatementReportSummary | null>(null);
   const [isDragOver, setDragOver] = useState(false);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  // A visible clock, for the same reason the receipts card has one: a long
+  // import and a dead one look identical without it.
+  useEffect(() => {
+    if (status !== 'UPLOADING') return;
+    setElapsedMs(0);
+    const startedAt = Date.now();
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [status]);
 
   const upload = async (file: File) => {
     setError(null);
@@ -62,10 +84,16 @@ export default function StatementUploadCard() {
     }
 
     setStatus('UPLOADING');
+    const controller = new AbortController();
+    const deadline = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
     try {
       const form = new FormData();
       form.append('file', file, file.name);
-      const res = await fetch('/api/ingest/statement', { method: 'POST', body: form });
+      const res = await fetch('/api/ingest/statement', {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      });
 
       // Error bodies are JSON ({ error, code? }) when the route answered, but
       // a proxy/edge 413 may not be — parse defensively.
@@ -96,8 +124,24 @@ export default function StatementUploadCard() {
       router.refresh();
     } catch (err) {
       setStatus('ERROR');
-      setError(err instanceof Error ? err.message : 'Import failed. Check your connection and try again.');
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        // Say what is true of a half-finished import rather than implying
+        // nothing happened: rows are posted one at a time, so some may have
+        // landed before the server stopped answering. Re-uploading is safe —
+        // every row carries an idempotency key, so anything already imported
+        // is skipped, never booked twice.
+        setError(
+          `The import did not finish within ${Math.round(UPLOAD_TIMEOUT_MS / 1000)}s and was stopped. ` +
+            'Some rows may already be in your books. Upload the same file again — anything already ' +
+            'imported is skipped automatically and nothing is double-counted.',
+        );
+      } else {
+        setError(
+          err instanceof Error ? err.message : 'Import failed. Check your connection and try again.',
+        );
+      }
     } finally {
+      clearTimeout(deadline);
       // Allow re-selecting the same file after an error or a second upload.
       if (inputRef.current) inputRef.current.value = '';
     }
@@ -133,7 +177,8 @@ export default function StatementUploadCard() {
       >
         <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>
           {busy
-            ? 'Uploading and reading the statement…'
+            ? `Uploading and reading the statement… ${Math.floor(elapsedMs / 1000)}s elapsed. ` +
+              'Each transaction is written separately, so a few hundred rows take a moment.'
             : 'Drag a bank-statement export (.csv) here, or pick a file. Wise exports are recognised automatically; every transaction lands as a draft and re-uploads never double-count.'}
         </p>
         <label className="btn btn-primary" style={{ cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1 }}>

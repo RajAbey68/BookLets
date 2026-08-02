@@ -11,6 +11,22 @@ import { buildDefaultStatementIngestDeps } from '@/lib/statement-ingest.deps';
 export const dynamic = 'force-dynamic';
 
 /**
+ * A statement posts one DRAFT entry per row, each in its own transaction, so
+ * the work scales with the row count rather than the upload size. This route
+ * previously declared no budget at all and took the platform default, which a
+ * few hundred rows exceed comfortably: the function was killed mid-import, the
+ * client got no response at all (status 0 in the access log), and the upload
+ * card — which has no timeout of its own — span forever. The sibling ingest
+ * routes have carried `maxDuration = 60` since #133; this one was simply
+ * missed.
+ *
+ * 60s is the ceiling, not the target: MAX_STATEMENT_ROWS bounds the work, and
+ * the fiscal-period probes now run concurrently rather than one per distinct
+ * day.
+ */
+export const maxDuration = 60;
+
+/**
  * POST /api/ingest/statement
  *
  * Ingests a bank-statement CSV (Wise export auto-detected; generic
