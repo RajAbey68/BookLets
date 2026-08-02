@@ -8,8 +8,9 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 async function verify() {
   console.log('--- Hostaway Connectivity Verification ---');
   console.log('Environment:', process.env.NODE_ENV || 'development');
-  console.log('Client ID:', process.env.HOSTAWAY_CLIENT_ID || 'MISSING');
-  console.log('Account ID:', process.env.HOSTAWAY_ACCOUNT_ID || 'MISSING');
+  // Log presence only — never the actual identifiers (CodeQL js/clear-text-logging).
+  console.log('Client ID:', process.env.HOSTAWAY_CLIENT_ID ? 'set' : 'MISSING');
+  console.log('Account ID:', process.env.HOSTAWAY_ACCOUNT_ID ? 'set' : 'MISSING');
 
   try {
     const reservations = await HostawayService.fetchReservations(5);

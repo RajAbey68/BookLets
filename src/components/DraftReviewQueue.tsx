@@ -8,6 +8,7 @@ import {
   type DraftReviewItem,
 } from '@/app/actions/approval.actions';
 import ApprovalDecisionButtons from '@/components/ApprovalDecisionButtons';
+import DraftEditForm from '@/components/DraftEditForm';
 
 interface DraftReviewQueueProps {
   items: DraftReviewItem[];
@@ -75,6 +76,7 @@ export default function DraftReviewQueue({ items }: DraftReviewQueueProps) {
   const [batchError, setBatchError] = useState<string | null>(null);
   const [entryErrors, setEntryErrors] = useState<Record<string, string>>({});
   const [summary, setSummary] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const router = useRouter();
 
@@ -222,7 +224,16 @@ export default function DraftReviewQueue({ items }: DraftReviewQueueProps) {
                 <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--accent-hover)' }}>
                   {ORIGIN_LABELS[item.parsed.origin]}
                 </span>
-                <div style={{ marginLeft: 'auto' }}>
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: '0.375rem 0.75rem', fontSize: '0.75rem' }}
+                    onClick={() => setEditingId(editingId === item.id ? null : item.id)}
+                    disabled={isPending}
+                  >
+                    {editingId === item.id ? 'Close editor' : 'Edit'}
+                  </button>
                   {item.isOwnDraft ? (
                     <span style={{ fontSize: '0.75rem', color: 'var(--warning-color)', fontWeight: 600 }}>
                       Your own draft — a different checker must decide it (4-eyes)
@@ -232,6 +243,25 @@ export default function DraftReviewQueue({ items }: DraftReviewQueueProps) {
                   )}
                 </div>
               </div>
+
+              {editingId === item.id && (
+                <DraftEditForm
+                  entryId={item.id}
+                  version={item.version}
+                  initialMemo={item.memo ?? ''}
+                  initialDate={item.date}
+                  initialAmount={item.amount}
+                  canEditAmount={
+                    item.lines.length === 2 &&
+                    item.lines[0].amount === item.lines[1].amount
+                  }
+                  onSaved={() => {
+                    setEditingId(null);
+                    router.refresh();
+                  }}
+                  onCancel={() => setEditingId(null)}
+                />
+              )}
 
               {entryError && (
                 <div

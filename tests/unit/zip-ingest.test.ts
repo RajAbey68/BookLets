@@ -25,6 +25,7 @@ import AdmZip from 'adm-zip';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   MAX_ZIP_ENTRIES,
+  MAX_INGEST_IMAGES,
   MAX_TOTAL_UNCOMPRESSED_BYTES,
   MAX_ENTRY_COMPRESSION_RATIO,
   OCR_CONCURRENCY_LIMIT,
@@ -38,6 +39,7 @@ import {
   ingestZip,
   type ZipIngestDeps,
 } from '../../src/lib/zip-ingest';
+import { summarizeZipUploadResponse } from '../../src/lib/zip-upload-result';
 import type { JournalEntryInput } from '../../src/lib/types';
 import type { GeminiOcrResult } from '../../src/lib/gemini-ocr';
 
@@ -121,6 +123,11 @@ function makeDeps(overrides: Partial<ZipIngestDeps> = {}): ZipIngestDeps & {
   const postedInputs: JournalEntryInput[] = [];
   let n = 0;
   const deps: ZipIngestDeps = {
+    // Default: the books are open. The fiscal-period pre-flight has its own
+    // suite (ingest-fiscal-period-preflight.test.ts); here it must simply not
+    // interfere with the guards these tests are about.
+    hasAnyOpenFiscalPeriod: vi.fn(async () => true),
+    hasOpenFiscalPeriodFor: vi.fn(async () => true),
     ocr: vi.fn(async () => OCR_RESULT),
     postEntry: vi.fn(async (input: JournalEntryInput) => {
       postedInputs.push(input);
@@ -549,5 +556,255 @@ describe('S5 zip-ingest — chat text parser', () => {
       '12/07/2026, 10:15 - Kumar: line one\nthis is a continuation\n12/07/2026, 10:16 - Kumar: two',
     );
     expect(parsed.messageCount).toBe(2);
+  });
+});
+
+// Stopgap for the inline serverless batch timeout (RAJ resilience issue): a
+// large export OCRs every image inside one request and can blow past Vercel's
+// function timeout, leaving ghost DRAFTs. Until ingest is moved off to an async
+// worker, reject an export whose OCR-bound image count exceeds a safe cap
+// BEFORE any OCR spend, so the user splits it instead of getting a half-import.
+describe('S5 zip-ingest — per-request image cap (serverless-timeout stopgap)', () => {
+  const images = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ name: `IMG-${i}.jpg`, data: jpeg() }));
+
+  it('exposes a positive image cap that is stricter than the zip-entry cap', () => {
+    expect(MAX_INGEST_IMAGES).toBeGreaterThan(0);
+    expect(MAX_INGEST_IMAGES).toBeLessThan(MAX_ZIP_ENTRIES);
+  });
+
+  it('rejects a zip whose OCR-bound image count exceeds maxImages (TOO_MANY_IMAGES)', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toMatchObject({
+      name: 'ZipIngestError',
+      code: 'TOO_MANY_IMAGES',
+      // Structured payload so the UI can render a precise message without
+      // parsing prose (peer-review enhancement).
+      meta: { limit: 2, actual: 3 },
+    });
+  });
+
+  it('trips the cap BEFORE any OCR spend or ledger write', async () => {
+    const deps = makeDeps();
+    await expect(
+      ingestZip(buildZip(images(3)), CTX, deps, { maxImages: 2 }),
+    ).rejects.toBeInstanceOf(ZipIngestError);
+    expect(deps.ocr).not.toHaveBeenCalled();
+    expect(deps.postEntry).not.toHaveBeenCalled();
+  });
+
+  it('accepts exactly maxImages (boundary)', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(buildZip(images(2)), CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(2);
+  });
+
+  it('counts only fresh (non-duplicate) images against the cap', async () => {
+    // 3 images, but 2 already ingested → only 1 fresh → under a cap of 2.
+    const entries = images(3);
+    const built = buildZip(entries);
+    const firstTwoKeys = new Set(
+      entries.slice(0, 2).map((e) => computeEntryIdempotencyKey(CTX.organizationId, sha256(e.data))),
+    );
+    const deps = makeDeps({ findExistingIdempotencyKeys: vi.fn(async () => firstTwoKeys) });
+    const report = await ingestZip(built, CTX, deps, { maxImages: 2 });
+    expect(report.created).toBe(1);
+    expect(report.deduped).toBe(2);
+  });
+});
+
+// Harness-review additions (4-model peer panel, 2026-07-19): the suite asserted
+// line COUNTS and isDebit flags but never the double-entry balance, the OCR
+// date propagation, ledger-stage failure isolation, or dirty-OCR handling.
+// Number-by-number progress (owner feedback: "spinners are shit — I want
+// number-by-number, real-time feedback"). ingestZip must emit one progress
+// event per fresh image so the route can stream a live count.
+describe('S5 zip-ingest — onProgress streaming callback', () => {
+  it('emits exactly one event per fresh image, with monotonic done up to total', async () => {
+    const deps = makeDeps();
+    const entries = Array.from({ length: 3 }, (_, i) => ({ name: `IMG-${i}.jpg`, data: jpeg() }));
+    const events: Array<{ done: number; total: number; name: string; created: number; failed: number }> = [];
+    await ingestZip(buildZip(entries), CTX, deps, {}, (p) => events.push(p));
+
+    expect(events).toHaveLength(3);
+    expect(events.map((e) => e.done)).toEqual([1, 2, 3]);
+    expect(events.every((e) => e.total === 3)).toBe(true);
+    expect(events.map((e) => e.name).sort()).toEqual(['IMG-0.jpg', 'IMG-1.jpg', 'IMG-2.jpg']);
+    expect(events[2].created).toBe(3);
+  });
+
+  it('advances the count for a failed image too (created stays, failed climbs)', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, totalAmount: 0 },
+    }));
+    const deps = makeDeps({ ocr });
+    const events: Array<{ done: number; created: number; failed: number }> = [];
+    await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps, {}, (p) => events.push(p));
+
+    expect(events).toHaveLength(1);
+    expect(events[0].done).toBe(1);
+    expect(events[0].created).toBe(0);
+    expect(events[0].failed).toBe(1);
+  });
+
+  it('is optional — omitting onProgress leaves behaviour unchanged', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps);
+    expect(report.created).toBe(1);
+  });
+});
+
+describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
+  const oneImageZip = () => buildZip([{ name: 'r.jpg', data: jpeg() }]);
+
+  it('every DRAFT is balanced: debit sum === credit sum === OCR totalAmount', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs.length).toBeGreaterThan(0);
+    for (const input of deps.postedInputs) {
+      const debits = input.lines.filter((l) => l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      const credits = input.lines.filter((l) => !l.isDebit).reduce((s, l) => s + Number(l.amount), 0);
+      expect(debits).toBe(credits);
+      expect(debits).toBe(OCR_RESULT.extraction.totalAmount);
+    }
+  });
+
+  it('uses the OCR receipt date, not the upload date', async () => {
+    const deps = makeDeps();
+    await ingestZip(oneImageZip(), CTX, deps);
+    expect(deps.postedInputs[0].date.toISOString()).toBe('2026-07-01T00:00:00.000Z');
+  });
+
+  it('falls back to now (not epoch/garbage) when the OCR date is unparseable', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, date: 'not-a-date' },
+    }));
+    const deps = makeDeps({ ocr });
+    const before = Date.now();
+    await ingestZip(oneImageZip(), CTX, deps);
+    const d = deps.postedInputs[0].date.getTime();
+    expect(d).toBeGreaterThanOrEqual(before - 1000);
+    expect(d).toBeLessThanOrEqual(Date.now() + 1000);
+  });
+
+  it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
+    let call = 0;
+    const postEntry = vi.fn(async () => {
+      call += 1;
+      if (call === 2) throw new Error('db connection dropped');
+      return { id: `je_${call}` };
+    });
+    const deps = makeDeps({ postEntry });
+    const report = await ingestZip(
+      buildZip([
+        { name: 'a.jpg', data: jpeg() },
+        { name: 'b.jpg', data: jpeg() },
+      ]),
+      CTX,
+      deps,
+    );
+    expect(report.created).toBe(1);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].stage).toBe('ledger');
+  });
+});
+
+describe('S5 zip-ingest — dirty OCR results must not become ledger inputs', () => {
+  const badAmounts: Array<[string, number]> = [
+    ['zero', 0],
+    ['negative', -450],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+  ];
+
+  for (const [label, amount] of badAmounts) {
+    it(`records an ocr-stage failure (never a DRAFT) when totalAmount is ${label}`, async () => {
+      const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+        extraction: { ...OCR_RESULT.extraction, totalAmount: amount },
+      }));
+      const deps = makeDeps({ ocr });
+      const report = await ingestZip(buildZip([{ name: 'r.jpg', data: jpeg() }]), CTX, deps);
+
+      expect(deps.postEntry).not.toHaveBeenCalled();
+      expect(report.created).toBe(0);
+      expect(report.failures).toHaveLength(1);
+      expect(report.failures[0].stage).toBe('ocr');
+    });
+  }
+});
+
+
+/**
+ * VERIFICATION — WhatsApp "Export Chat → WITHOUT Media".
+ *
+ * That export is a zip containing only `_chat.txt`. It is the only export
+ * small enough to clear the platform's ~4.5 MB request-body ceiling, so it
+ * was proposed as the interim import path while the transport fix lands.
+ *
+ * These tests pin what it ACTUALLY does today. It does NOT error and it does
+ * NOT hang — but it creates ZERO journal entries, because every draft in this
+ * pipeline originates from OCR of a receipt IMAGE. The chat transcript is
+ * retained as evidence metadata only; no line of it is ever parsed into an
+ * entry. Any UI copy that implies otherwise is a lie, and these tests exist
+ * so that stays visible.
+ */
+describe('WhatsApp "Without Media" export (chat-only zip)', () => {
+  const withoutMediaZip = () => buildZip([{ name: '_chat.txt', data: CHAT_TEXT }]);
+
+  it('ingests without throwing — the archive itself is valid', async () => {
+    const deps = makeDeps();
+    await expect(ingestZip(withoutMediaZip(), CTX, deps)).resolves.toBeDefined();
+  });
+
+  it('creates ZERO journal entries: drafts come from receipt images, never from chat text', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(withoutMediaZip(), CTX, deps);
+
+    expect(report.imageCount).toBe(0);
+    expect(report.created).toBe(0);
+    expect(report.journalEntryIds).toEqual([]);
+    expect(deps.postEntry).not.toHaveBeenCalled();
+    expect(deps.ocr).not.toHaveBeenCalled();
+  });
+
+  it('still records the transcript as evidence, so the upload is not a total no-op', async () => {
+    const deps = makeDeps();
+    const report = await ingestZip(withoutMediaZip(), CTX, deps);
+
+    expect(report.textCount).toBe(1);
+    expect(report.chatFiles).toHaveLength(1);
+    expect(report.chatFiles[0].name).toBe('_chat.txt');
+    expect(report.chatFiles[0].messageCount).toBeGreaterThan(0);
+  });
+
+  it('reports no failures and no skips — it is a clean, empty result, not an error', async () => {
+    const report = await ingestZip(withoutMediaZip(), CTX, makeDeps());
+    expect(report.failures).toEqual([]);
+    expect(report.skipped).toEqual([]);
+  });
+
+  it('is summarised to the operator as "no receipts found", not as a success', () => {
+    // Guards against the pipeline silently reading as "Import complete".
+    const report = {
+      zipHash: 'h',
+      totalEntries: 1,
+      imageCount: 0,
+      textCount: 1,
+      skipped: [],
+      created: 0,
+      deduped: 0,
+      failures: [],
+      chatFiles: [{ name: '_chat.txt', sha256: 's', messageCount: 3, participants: ['Kumar'] }],
+      journalEntryIds: [],
+    };
+    const summary = summarizeZipUploadResponse(200, { report });
+
+    expect(summary.created).toBe(0);
+    expect(summary.showReviewLink).toBe(false);
+    expect(summary.title.toLowerCase()).toContain('no receipts');
+    expect(summary.message).toContain('Attach Media');
   });
 });

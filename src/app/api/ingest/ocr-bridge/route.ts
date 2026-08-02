@@ -100,12 +100,6 @@ export async function POST(request: Request) {
   }
 
   try {
-    // NOTE: this route imports raj_fin_track.ocr_receipts, NOT
-    // sandbox.payment_entries. The sandbox triple-count problem is a
-    // SEPARATE pipeline with no promotion path yet; guarding it here (an
-    // earlier mistake) checked the wrong table. Dedup for ocr_receipts is
-    // handled by the source_file idempotencyKey inside runOcrBridgeImport;
-    // content-level dedup for ocr_receipts is tracked as follow-up work.
     const summary = await runOcrBridgeImport(resolved.context.organizationId, batchSize);
     return NextResponse.json(summary);
   } catch (err) {

@@ -1,0 +1,158 @@
+# BookLets — As-Built Runtime & Service Map
+
+> **Companion to [`ARCHITECTURE.md`](./ARCHITECTURE.md).** That file is the
+> gate-approved *target design* (ingest library, `booklets_staging` schema,
+> promotion function, lockstep). **This file is the *as-built* reality** — what
+> is actually deployed, wired, and configured in production — so every service
+> we call (OCR microservice, DevServer) and every agent works from the
+> same truth. Where the two disagree, that gap is tracked in §8.
+>
+> **Verified against production `2026-07-19`.** Deployed SHA `7a8fc3b`.
+> Canonical URL **https://booklets-one.vercel.app**. Owner: `RajAbey68`.
+> Update this file in the same PR as any topology / service / config change.
+
+---
+
+## 1. Deployment topology
+
+| Item | Value |
+|------|-------|
+| Canonical URL | **https://booklets-one.vercel.app** |
+| Vercel project | `booklets` (team `team_IkwKtIFAHXEsmnUhIlW3Mse9`) |
+| Deploy trigger | push to `main` → Vercel production build → aliased to canonical URL |
+| Do-not-use alias | `booklets-rajabey68s-projects.vercel.app` (behind Vercel login wall — breaks OAuth) |
+| Source | GitHub `RajAbey68/BookLets`, default branch `main` (protected) |
+
+## 2. Data layer
+
+| Item | Value |
+|------|-------|
+| Supabase project ref | `euqdfxekrxnoibeahogq` (eu-west-1) |
+| App schema | `booklets` (Prisma pins `search_path=booklets,public`) |
+| Connections | app: pooled (6543) · backups/migrations: **direct** (5432) — see `docs/BACKUP-RESTORE.md` |
+| Tenancy | single-tenant, DB-trigger enforced (`enforce_single_tenant`) |
+
+**Write-time invariants live in Postgres** (raw-SQL migrations, applied by `psql` per `DEPLOY.md §4` — *not* auto-run by Vercel):
+`20260703_fiscal_lock_and_posted_delete_triggers` · `20260712_rls_org_isolation` · `20260716_single_tenant_lock`.
+RLS is *enabled*; **FORCE RLS is a separate DBA step** (needed before a 2nd tenant).
+
+## 3. AuthN / AuthZ
+
+Auth.js / NextAuth v5, **Google OAuth only**, JWT sessions; route-gating in `src/proxy.ts`.
+
+- Public routes: `/login`, `/api/health`, `/api/auth/*`. All else → `/login`.
+- Allow-list `AUTH_ALLOWED_EMAILS` (`src/auth.ts`) is **fail-closed** — empty in prod rejects everyone.
+- Google client `116263110764-…apps.googleusercontent.com` (GCP `leadsync-489921`); authorised redirect URI must include `https://booklets-one.vercel.app/api/auth/callback/google`.
+- Failure modes: wrong `NEXTAUTH_URL` → `redirect_uri_mismatch`; empty allow-list → `AccessDenied`.
+
+## 4. API surface (what BookLets exposes)
+
+| Route | Method | Auth | Purpose |
+|-------|--------|------|---------|
+| `/api/health` | GET | public | liveness |
+| `/api/auth/[...nextauth]` | * | public | NextAuth OAuth |
+| `/api/ingest/item` | POST | session | **primary** one WhatsApp archive entry → DRAFT entry / chat evidence |
+| `/api/ingest/batch` | POST | session | closes one import run; writes the server-recounted summary row |
+| `/api/ingest/zip` | POST | session | **S5, legacy** whole `.zip` → DRAFT entries (small archives only — see §5) |
+| `/api/ingest/ocr-bridge` | POST | session | **S1b** `raj_fin_track.ocr_receipts` staging → DRAFT |
+| `/api/export/{ledger,trial-balance,pl,balance-sheet}` | GET | session | report exports |
+
+## 5. Ingestion flow (as-built)
+
+### Why the transport changed
+
+`POST /api/ingest/zip` **cannot receive a real WhatsApp export on Vercel.** The
+platform edge rejects any request body over ~4.5 MB with
+`413 FUNCTION_PAYLOAD_TOO_LARGE` *before the function runs* (measured on
+production: a 4 MB body reaches the handler and 401s, a 5 MB body 413s and
+never arrives). An "Export Chat → Attach Media" archive is tens of MB, so the
+route's `MAX_ZIP_UPLOAD_BYTES = 100 MB` was unreachable and **zero receipts were
+ever imported**. The archive is now expanded in the browser and uploaded one
+entry per request.
+
+```text
+WhatsApp .zip  ── expanded IN THE BROWSER (src/lib/zip-reader.ts) ──┐
+ (_chat.txt+images)   guards HERE (client's own protection):        │
+                      entry-cap, total-uncompressed-cap,            │
+                      path-traversal, zip-bomb ratio, type allowlist│
+                                                                    ▼
+        for each entry ─POST /api/ingest/item (≤4 MB)─► ingestItem()
+                                       ├─ guards RE-APPLIED server-side:
+                                       │   filename sanitisation (traversal → 422),
+                                       │   MAX_ITEM_BYTES (413), extension allowlist,
+                                       │   magic bytes, per-org rate limit (429)
+                                       ├─ dedup: sha256(entry bytes) per org — SAME key
+                                       │   fn as the zip path (+ DB unique constraint)
+                                       ├─ extractReceipt(b64) ─► OCR microservice (only provider)
+                                       └─ LedgerService.postEntryWithOutcome(DRAFT)
+                                             debit Suspense 9999 / credit Cash 1000
+                                                │
+        end of run ─POST /api/ingest/batch─► WHATSAPP_BATCH_COMPLETED evidence
+                                             (counts recomputed from the server's
+                                              own per-item evidence rows)
+                                                │
+                                          /review ─ human four-eyes ─► POSTED
+```
+- **DRAFT-only**: OCR'd entries are born DRAFT regardless of confidence (auto-POST abolished — canon §4).
+- **Dedup is unchanged**: `computeEntryIdempotencyKey(orgId, sha256(entryBytes))` is *imported* by the item path from `zip-ingest.ts`, not reimplemented. It is content-addressed and date-independent, so re-uploading an export is a no-op, a partial run resumes, and entries imported through either transport dedupe against each other.
+- **Zip-bomb guard**: now client-side only, and that is correct — the server no longer inflates anything, so the protection is structural rather than a check. The only remaining decompressor is the user's own browser, where `zip-reader.ts` still enforces the ratio.
+- **Timeout**: one OCR per invocation, so the 60 s budget belongs to a single photo. `MAX_INGEST_IMAGES = 30` (PR #101) applies only to the legacy zip route and is not a limit on the per-item path.
+- **Evidence**: one `WHATSAPP_ITEM_INGESTED` row per uploaded entry, `ZIP_CHAT_INGESTED` for the transcript (same payload shape as before; `zipHash` replaced by `batchId`), and one `WHATSAPP_BATCH_COMPLETED` per run. Item rows are per REQUEST, so `tallyBatch` collapses them by `entrySha256` (newest wins) before counting — a retried upload must not read as two receipts. Closing a batch is idempotent: a replayed close returns the existing summary instead of appending a second one.
+- **Never hangs**: the inactivity watchdog lives inside `importWhatsappExport`, not in the cards, so every caller gets it. It measures *silence* (no item finished for 3 min), never total duration — a long healthy import is not cancelled for taking a while. Rate-limit backoff honours `retry-after` clamped to 30 s and is abort-aware.
+- UI entry points: dashboard **"Import WhatsApp export (.zip)"** (`WhatsappZipUploader.tsx`) and the sandbox **"Upload receipts zip"** card (`ZipUploadCard.tsx`); both drive `src/lib/whatsapp-import-client.ts`.
+- **Known limits**: per-file cap **4 MB** (a photo sent as a *document* at full camera resolution is skipped by name, with advice); archive preflight cap 100 MB compressed / 200 MB uncompressed; the browser needs `DecompressionStream('deflate-raw')` (Chrome 80+, Safari 16.4+, Firefox 113+) and Zip64 archives are refused with a clear message.
+
+## 6. External service dependency register  ⚠️ **read if you own one of these**
+
+| Service | Role | Prod-effective endpoint | Env override | Auth | Prod status 2026-07-19 |
+|---------|------|-------------------------|--------------|------|------------------------|
+| **OCR microservice** | receipt OCR (primary) | `https://ocr-microservice-gamma.vercel.app/ocr` | `OCR_MICROSERVICE_URL` | none observed | **UNSET → hardcoded default; default is LIVE** (`POST /ocr` empty → 400) |
+| ~~**SymbiOS**~~ | ~~receipt OCR (fallback)~~ | — | — | — | **REMOVED 2026-07-29.** Never configured anywhere, so the fallback never once ran; `api.symbios.ai` is a **parked domain listed for sale** (301 → Sedo). No code reads these variables any more. Do NOT reintroduce them — setting `SYMBIOS_API_KEY` would have posted receipt images and a bearer token to a domain anyone can buy. There is now exactly **one** OCR provider. |
+| ~~**DevServer** (Hermes-built)~~ | — | — | — | — | **Does not exist** — all-repo search 2026-07-19. Gamma is canonical (§8.1) |
+| **Hostaway** | PMS bookings sync | `https://api.hostaway.com/v1` | `HOSTAWAY_ACCOUNT_ID`, `STRICT_HOSTAWAY` | `HOSTAWAY_CLIENT_ID/SECRET`, `HOSTAWAY_API_KEY` | ⚠️ **LIVE data — revert test bookings** |
+| **Google OAuth** | sign-in | `accounts.google.com` | — | `AUTH_GOOGLE_ID/SECRET` | configured |
+| **Supabase Postgres** | system of record | project `euqdfxekrxnoibeahogq` | `DATABASE_URL` | conn string | live |
+| **`raj_fin_track.ocr_receipts`** | OCR staging (read-only source, S1b) | Supabase schema | `OCR_BRIDGE_ORG_ID` | DB | read-only bridge |
+
+### OCR client contract — any OCR host (incl. DevServer) must conform
+`extractReceipt(imageBase64)` → `POST {OCR_MICROSERVICE_URL}/ocr`
+- **Request:** `{"imageBase64":"<base64, no data-URI prefix>","mode":"receipt"}`, JSON, aborts after `OCR_TIMEOUT_MS` (default **15000 ms**).
+- **Response 200:** `{"extraction":{vendorName,date(ISO-8601|""),totalAmount(number),categorySuggestion,confidence(0–1)}}`.
+- **Non-200 / unreachable:** there is **no second provider**. The failure is classified (`src/lib/ocr-errors.ts`) into `rate-limit` / `quota-exhausted` / `auth` / `timeout` / `unavailable` / `unknown` — all of which mean *the service*, never the photo. Nothing is recorded against the receipt in any case, and re-running resumes by content hash. What happens next depends on whether waiting can help:
+  - **Retryable — `429 OCR_RATE_LIMITED` with `retry-after`.** A passing throttle. The route hands back the provider's own pacing hint and the browser waits it out, so the import **continues**. A 20-per-minute ceiling makes a large export slow, not impossible.
+  - **Terminal — `503` with `OCR_QUOTA_EXHAUSTED` / `OCR_AUTH_FAILED` / `OCR_UNAVAILABLE`.** Waiting inside the run cannot fix these, so the import **stops** with that diagnosis rather than spending a request per receipt to relearn it.
+- **A receipt the service genuinely cannot read** is NOT a service failure: it comes back `200` with a zero amount and is the only thing that becomes `stage:'ocr'`. Never silently mis-booked.
+- **Quota:** the microservice calls Gemini with its own key. The free tier is throttled per MINUTE (observed: `limit: 20` with a ~3.5 s retry hint) as well as capped per day; a per-minute throttle is paced and the import continues, but if the daily allowance is genuinely spent BookLets reports an exhausted quota and stops after **one** request rather than paying to relearn it per receipt. Raising it is a billing change on the OCR service's key, in that service's project.
+
+**To make DevServer the OCR backend:** implement `POST /ocr` (above) and set
+`OCR_MICROSERVICE_URL=<devserver-url>` on the `booklets` Vercel project (production), then redeploy.
+
+## 7. Config / env registry (production, verified 2026-07-19)
+
+| Var | Set | Secret | Note |
+|-----|-----|--------|------|
+| `NEXTAUTH_URL` | ✅ | no | canonical URL |
+| `AUTH_SECRET` / `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` | ✅ | yes | auth |
+| `AUTH_ALLOWED_EMAILS` | ✅ | no | fail-closed allow-list |
+| `DATABASE_URL` | ✅ | yes | Supabase pooled |
+| `OCR_MICROSERVICE_URL` / `OCR_TIMEOUT_MS` | ❌ | no | → gamma default / 15 000 ms |
+| ~~`SYMBIOS_URL` / `SYMBIOS_API_KEY`~~ | ❌ | — | **no longer read by any code** — fallback removed 2026-07-29 |
+| `HOSTAWAY_*` / `OCR_BRIDGE_ORG_ID` | see Vercel | mixed | PMS / bridge |
+
+## 8. OPEN GAPS — resolve, do not assume (P1 zero-fabrication)
+
+1. **DevServer — RESOLVED (2026-07-19).** All-repo search found **no Hermes-built "DevServer" OCR target**. `ocr-microservice-gamma.vercel.app` is the canonical OCR service: hardcoded default, live. `~/GitHub/ocr-microservice` is its (undeployed) source. No env/URL change needed — gamma is correctly wired.
+2. **OCR single-homed — REAL GAP, now stated honestly.** `OCR_MICROSERVICE_URL` has no fallback, and the SymbiOS "fallback" that appeared to provide one was inert (no key has ever existed) and pointed at a **parked domain for sale**. It was removed rather than configured: an untested provider on a domain anyone can buy is not resilience, and leaving it in place made both the code and the operator believe in a safety net that was not there. If gamma is down the import now **stops with an honest diagnosis** and resumes on re-run. Fix option: deploy `~/GitHub/ocr-microservice` as a second instance and add an `OCR_MICROSERVICE_FALLBACK_URL` — a provider we control and can contract-test.
+   - The **more likely** outage is not gamma being down but its Gemini key being out of quota (see §6). That needs billing, not a second host.
+3. **Design-vs-as-built drift** (this doc vs the canon):
+   - Canon §4 specifies a separate `booklets_staging` schema; **as-built** stages as **DRAFT `JournalEntry` rows in the `booklets` schema** (debit Suspense 9999 / credit Cash 1000). The dedicated staging schema is *not yet built*.
+   - Canon §6 requires **FORCE RLS on both schemas + DB write-role separation**; as-built has RLS enabled but **FORCE not applied** and no separate `staging_writer`/`ledger_writer` roles yet.
+   - Canon §5 specifies an atomic `promote_staging_to_ledger()` DB function; as-built promotion is the app-side DRAFT→POSTED review flow.
+4. ~~**Stale docstring** in `gemini-ocr.ts` (says default `localhost:3099`; actual default is the gamma URL).~~ **Fixed 2026-07-29.**
+
+## 9. Guardrails (constrain every change here)
+
+DRAFT-only automation · four-eyes (CODEOWNERS on money-path + non-Anthropic model review + deterministic CI floor) · TDD first · Stripe sandbox-only · backup-before-migrate.
+
+---
+*Created 2026-07-19 (sign-in fix + WhatsApp-upload build, PR #99). Companion to the design canon `ARCHITECTURE.md`.*

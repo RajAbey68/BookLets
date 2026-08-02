@@ -26,6 +26,8 @@
 import AdmZip from 'adm-zip';
 import { createHash } from 'node:crypto';
 import { assertImageMagicBytes, UploadGuardError } from './upload-guard';
+import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { OcrError } from './ocr-errors';
 import { JournalStatus, type JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
 
@@ -33,6 +35,22 @@ import type { GeminiOcrResult } from './gemini-ocr';
 
 /** Hard cap on the number of entries in one archive. */
 export const MAX_ZIP_ENTRIES = 1000;
+
+/**
+ * Per-request OCR-image cap — a stopgap for the inline serverless-batch timeout.
+ * A WhatsApp export OCRs every receipt image inside ONE POST invocation; a large
+ * batch can exceed Vercel's function timeout mid-loop and leave ghost DRAFTs.
+ * Until ingest moves to an async worker, reject batches larger than this BEFORE
+ * any OCR spend so the operator splits them.
+ *
+ * Sized conservatively: 30 ÷ OCR_CONCURRENCY_LIMIT (5) = 6 sequential OCR rounds;
+ * at a pessimistic ~10s/image that is ~60s, at the route's maxDuration ceiling.
+ * We have no measured gamma OCR p95, so 30 is the defensible choice — the cost of
+ * too-low is one extra split; the cost of too-high is the ghost DRAFTs this cap
+ * exists to prevent. The REAL fix is async processing off the request path
+ * (see the ingest-resilience issue); this is only a bridge to that.
+ */
+export const MAX_INGEST_IMAGES = 30;
 
 /** Hard cap on the total uncompressed payload of one archive: 200 MB. */
 export const MAX_TOTAL_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
@@ -47,7 +65,33 @@ export const MAX_ENTRY_COMPRESSION_RATIO = 100;
 /** Ratio guard noise floor — tiny highly-compressible files are legitimate. */
 export const RATIO_GUARD_MIN_BYTES = 64 * 1024;
 
-/** Cap on the COMPRESSED upload itself (checked by the route handler). */
+/**
+ * Server-side cap on the COMPRESSED upload itself (checked by the route
+ * handler). This is a MEMORY guard for deployments that can actually receive
+ * a body this large (the Docker/standalone target) — it is NOT the number a
+ * browser should trust, and it is NOT a statement about what the hosting
+ * platform will carry.
+ *
+ * REACHABILITY WARNING: on Vercel this ceiling is unreachable. The platform
+ * edge rejects any request body over ~4.5 MB with `413
+ * FUNCTION_PAYLOAD_TOO_LARGE` *before* this route is ever invoked (measured
+ * against production: a 4 MB body reaches the handler, a 5 MB body does not),
+ * so POST /api/ingest/zip can only ever accept a small archive there. The
+ * route is kept for small archives, curl and the existing test suite.
+ *
+ * Two different client-side numbers follow from that, and mirroring THIS
+ * constant into the browser instead is what caused the July silent-failure
+ * incident:
+ *
+ *  - A client that posts the whole archive in one body must pre-check against
+ *    MAX_DIRECT_UPLOAD_BYTES (src/lib/upload-limits.ts, 4 MB).
+ *  - A real WhatsApp "Export Chat → Attach Media" export is tens of MB, so it
+ *    cannot use that transport at all and must go per item instead: the
+ *    browser expands the archive (src/lib/zip-reader.ts) and POSTs each entry
+ *    to /api/ingest/item, where MAX_ITEM_BYTES (src/lib/ingest-limits.ts)
+ *    is the per-request ceiling. The archive's own bytes never cross the
+ *    network, so what bounds it is browser memory, not this route.
+ */
 export const MAX_ZIP_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 /** OCR fan-out cap: at most this many in-flight OCR calls per ingest. */
@@ -78,15 +122,28 @@ export type ZipIngestGuardCode =
   | 'TOO_MANY_ENTRIES'
   | 'TOTAL_SIZE_EXCEEDED'
   | 'PATH_TRAVERSAL'
-  | 'ZIP_BOMB';
+  | 'ZIP_BOMB'
+  | 'TOO_MANY_IMAGES'
+  | 'NO_FISCAL_PERIOD'
+  /** The OCR provider is rate limiting or rejecting us — not a bad archive. */
+  | 'OCR_UNAVAILABLE'
+  /**
+   * The OCR account's API quota is spent. Separate from OCR_UNAVAILABLE
+   * because the operator needs opposite advice: an outage is worth retrying
+   * shortly, a spent allowance is not.
+   */
+  | 'OCR_QUOTA_EXHAUSTED';
 
 export class ZipIngestError extends Error {
   readonly code: ZipIngestGuardCode;
+  /** Optional structured payload (e.g. { limit, actual }) for precise UI copy. */
+  readonly meta?: Record<string, number>;
 
-  constructor(code: ZipIngestGuardCode, message: string) {
+  constructor(code: ZipIngestGuardCode, message: string, meta?: Record<string, number>) {
     super(message);
     this.name = 'ZipIngestError';
     this.code = code;
+    this.meta = meta;
   }
 }
 
@@ -97,6 +154,8 @@ export interface ZipIngestLimits {
   maxTotalUncompressedBytes: number;
   maxEntryCompressionRatio: number;
   ratioGuardMinBytes: number;
+  /** Max OCR-bound (fresh) images processed in one request. See MAX_INGEST_IMAGES. */
+  maxImages: number;
 }
 
 const DEFAULT_LIMITS: ZipIngestLimits = {
@@ -104,6 +163,7 @@ const DEFAULT_LIMITS: ZipIngestLimits = {
   maxTotalUncompressedBytes: MAX_TOTAL_UNCOMPRESSED_BYTES,
   maxEntryCompressionRatio: MAX_ENTRY_COMPRESSION_RATIO,
   ratioGuardMinBytes: RATIO_GUARD_MIN_BYTES,
+  maxImages: MAX_INGEST_IMAGES,
 };
 
 export interface ZipFileEntry {
@@ -134,7 +194,12 @@ export interface ZipIngestContext {
 
 export interface IngestFailure {
   name: string;
-  stage: 'ocr' | 'ledger';
+  /**
+   * 'upload' exists for the per-item transport (whatsapp-import-client.ts):
+   * the request itself failed, so the server never got to judge the receipt.
+   * The single-shot zip path never produces it.
+   */
+  stage: 'ocr' | 'ledger' | 'upload';
   error: string;
 }
 
@@ -182,6 +247,20 @@ export interface ZipIngestDeps {
   findExistingIdempotencyKeys: (organizationId: string, keys: string[]) => Promise<Set<string>>;
   resolveLedgerAccounts: (organizationId: string) => Promise<ResolvedLedgerAccounts>;
   recordEvidence: (input: EvidenceInput) => Promise<void>;
+  /**
+   * True when the organisation has ANY open (not closed, not locked)
+   * FiscalPeriod. Consulted once per archive, BEFORE the OCR fan-out: a
+   * fresh organisation has none, and without this the whole archive was
+   * extracted, paid for, and then rejected entry by entry at the ledger.
+   */
+  hasAnyOpenFiscalPeriod: (organizationId: string) => Promise<boolean>;
+  /**
+   * True when an open FiscalPeriod covers `date` — the same test
+   * LedgerService.checkFiscalPeriod applies. Consulted per receipt once OCR
+   * has read its date, so the failure names the date rather than repeating
+   * the ledger's raw error.
+   */
+  hasOpenFiscalPeriodFor: (organizationId: string, date: Date) => Promise<boolean>;
 }
 
 // ─── pure helpers ─────────────────────────────────────────────────────────────
@@ -416,11 +495,22 @@ function ocrDateOrNow(isoDate: string): Date {
  * chat + summary evidence. Per-image OCR/ledger failures are reported in
  * `failures`, never fatal for the rest of the archive.
  */
+/** Emitted once per fresh image so callers can stream a live number-by-number count. */
+export interface ZipIngestProgress {
+  done: number;
+  total: number;
+  name: string;
+  created: number;
+  failed: number;
+}
+export type ZipIngestOnProgress = (p: ZipIngestProgress) => void;
+
 export async function ingestZip(
   zipBuffer: Buffer,
   ctx: ZipIngestContext,
   deps: ZipIngestDeps,
   limits: Partial<ZipIngestLimits> = {},
+  onProgress?: ZipIngestOnProgress,
 ): Promise<ZipIngestReport> {
   const inspected = inspectZip(zipBuffer, limits);
   const makerIdentity = `${ZIP_INGEST_SOURCE}:${ctx.userId}`;
@@ -469,13 +559,62 @@ export async function ingestZip(
   // Deduped counts BOTH intra-archive duplicates and already-ingested keys.
   const deduped = validImages.length - fresh.length;
 
+  // Serverless-timeout stopgap (see MAX_INGEST_IMAGES): OCRing many images
+  // inside this one request can exceed Vercel's function timeout and leave
+  // ghost DRAFTs. Reject an oversized batch BEFORE any OCR spend so the operator
+  // splits it, rather than getting a half-import. The real fix is async
+  // processing off the request path.
+  const maxImages = limits.maxImages ?? DEFAULT_LIMITS.maxImages;
+  if (fresh.length > maxImages) {
+    throw new ZipIngestError(
+      'TOO_MANY_IMAGES',
+      `This export has ${fresh.length} new receipt images; the maximum per upload is ${maxImages}. ` +
+        `Export smaller date ranges (e.g. 1-2 weeks at a time) and upload them one at a time.`,
+      { limit: maxImages, actual: fresh.length },
+    );
+  }
+
+  // Fiscal-period pre-flight (mirrors ocr-bridge.ts, which has always done
+  // this). An organisation with NO open accounting period cannot record any
+  // receipt at all, and checkFiscalPeriod would reject every one of them at
+  // postEntry — after the whole archive had been sent to OCR. Ask once, here,
+  // before a single byte is spent, and reject the archive with copy that says
+  // what to do about it. Skipped entirely when there is nothing fresh to post:
+  // a chat-only or fully-deduped archive touches no ledger, so a missing
+  // period is not that import's problem.
+  if (fresh.length > 0 && !(await deps.hasAnyOpenFiscalPeriod(ctx.organizationId))) {
+    throw new ZipIngestError('NO_FISCAL_PERIOD', NO_OPEN_PERIOD_MESSAGE);
+  }
+
   const accounts = fresh.length > 0 ? await deps.resolveLedgerAccounts(ctx.organizationId) : null;
 
-  await mapWithConcurrency(fresh, OCR_CONCURRENCY_LIMIT, async ({ image, idempotencyKey }) => {
+  const processFreshImage = async ({
+    image,
+    idempotencyKey,
+  }: {
+    image: ZipFileEntry;
+    idempotencyKey: string;
+  }) => {
     let ocrResult: GeminiOcrResult;
     try {
       ocrResult = await deps.ocr(image.data.toString('base64'));
     } catch (err) {
+      // A SERVICE failure says nothing about this receipt — the service never
+      // read it. Marking it 'ocr' would report a perfectly good photo as
+      // unreadable, and would do so for every image left in the archive. Abort
+      // instead; entries already created stay, and re-running dedupes them by
+      // content hash and resumes from here.
+      //
+      // EVERY OcrError, not a list of kinds — see the matching guard in
+      // ingest-item.ts for why enumerating kinds is the bug. An unreadable
+      // PHOTO never arrives as an OcrError: it is a successful response with a
+      // zero amount, handled a few lines below.
+      if (err instanceof OcrError) {
+        throw new ZipIngestError(
+          err.kind === 'quota-exhausted' ? 'OCR_QUOTA_EXHAUSTED' : 'OCR_UNAVAILABLE',
+          err.message,
+        );
+      }
       failures.push({
         name: image.name,
         stage: 'ocr',
@@ -485,10 +624,39 @@ export async function ingestZip(
     }
 
     const { extraction } = ocrResult;
+
+    // Dirty-OCR guard (harness-review finding): a zero/negative/NaN/Infinite
+    // totalAmount must never reach the ledger as a "balanced" garbage entry
+    // (0 debit = 0 credit passes a naive balance check). Record it as an OCR
+    // failure so the operator sees WHICH receipt needs manual entry.
+    if (!Number.isFinite(extraction.totalAmount) || extraction.totalAmount <= 0) {
+      failures.push({
+        name: image.name,
+        stage: 'ocr',
+        error: `OCR returned an unusable amount (${String(extraction.totalAmount)}). Enter this receipt manually.`,
+      });
+      return;
+    }
+
+    // The receipt's own date is only knowable now. Ask the ledger's question
+    // before the post so the operator is told WHICH date is uncovered, instead
+    // of receiving checkFiscalPeriod's "No fiscal period defined for the date
+    // 7/12/2026" — which names no action and, read outside the US, names the
+    // wrong month.
+    const entryDate = ocrDateOrNow(extraction.date);
+    if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
+      failures.push({
+        name: image.name,
+        stage: 'ledger',
+        error: dateOutsidePeriodsMessage(entryDate),
+      });
+      return;
+    }
+
     try {
       const entry = await deps.postEntry({
         organizationId: ctx.organizationId,
-        date: ocrDateOrNow(extraction.date),
+        date: entryDate,
         memo: `ZIP-INGEST: ${extraction.vendorName} [${extraction.categorySuggestion}] — ${image.name}`,
         // DRAFT regardless of confidence — four-eyes promotes, never this module.
         status: ZIP_INGEST_JOURNAL_STATUS,
@@ -509,6 +677,24 @@ export async function ingestZip(
         name: image.name,
         stage: 'ledger',
         error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  // Run the OCR fan-out, emitting one progress event per image (whatever the
+  // outcome) so the route can stream a live count — no spinners.
+  let completed = 0;
+  await mapWithConcurrency(fresh, OCR_CONCURRENCY_LIMIT, async (item) => {
+    try {
+      await processFreshImage(item);
+    } finally {
+      completed += 1;
+      onProgress?.({
+        done: completed,
+        total: fresh.length,
+        name: item.image.name,
+        created: journalEntryIds.length,
+        failed: failures.length,
       });
     }
   });

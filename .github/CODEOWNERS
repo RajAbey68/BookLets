@@ -1,0 +1,45 @@
+# CODEOWNERS — hard, server-side interlock on financial "money-path" files.
+#
+# Purpose (RAJ-674, endorsed by two independent non-Anthropic reviews,
+# Qwen 3.7-max + Z.AI GLM 5.2, 2026-07-15): a change to any file below cannot
+# be merged to `main` until the human owner (@RajAbey68) explicitly approves.
+# This is enforced by GitHub itself (branch protection: "Require review from
+# Code Owners"), NOT by any LLM, agent convention, or kanban board — the only
+# class of control the reviewers judged actually enforceable for a solo,
+# non-coder owner shipping a financial app.
+#
+# The reviewers were explicit: an LLM must NOT be the merge gate (prompt-
+# injection surface via PR diffs; rubber-stamp risk). Automated LLM review may
+# only ADD an advisory comment. The gate is: deterministic CI (tsc, lint,
+# real-Postgres integration tests) + this human Code-Owner approval.
+#
+# NOTE on identities (must be true for this to function — see PR description):
+# GitHub does not let a user approve a PR they authored. For @RajAbey68 to be
+# the required approver, money-path PRs must be AUTHORED by a different
+# identity (e.g. RajAbeyBot). Bot-authors → human-approves is the correct,
+# structurally-valid four-eyes model. Bot-APPROVES (the prior #85 design) is
+# not, and is being demoted to advisory-only.
+
+# ── The double-entry ledger engine — balances, posting, immutability ──────────
+/src/lib/ledger.service.ts        @RajAbey68
+
+# ── DRAFT→POSTED approval / 4-eyes state machine ──────────────────────────────
+/src/app/actions/approval.actions.ts   @RajAbey68
+/src/lib/approval.service.ts      @RajAbey68
+
+# ── Automated money-in paths (OCR receipt → ledger, zip ingest, revenue) ──────
+/src/lib/automation.service.ts    @RajAbey68
+/src/lib/revenue.service.ts       @RajAbey68
+/src/lib/ocr-bridge.ts            @RajAbey68
+/src/lib/ocr-bridge.deps.ts       @RajAbey68
+/src/lib/zip-ingest.ts            @RajAbey68
+/src/lib/zip-ingest.deps.ts       @RajAbey68
+
+# ── Tenant isolation: RLS context, org scoping, the DB client itself ──────────
+/src/lib/prisma.ts                @RajAbey68
+/src/lib/org-context.ts           @RajAbey68
+/src/lib/auth-context.ts          @RajAbey68
+
+# ── Database schema & migrations — where data loss and silent RLS voids live ──
+/prisma/schema.prisma             @RajAbey68
+/prisma/migrations/               @RajAbey68

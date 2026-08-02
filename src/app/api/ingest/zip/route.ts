@@ -9,6 +9,10 @@ import {
 import { buildDefaultZipIngestDeps } from '@/lib/zip-ingest.deps';
 
 export const dynamic = 'force-dynamic';
+// Raise the serverless timeout budget for the inline OCR batch. Paired with the
+// MAX_INGEST_IMAGES cap in zip-ingest.ts as a stopgap until ingest is moved to
+// an async worker. Vercel clamps this to the plan maximum if lower.
+export const maxDuration = 60;
 
 /**
  * S5 — POST /api/ingest/zip
@@ -30,6 +34,22 @@ const GUARD_HTTP_STATUS: Record<ZipIngestGuardCode, number> = {
   TOTAL_SIZE_EXCEEDED: 413,
   PATH_TRAVERSAL: 422,
   ZIP_BOMB: 422,
+  TOO_MANY_IMAGES: 422,
+  // The organisation has no open accounting period, so nothing can be
+  // recorded yet. 422 (not 500): the request was fine, the books are not
+  // ready — and the message tells the operator how to make them ready.
+  NO_FISCAL_PERIOD: 422,
+  // The OCR provider is rate limiting us, or rejecting our credentials. 503
+  // (not 422): nothing is wrong with this archive, so the operator must not be
+  // told it was rejected — the very same upload will work once the service is
+  // free again. Entries created before the abort are already saved, and
+  // re-running dedupes them by content hash.
+  OCR_UNAVAILABLE: 503,
+  // The OCR account's API quota is spent. Also 503 and for the same reason —
+  // the archive is fine — but a distinct code so the message, which says the
+  // limit is on the service's key and how it is raised, is not confused with
+  // a passing outage the operator could just wait out.
+  OCR_QUOTA_EXHAUSTED: 503,
 };
 
 class UploadTooLargeError extends Error {}
@@ -44,8 +64,8 @@ function withByteCap(request: Request, cap: number): Request {
   if (!request.body) return request;
   let total = 0;
   const guarded = request.body.pipeThrough(
-    new TransformStream({
-      transform(chunk: Uint8Array, controller: TransformStreamDefaultController<Uint8Array>) {
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
         total += chunk.byteLength;
         if (total > cap) {
           controller.error(new UploadTooLargeError());
@@ -114,12 +134,51 @@ export async function POST(request: Request) {
     );
   }
 
+  const deps = buildDefaultZipIngestDeps();
+
+  // Streaming mode: when the client asks for NDJSON, emit one progress line per
+  // image (live number-by-number count — no spinner) then a terminal `done` or
+  // `error` event. Auth (401) and the byte cap (413) already ran above as real
+  // HTTP statuses; guard rejections inside ingestZip surface as `error` events
+  // because the 200 stream is already open by the time they can fire.
+  if ((request.headers.get('accept') ?? '').includes('application/x-ndjson')) {
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const write = (obj: unknown) => controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`));
+        try {
+          const report = await ingestZip(zipBuffer, { organizationId, userId }, deps, {}, (p) =>
+            write({ type: 'progress', ...p }),
+          );
+          write({ type: 'done', report });
+        } catch (err) {
+          if (err instanceof ZipIngestError) {
+            console.warn(
+              `[ingest/zip] rejected: ${encodeURIComponent(err.code)} org=${encodeURIComponent(organizationId)} bytes=${zipBuffer.length}`,
+            );
+            write({
+              type: 'error',
+              status: GUARD_HTTP_STATUS[err.code],
+              code: err.code,
+              message: err.message,
+              ...(err.meta ? { meta: err.meta } : {}),
+            });
+          } else {
+            console.error('[ingest/zip] ingestion failed:', err);
+            write({ type: 'error', status: 500, message: 'Zip ingestion failed.' });
+          }
+        } finally {
+          controller.close();
+        }
+      },
+    });
+    return new Response(stream, {
+      headers: { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+
   try {
-    const report = await ingestZip(
-      zipBuffer,
-      { organizationId, userId },
-      buildDefaultZipIngestDeps(),
-    );
+    const report = await ingestZip(zipBuffer, { organizationId, userId }, deps);
     return NextResponse.json({ report });
   } catch (err) {
     if (err instanceof ZipIngestError) {
@@ -130,7 +189,7 @@ export async function POST(request: Request) {
         `[ingest/zip] rejected: ${encodeURIComponent(err.code)} org=${encodeURIComponent(organizationId)} bytes=${zipBuffer.length}`,
       );
       return NextResponse.json(
-        { error: err.message, code: err.code },
+        { error: err.message, code: err.code, ...(err.meta ? { meta: err.meta } : {}) },
         { status: GUARD_HTTP_STATUS[err.code] },
       );
     }

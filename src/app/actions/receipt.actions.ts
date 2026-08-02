@@ -57,9 +57,11 @@ export async function processReceiptAction(
     }
   } catch (error) {
     if (error instanceof UploadGuardError) {
-      console.warn(
-        `[receipt.actions] upload rejected: ${error.code} org=${resolved.context.organizationId} payloadChars=${input.imageBase64?.length ?? 0}`,
-      );
+      console.warn('[receipt.actions] upload rejected', {
+        code: error.code,
+        org: resolved.context.organizationId,
+        payloadChars: input.imageBase64?.length ?? 0,
+      });
       return { success: false, error: error.message };
     }
     throw error;
@@ -75,7 +77,7 @@ export async function processReceiptAction(
     return { success: true, data: result };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Receipt processing failed';
-    console.error('[receipt.actions] processReceiptAction failed:', error);
+    console.error('[receipt.actions] processReceiptAction failed', { message });
     return { success: false, error: message };
   }
 }

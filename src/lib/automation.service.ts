@@ -2,7 +2,6 @@ import { prisma, setRlsOrgContext } from './prisma';
 import { LedgerService } from './ledger.service';
 import { gateAutomatedJournalEntry } from './approval.service';
 import { AUTOMATION_MAKER_IDENTITY } from './maker-identity';
-import { fetchWithTimeout } from './http';
 import { extractReceipt } from './gemini-ocr';
 
 export interface AutomationResult {
@@ -14,11 +13,31 @@ export interface AutomationResult {
   status: 'HIL_REQUIRED';
 }
 
-export class AutomationService {
-  private static SYMBIOS_URL = process.env.SYMBIOS_URL || 'http://localhost:8080';
+/**
+ * RAJ-674 — org-safe resolution of a shared ExpenseCategory's mapped
+ * Account. ExpenseCategory has no organization column (deliberately shared
+ * reference data), so its accountId may belong to whichever org created that
+ * category row first. Using it unconditionally would carry a foreign org's
+ * GL account onto this org's journal line — a real cross-tenant leak, since
+ * Account IS org-scoped. Falls back to this org's own Suspense account
+ * whenever the mapped account is missing or does not belong to `organizationId`.
+ */
+async function resolveOrgSafeAccountId(
+  mappedAccountId: string | null,
+  organizationId: string,
+  suspenseAccountId: string,
+): Promise<string> {
+  if (!mappedAccountId) return suspenseAccountId;
+  const ownedAccount = await prisma.account.findFirst({
+    where: { id: mappedAccountId, organizationId },
+    select: { id: true },
+  });
+  return ownedAccount?.id ?? suspenseAccountId;
+}
 
+export class AutomationService {
   /**
-   * Processes a receipt by sending it to SymbiOS for vision extraction and then recording it in the ledger.
+   * Processes a receipt: one OCR extraction, then a DRAFT ledger entry.
    */
   static async processReceipt(
     organizationId: string,
@@ -26,7 +45,7 @@ export class AutomationService {
     imageBase64: string,
     metadata: { source: 'WEB' | 'MOBILE' } = { source: 'WEB' }
   ): Promise<AutomationResult> {
-    console.log(`[Middleware Agent] Processing receipt from ${metadata.source} for Org: ${organizationId}`);
+    console.log('[Middleware Agent] Processing receipt', { source: metadata.source, org: organizationId });
 
     // Pre-flight: surface bad context up-front instead of failing partway
     // through with a foreign-key error inside the ledger transaction.
@@ -38,54 +57,36 @@ export class AutomationService {
       throw new Error(`Receipt context invalid: property ${propertyId} not found for organization ${organizationId}.`);
     }
 
-    // 1. Vision Extraction — Gemini Flash Vision OCR with SymbiOS fallback
-    // Try Google Gemini Flash Vision first (handles English + Sinhala receipts).
-    // Falls back to SymbiOS if Gemini is unavailable, times out, or returns low confidence.
-    let vendorName: string;
-    let date: string;
-    let totalAmount: number;
-    let categorySuggestion: string;
-    let confidence: number;
-
-    try {
-      const geminiResult = await extractReceipt(imageBase64);
-      const extraction = geminiResult.extraction;
-      vendorName = extraction.vendorName;
-      date = extraction.date;
-      totalAmount = extraction.totalAmount;
-      categorySuggestion = extraction.categorySuggestion;
-      confidence = extraction.confidence;
-      console.log(`[Middleware Agent] Gemini OCR succeeded — vendor="${vendorName}" confidence=${confidence}`);
-    } catch (geminiErr) {
-      const msg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
-      console.warn(`[Middleware Agent] Gemini OCR failed (${msg}), falling back to SymbiOS...`);
-
-      // Fallback to SymbiOS
-      const response = await fetchWithTimeout(`${this.SYMBIOS_URL}/api/v1/automation/extract-receipt`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-maker-identity': AUTOMATION_MAKER_IDENTITY,
-          'x-tenant-id': organizationId,
-          'x-agent-confidence': '1.0',
-        },
-        body: JSON.stringify({ image: imageBase64 }),
-      });
-
-      if (!response.ok) {
-        const body = await response.text().catch(() => '');
-        const detail = body ? ` - ${body.slice(0, 500)}` : '';
-        throw new Error(`SymbiOS Extraction Failed: ${response.status} ${response.statusText}${detail}`);
-      }
-
-      const { extraction } = await response.json();
-      vendorName = extraction.vendorName;
-      date = extraction.date;
-      totalAmount = extraction.totalAmount;
-      categorySuggestion = extraction.categorySuggestion;
-      confidence = extraction.confidence;
-      console.log(`[Middleware Agent] SymbiOS fallback succeeded — vendor="${vendorName}" confidence=${confidence}`);
-    }
+    // 1. Vision Extraction — ONE provider, via extractReceipt (gemini-ocr.ts).
+    //
+    // There is deliberately no second provider here. This method used to catch
+    // EVERY failure from extractReceipt and push the image at SymbiOS, and that
+    // was wrong three times over:
+    //   • it did so for a RATE LIMIT, where a second provider cannot help;
+    //   • its default host was http://localhost:8080, which does not exist in
+    //     production, so the provider's real explanation was replaced by a
+    //     connection error;
+    //   • when it did get an answer it threw
+    //     `SymbiOS Extraction Failed: <status> - <raw provider body>`, and
+    //     receipt.actions.ts puts that message straight on the screen — so the
+    //     upstream body, quota URLs and internal metric names included, became
+    //     operator-facing text.
+    // See the header of gemini-ocr.ts for why the fallback was removed rather
+    // than repaired.
+    //
+    // A failure from extractReceipt is an OcrError whose `message` is already
+    // written for the operator and whose `kind` says whose problem it is
+    // (throttle / spent quota / outage / credentials). Letting it propagate
+    // untouched is the whole point: receipt.actions.ts surfaces exactly that
+    // sentence, so the single-receipt uploader tells the same truth the
+    // WhatsApp import does.
+    const { extraction } = await extractReceipt(imageBase64);
+    const vendorName = extraction.vendorName;
+    const date = extraction.date;
+    const totalAmount = extraction.totalAmount;
+    const categorySuggestion = extraction.categorySuggestion;
+    const confidence = extraction.confidence;
+    console.log(`[Middleware Agent] OCR succeeded — vendor="${vendorName}" confidence=${confidence}`);
 
     // D3 conf-gate: machine-extracted entries ALWAYS land as DRAFT — no
     // confidence score (including exactly 1.0) authorises auto-posting.
@@ -127,21 +128,30 @@ export class AutomationService {
       throw new Error('Automation Setup Error: Suspense account (code 9999) is not seeded for this organization.');
     }
 
+    // Resolve/create the category row for the Expense record's label FK —
+    // ExpenseCategory is intentionally shared/global reference data (no
+    // organization column), so this name match is fine on its own.
     let category = await prisma.expenseCategory.findFirst({
       where: { name: { contains: categorySuggestion } }
     });
-
     if (!category) {
       category = await prisma.expenseCategory.create({
-        data: {
-          name: categorySuggestion,
-          // Default to the Suspense account if no mapping exists
-          accountId: suspenseAccount.id,
-        }
+        data: { name: categorySuggestion, accountId: suspenseAccount.id }
       });
     }
 
-    const expenseAccountId = category.accountId || suspenseAccount.id;
+    // RAJ-674: the category row is shared across orgs, but its accountId is
+    // org-scoped. A name match against a category some OTHER org created (and
+    // therefore pointed at ITS OWN account) must never carry that foreign
+    // Account onto this org's journal line — verify the mapped account
+    // actually belongs to THIS organization before using it (same guard
+    // src/lib/ocr-bridge.deps.ts resolveExpenseAccountId already applies for
+    // the newer S1b path; this backports it here).
+    const expenseAccountId = await resolveOrgSafeAccountId(
+      category.accountId,
+      organizationId,
+      suspenseAccount.id,
+    );
 
     // Resolve Bank Account by code, fall back to name match, then Suspense.
     const bankAccount =

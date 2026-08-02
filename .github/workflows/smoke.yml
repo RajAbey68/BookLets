@@ -1,0 +1,25 @@
+name: Live Dependency Smoke
+
+# Runs against PRODUCTION endpoints hourly (and on demand) to catch a broken
+# third-party dependency — e.g. an OCR service with no API key — automatically.
+# NOT a PR merge gate: it depends on external availability and would flap.
+on:
+  schedule:
+    - cron: '17 * * * *'   # hourly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Live Dependency Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run test:smoke

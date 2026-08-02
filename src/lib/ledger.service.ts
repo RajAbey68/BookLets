@@ -520,9 +520,130 @@ export class LedgerService {
             payload: { entryId: id, organizationId, expectedVersion },
           });
         } catch (logErr) {
+          // Structured logging (CodeQL js/tainted-format-string + js/log-injection):
+          // the user-controlled entry id must never sit in the format-string
+          // position, and is passed as structured data, not concatenated into
+          // the message, so it cannot forge log lines or inject format specifiers.
           console.error(
-            `[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence for entry ${id}:`,
-            logErr,
+            '[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence',
+            { entryId: id, cause: logErr instanceof Error ? logErr.message : String(logErr) },
+          );
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * RAJ-674 punch-list #3 — the guarded write path behind the review-queue
+   * "Edit" form. Lets a checker correct memo/date/amount on an automated
+   * DRAFT before deciding it.
+   *
+   * Deliberately narrower than updateEntryWithVersion: the `status: 'DRAFT'`
+   * clause is part of the SAME version-guarded updateMany, so an entry that
+   * has already been decided (POSTED/VOIDED) fails exactly like a stale
+   * write — OptimisticLockError, never a silent edit of settled history.
+   *
+   * Amount edits assume the shape every automated ingestion path (receipt
+   * OCR, zip-ingest, S1b bridge) actually produces: exactly two lines, equal
+   * amounts (simple debit expense / credit cash pair). Setting both lines to
+   * the same new amount trivially preserves debits==credits, so no separate
+   * rebalance step is needed — but the assumption is verified, not assumed:
+   * any entry that doesn't already fit it is refused rather than silently
+   * mishandled (defends a future caller passing a manual multi-line entry
+   * into a path that was never designed to edit one).
+   */
+  static async updateDraftEntryFields(
+    id: string,
+    organizationId: string,
+    expectedVersion: number,
+    updates: { memo?: string; date?: Date; amount?: string },
+  ) {
+    const { amount, ...entryFields } = updates;
+
+    let amountDecimal: Decimal | null = null;
+    if (amount !== undefined) {
+      amountDecimal = new Decimal(amount);
+      if (!amountDecimal.isFinite() || amountDecimal.lessThanOrEqualTo(0)) {
+        throw new Error(`Amount must be a positive number; got "${amount}".`);
+      }
+    }
+
+    return runWithOrgContext(organizationId, () =>
+      this.updateDraftEntryFieldsScoped(id, organizationId, expectedVersion, entryFields, amountDecimal));
+  }
+
+  private static async updateDraftEntryFieldsScoped(
+    id: string,
+    organizationId: string,
+    expectedVersion: number,
+    entryFields: { memo?: string; date?: Date },
+    amountDecimal: Decimal | null,
+  ) {
+    const safeData = { ...(entryFields as Prisma.JournalEntryUpdateInput) };
+    delete safeData.version;
+
+    try {
+      return await prisma.$transaction(async (tx) => {
+        await setRlsOrgContext(tx, organizationId);
+
+        const result = await tx.journalEntry.updateMany({
+          where: { id, organizationId, version: expectedVersion, status: 'DRAFT' },
+          data: { ...safeData, version: { increment: 1 } },
+        });
+        if (result.count === 0) {
+          throw new OptimisticLockError(id, expectedVersion);
+        }
+
+        if (amountDecimal !== null) {
+          const current = await tx.journalEntry.findFirst({
+            where: { id },
+            include: { lines: true },
+          });
+          const lines = current?.lines ?? [];
+          if (lines.length !== 2) {
+            throw new Error(
+              `Cannot edit the amount on JournalEntry "${id}": expected exactly two lines, found ${lines.length}.`,
+            );
+          }
+          const [a, b] = lines;
+          if (!new Decimal(a.amount).equals(new Decimal(b.amount))) {
+            throw new Error(
+              `Cannot edit the amount on JournalEntry "${id}": its two lines are not already equal — this entry was not created by an automated ingestion path this editor supports.`,
+            );
+          }
+
+          await tx.journalLine.updateMany({
+            where: { journalEntryId: id },
+            data: { amount: amountDecimal.toString() },
+          });
+        }
+
+        return tx.journalEntry.findUniqueOrThrow({
+          where: { id },
+          include: { lines: true },
+        });
+      });
+    } catch (err) {
+      if (err instanceof OptimisticLockError) {
+        try {
+          await EvidenceLogService.record(prisma, {
+            eventType: 'OPTIMISTIC_LOCK_REJECTED',
+            tenantId: organizationId,
+            makerIdentity: 'system',
+            description:
+              `Rejected stale/non-draft edit to JournalEntry ${id}: expected version ${expectedVersion} ` +
+              `no longer matched, the entry is not DRAFT, or it is not in org ${organizationId}.`,
+            payload: { entryId: id, organizationId, expectedVersion },
+          });
+        } catch (logErr) {
+          // Structured logging (CodeQL js/tainted-format-string + js/log-injection):
+          // the user-controlled entry id must never sit in the format-string
+          // position, and is passed as structured data, not concatenated into
+          // the message, so it cannot forge log lines or inject format specifiers.
+          console.error(
+            '[LedgerService] FAILED to record OPTIMISTIC_LOCK_REJECTED evidence',
+            { entryId: id, cause: logErr instanceof Error ? logErr.message : String(logErr) },
           );
         }
       }
