@@ -56,6 +56,7 @@ function makeDeps(overrides: Partial<ItemIngestDeps> = {}): ItemIngestDeps {
     resolveLedgerAccounts: vi.fn(async () => ({
       expenseAccountId: 'acct_suspense',
       cashAccountId: 'acct_cash',
+      currency: 'LKR',
     })),
     recordEvidence: vi.fn(async () => {}),
     // Default: the books are open. The fiscal-period pre-flight has its own

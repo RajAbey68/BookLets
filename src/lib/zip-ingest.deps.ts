@@ -12,6 +12,7 @@ import { prisma } from './prisma';
 import { extractReceipt } from './gemini-ocr';
 import { LedgerService } from './ledger.service';
 import { EvidenceLogService } from './evidence-log.service';
+import { assertSameCurrency } from './zip-ingest';
 import type { ResolvedLedgerAccounts, ZipIngestDeps } from './zip-ingest';
 
 /**
@@ -88,7 +89,7 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
       // Drafts debit Suspense — a human reclassifies during four-eyes review.
       const suspense = await prisma.account.findFirst({
         where: { organizationId, code: '9999' },
-        select: { id: true },
+        select: { id: true, currency: true },
       });
       if (!suspense) {
         throw new Error(
@@ -98,11 +99,11 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
       const bank =
         (await prisma.account.findFirst({
           where: { organizationId, code: '1000' },
-          select: { id: true },
+          select: { id: true, currency: true },
         })) ??
         (await prisma.account.findFirst({
           where: { organizationId, name: { contains: 'Cash', mode: 'insensitive' } },
-          select: { id: true },
+          select: { id: true, currency: true },
         }));
       if (!bank) {
         // Falling back to the suspense account would produce a degenerate
@@ -112,9 +113,18 @@ export function buildDefaultZipIngestDeps(): ZipIngestDeps {
           'Zip ingest setup error: no bank/cash account (code 1000 or name containing "Cash") is seeded for this organization.',
         );
       }
+      assertSameCurrency(suspense.currency, bank.currency);
       return {
         expenseAccountId: suspense.id,
         cashAccountId: bank.id,
+        // The line currency is a fact about the account, not a database
+        // default. JournalLine.currency defaults to "EUR" at the schema level,
+        // so an omitted value silently stamped EUR onto an all-LKR chart of
+        // accounts — 270 lines before anyone noticed.
+        //
+        // Both accounts are verified to agree above, so one value is the
+        // truthful currency of both lines.
+        currency: suspense.currency,
       };
     },
 

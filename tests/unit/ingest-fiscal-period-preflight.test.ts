@@ -50,6 +50,7 @@ function itemDeps(overrides: Partial<ItemIngestDeps> = {}): ItemIngestDeps {
     resolveLedgerAccounts: vi.fn(async () => ({
       expenseAccountId: 'acct_suspense',
       cashAccountId: 'acct_cash',
+      currency: 'LKR',
     })),
     recordEvidence: vi.fn(async () => {}),
     hasAnyOpenFiscalPeriod: vi.fn(async () => true),
@@ -66,6 +67,7 @@ function zipDeps(overrides: Partial<ZipIngestDeps> = {}): ZipIngestDeps {
     resolveLedgerAccounts: vi.fn(async () => ({
       expenseAccountId: 'acct_suspense',
       cashAccountId: 'acct_cash',
+      currency: 'LKR',
     })),
     recordEvidence: vi.fn(async () => {}),
     hasAnyOpenFiscalPeriod: vi.fn(async () => true),

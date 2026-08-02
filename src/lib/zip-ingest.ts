@@ -234,6 +234,45 @@ export interface EvidenceInput {
 export interface ResolvedLedgerAccounts {
   expenseAccountId: string;
   cashAccountId: string;
+  /**
+   * ISO code of the accounts being posted to (S1b: 'LKR').
+   *
+   * Carried explicitly because `JournalLine.currency` defaults to `"EUR"` at
+   * the schema level, and a line that omits it silently inherits that default
+   * — which is how 270 lines came to be stamped EUR against a chart of
+   * accounts that is entirely LKR. The line's currency must be a fact about
+   * the account it posts to, never a database default nobody chose.
+   *
+   * One value covers both lines because `assertSameCurrency` has already
+   * refused the case where the two accounts disagree.
+   */
+  currency: string;
+}
+
+/**
+ * Refuse to build an entry whose two sides are denominated differently.
+ *
+ * Stamping each line with its own account's currency would look like the
+ * stricter reading of "currency comes from the account", but it produces a
+ * journal entry that cannot balance: the same magnitude debited in one
+ * currency and credited in another is two unrelated numbers wearing the shape
+ * of double-entry, and it would balance only in the arithmetic, never in the
+ * money. There is no FX rate at this layer and no place to put the difference.
+ *
+ * The books are single-currency by design — a non-LKR document is parked as
+ * FX_UNSUPPORTED rather than converted (see docs/INGESTION-DESIGN.md). A
+ * mismatch here therefore means the chart of accounts is misconfigured, which
+ * is a setup fault to be fixed by a human, not a value to be guessed at
+ * import time.
+ */
+export function assertSameCurrency(expenseCurrency: string, cashCurrency: string): void {
+  if (expenseCurrency !== cashCurrency) {
+    throw new Error(
+      `Receipt import setup error: the expense account is denominated in ${expenseCurrency} ` +
+        `but the bank/cash account is in ${cashCurrency}. A journal entry cannot be posted ` +
+        'across two currencies. Correct the chart of accounts before importing.',
+    );
+  }
 }
 
 /**
@@ -481,13 +520,41 @@ export function inspectZip(zipBuffer: Buffer, limits: Partial<ZipIngestLimits> =
 
 // ─── ingestion orchestration ──────────────────────────────────────────────────
 
-function ocrDateOrNow(isoDate: string): Date {
+/**
+ * The receipt's own date, or null when it has none.
+ *
+ * DATES ARE NEVER FABRICATED. This used to fall back to `new Date()`, which
+ * silently stamped today onto any receipt whose date the OCR could not read.
+ * In one 225-image import that produced 83 entries dated the day of the
+ * import rather than the day of the expense — roughly 15 million LKR landing
+ * in the wrong month, on a date no document supports, in books that close
+ * monthly.
+ *
+ * The rule is already written down in ocr-bridge.ts, which parks such rows as
+ * NO_DOC_DATE: "doc_date missing — dates are NEVER fabricated from
+ * processed_at; a human assigns them." That contract binds this path too;
+ * having two ingest routes with different standards for the same ledger is
+ * what allowed the divergence in the first place.
+ */
+export function ocrDateOrNull(isoDate: string): Date | null {
   if (/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
     const parsed = new Date(`${isoDate}T00:00:00.000Z`);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
+    // The round-trip is the real check, not the NaN test. Date rolls an
+    // impossible calendar date forward instead of rejecting it — "2026-02-31"
+    // parses happily and comes back as 3 March — so a NaN test alone would let
+    // this function invent the very thing it exists to prevent, and the
+    // invented date would look entirely ordinary in the ledger.
+    if (!Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === isoDate) {
+      return parsed;
+    }
   }
-  return new Date();
+  return null;
 }
+
+/** Operator-facing reason for a receipt held back because it carries no date. */
+export const NO_DOC_DATE_MESSAGE =
+  'No date could be read on this receipt. Dates are never guessed — ' +
+  'enter this one by hand with the date shown on the document.';
 
 /**
  * Full pipeline: inspect (guards + split) → dedupe by content-hash key →
@@ -643,7 +710,11 @@ export async function ingestZip(
     // of receiving checkFiscalPeriod's "No fiscal period defined for the date
     // 7/12/2026" — which names no action and, read outside the US, names the
     // wrong month.
-    const entryDate = ocrDateOrNow(extraction.date);
+    const entryDate = ocrDateOrNull(extraction.date);
+    if (entryDate === null) {
+      failures.push({ name: image.name, stage: 'ocr', error: NO_DOC_DATE_MESSAGE });
+      return;
+    }
     if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
       failures.push({
         name: image.name,
@@ -667,8 +738,20 @@ export async function ingestZip(
         source: ZIP_INGEST_SOURCE,
         sourceId: image.sha256,
         lines: [
-          { accountId: accounts!.expenseAccountId, amount: extraction.totalAmount, isDebit: true },
-          { accountId: accounts!.cashAccountId, amount: extraction.totalAmount, isDebit: false },
+          // currency comes from the ACCOUNT, never the schema default — see
+          // ResolvedLedgerAccounts.currency.
+          {
+            accountId: accounts!.expenseAccountId,
+            amount: extraction.totalAmount,
+            isDebit: true,
+            currency: accounts!.currency,
+          },
+          {
+            accountId: accounts!.cashAccountId,
+            amount: extraction.totalAmount,
+            isDebit: false,
+            currency: accounts!.currency,
+          },
         ],
       });
       journalEntryIds.push(entry.id);

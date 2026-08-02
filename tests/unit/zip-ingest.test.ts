@@ -37,6 +37,8 @@ import {
   computeEntryIdempotencyKey,
   parseChatText,
   ingestZip,
+  ocrDateOrNull,
+  assertSameCurrency,
   type ZipIngestDeps,
 } from '../../src/lib/zip-ingest';
 import { summarizeZipUploadResponse } from '../../src/lib/zip-upload-result';
@@ -138,6 +140,7 @@ function makeDeps(overrides: Partial<ZipIngestDeps> = {}): ZipIngestDeps & {
     resolveLedgerAccounts: vi.fn(async () => ({
       expenseAccountId: 'acct_suspense',
       cashAccountId: 'acct_cash',
+      currency: 'LKR',
     })),
     recordEvidence: vi.fn(async () => {}),
     ...overrides,
@@ -678,16 +681,68 @@ describe('S5 zip-ingest — financial integrity of created DRAFTs', () => {
     expect(deps.postedInputs[0].date.toISOString()).toBe('2026-07-01T00:00:00.000Z');
   });
 
-  it('falls back to now (not epoch/garbage) when the OCR date is unparseable', async () => {
+  /**
+   * REPLACES: "falls back to now (not epoch/garbage) when the OCR date is
+   * unparseable" — which asserted the OPPOSITE and locked in a real defect.
+   *
+   * Falling back to `now` is not a safe default on a dated financial record.
+   * On 2026-07-29 it put 83 of 135 entries (~15M LKR) on the import date
+   * rather than the expense date, in books that close monthly — and because
+   * every one of them looked plausible, nothing flagged it.
+   *
+   * ocr-bridge.ts already held the correct contract for the other ingest
+   * path: "doc_date missing — dates are NEVER fabricated from processed_at;
+   * a human assigns them." Both paths write to the same ledger, so both must
+   * honour it. An unreadable date is a reason to hold the receipt back by
+   * name, never a reason to invent one.
+   */
+  it('holds the receipt back rather than inventing a date the document lacks', async () => {
     const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
       extraction: { ...OCR_RESULT.extraction, date: 'not-a-date' },
     }));
     const deps = makeDeps({ ocr });
-    const before = Date.now();
-    await ingestZip(oneImageZip(), CTX, deps);
-    const d = deps.postedInputs[0].date.getTime();
-    expect(d).toBeGreaterThanOrEqual(before - 1000);
-    expect(d).toBeLessThanOrEqual(Date.now() + 1000);
+
+    const report = await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs).toHaveLength(0);
+    expect(report.created).toBe(0);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].error).toMatch(/never guessed|no date/i);
+  });
+
+  /**
+   * The subtler half of "dates are never fabricated": a date can be
+   * well-formed, pass a NaN check, and still be one the document cannot have
+   * carried. `new Date("2026-02-31")` does not fail — it rolls forward to
+   * 3 March. A guard that only rejected NaN would therefore invent 3 March out
+   * of an OCR misread, and the invented date would look entirely ordinary
+   * sitting in the ledger. Only the round-trip catches it.
+   */
+  it('refuses a well-formed but impossible calendar date instead of rolling it forward', async () => {
+    const ocr = vi.fn(async (): Promise<GeminiOcrResult> => ({
+      extraction: { ...OCR_RESULT.extraction, date: '2026-02-31' },
+    }));
+    const deps = makeDeps({ ocr });
+
+    const report = await ingestZip(oneImageZip(), CTX, deps);
+
+    expect(deps.postedInputs).toHaveLength(0);
+    expect(report.created).toBe(0);
+    expect(report.failures[0].error).toMatch(/never guessed|no date/i);
+  });
+
+  it.each([
+    ['an impossible day-of-month', '2026-02-31'],
+    ['a 31st in a 30-day month', '2026-04-31'],
+    ['a non-leap-year 29 February', '2027-02-29'],
+    ['a month past December', '2026-13-01'],
+  ])('ocrDateOrNull returns null for %s', (_label, value) => {
+    expect(ocrDateOrNull(value)).toBeNull();
+  });
+
+  it('ocrDateOrNull still accepts genuine dates, including a real leap day', () => {
+    expect(ocrDateOrNull('2026-07-12')?.toISOString()).toBe('2026-07-12T00:00:00.000Z');
+    expect(ocrDateOrNull('2028-02-29')?.toISOString()).toBe('2028-02-29T00:00:00.000Z');
   });
 
   it('a postEntry (ledger) failure on one image is isolated: prior entry created, failure recorded with stage ledger', async () => {
@@ -806,5 +861,76 @@ describe('WhatsApp "Without Media" export (chat-only zip)', () => {
     expect(summary.showReviewLink).toBe(false);
     expect(summary.title.toLowerCase()).toContain('no receipts');
     expect(summary.message).toContain('Attach Media');
+  });
+});
+
+describe('ledger integrity — dates and currency', () => {
+  /**
+   * The 2026-07-29 incident. A 225-image import produced 83 entries dated the
+   * day of the IMPORT rather than the day of the expense, because an
+   * unreadable date fell back to `new Date()`. ~15M LKR landed in the wrong
+   * month, on a date no document supports, in books that close monthly.
+   *
+   * ocr-bridge.ts already states the rule this violated: "doc_date missing —
+   * dates are NEVER fabricated from processed_at; a human assigns them."
+   */
+  it('never fabricates a date when the receipt has none', async () => {
+    const deps = makeDeps({
+      ocr: vi.fn(async () => ({
+        extraction: {
+          vendorName: 'New pool shine',
+          date: '',                 // unreadable on the document
+          totalAmount: 40000,
+          categorySuggestion: 'Other',
+          confidence: 0.95,
+        },
+      })),
+    });
+
+    const report = await ingestZip(buildZip([{ name: "IMG-0001.jpg", data: jpeg() }]), CTX, deps);
+
+    // Held back by name, not posted with an invented date.
+    expect(report.created).toBe(0);
+    expect(deps.postedInputs).toHaveLength(0);
+    expect(report.failures).toHaveLength(1);
+    expect(report.failures[0].error).toMatch(/never guessed|no date/i);
+  });
+
+  it('stamps the account currency on every line, never the schema default', async () => {
+    // JournalLine.currency defaults to "EUR" in the schema. Omitting it wrote
+    // EUR onto an all-LKR chart of accounts — 270 lines before anyone noticed.
+    const deps = makeDeps();
+
+    await ingestZip(buildZip([{ name: "IMG-0001.jpg", data: jpeg() }]), CTX, deps);
+
+    expect(deps.postedInputs).toHaveLength(1);
+    const lines = deps.postedInputs[0].lines;
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line.currency).toBe('LKR');
+    }
+  });
+
+  /**
+   * Both lines carry ONE currency because the resolver has already refused the
+   * case where the two accounts disagree.
+   *
+   * Stamping each line with its own account's currency looks like the stricter
+   * reading of "currency comes from the account", but it yields an entry that
+   * cannot balance — the same magnitude debited in LKR and credited in USD is
+   * two unrelated numbers in the shape of double-entry. There is no FX rate at
+   * this layer and nowhere to put the difference, and the books are
+   * single-currency by design. A mismatch is a misconfigured chart of
+   * accounts: a setup fault for a human, not a value to guess at import time.
+   */
+  describe('assertSameCurrency', () => {
+    it('accepts two accounts denominated the same way', () => {
+      expect(() => assertSameCurrency('LKR', 'LKR')).not.toThrow();
+    });
+
+    it('refuses to build an entry spanning two currencies, and names both', () => {
+      expect(() => assertSameCurrency('LKR', 'USD')).toThrow(/LKR[\s\S]*USD/);
+      expect(() => assertSameCurrency('LKR', 'USD')).toThrow(/cannot be posted across two currencies/i);
+    });
   });
 });

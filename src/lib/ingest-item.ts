@@ -52,6 +52,8 @@ import {
   ZIP_INGEST_SOURCE,
   computeEntryIdempotencyKey,
   parseChatText,
+  ocrDateOrNull,
+  NO_DOC_DATE_MESSAGE,
   type EvidenceInput,
   type ResolvedLedgerAccounts,
 } from './zip-ingest';
@@ -250,13 +252,7 @@ export function isValidBatchId(raw: unknown): raw is string {
 
 // ─── ingestion ────────────────────────────────────────────────────────────────
 
-function ocrDateOrNow(isoDate: string): Date {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) {
-    const parsed = new Date(`${isoDate}T00:00:00.000Z`);
-    if (!Number.isNaN(parsed.getTime())) return parsed;
-  }
-  return new Date();
-}
+
 
 /**
  * Ingest exactly one archive entry.
@@ -444,7 +440,18 @@ async function ingestImage(
   // so the operator is told WHICH date is uncovered instead of receiving
   // checkFiscalPeriod's "No fiscal period defined for the date 7/12/2026" —
   // which names no action and, read outside the US, names the wrong month.
-  const entryDate = ocrDateOrNow(extraction.date);
+  // DATES ARE NEVER FABRICATED — see ocrDateOrNull. A receipt with no legible
+  // date is held back by name, not stamped with today's.
+  const entryDate = ocrDateOrNull(extraction.date);
+  if (entryDate === null) {
+    return {
+      ...base,
+      kind: 'image',
+      outcome: 'failed',
+      stage: 'ocr',
+      reason: NO_DOC_DATE_MESSAGE,
+    };
+  }
   if (!(await deps.hasOpenFiscalPeriodFor(ctx.organizationId, entryDate))) {
     return {
       ...base,
@@ -482,8 +489,20 @@ async function ingestImage(
       source: ZIP_INGEST_SOURCE,
       sourceId: base.sha256,
       lines: [
-        { accountId: accounts.expenseAccountId, amount: extraction.totalAmount, isDebit: true },
-        { accountId: accounts.cashAccountId, amount: extraction.totalAmount, isDebit: false },
+        // currency comes from the ACCOUNT, never JournalLine's "EUR" schema
+        // default — see ResolvedLedgerAccounts.currency.
+        {
+          accountId: accounts.expenseAccountId,
+          amount: extraction.totalAmount,
+          isDebit: true,
+          currency: accounts.currency,
+        },
+        {
+          accountId: accounts.cashAccountId,
+          amount: extraction.totalAmount,
+          isDebit: false,
+          currency: accounts.currency,
+        },
       ],
     });
     return {
