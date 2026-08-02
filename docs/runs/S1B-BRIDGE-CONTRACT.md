@@ -64,12 +64,19 @@ read-only to the app) and never invented into the ledger.
 1. **HR-5** — `MIGRATION-BASELINE-DDL.sql` applied + migrate-resolve baseline.
    The bridge writes `idempotencyKey`/`source`/`sourceId`, which do not exist
    in prod until HR-5 lands. Building S1b first = more dead code.
-2. **HR-6 (new, for Hermes)** — verify/grant app-role read access:
+2. **Sandbox dedup blocker** — `20260713_sandbox_dedup_blocker` applied AND the
+   duplicate Ko Lake payment imports resolved (`SELECT * FROM
+   sandbox.find_payment_duplicates();` returns zero rows). This bridge writes to
+   `public."JournalEntry"`, and nothing may be promoted there while the same 128
+   payments still exist across ≥3 completed batches. It gates the run
+   **independently of HR-5** — satisfying HR-5, HR-6, seeds and FiscalPeriods
+   does not clear it.
+3. **HR-6 (new, for Hermes)** — verify/grant app-role read access:
    `GRANT USAGE ON SCHEMA raj_fin_track TO <app_role>; GRANT SELECT ON raj_fin_track.ocr_receipts TO <app_role>;`
    (If the app connects as the table owner this is a no-op — verify, don't assume.)
-3. Org + seed accounts (9999, 1000) present for the target organization —
+4. Org + seed accounts (9999, 1000) present for the target organization —
    verified live: 1 org, seeded.
-4. **FiscalPeriod coverage (added by adversarial audit, blocking finding #4)** —
+5. **FiscalPeriod coverage (added by adversarial audit, blocking finding #4)** —
    `postEntry` throws `NoOpenFiscalPeriodError` for any entry date not inside an
    open FiscalPeriod, and prod has exactly ONE period (`fp_2026`,
    2026-01-01 → 2026-12-31). Any receipt whose `doc_date` falls outside FY2026
