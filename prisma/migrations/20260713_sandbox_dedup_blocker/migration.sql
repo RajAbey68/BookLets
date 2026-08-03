@@ -57,8 +57,11 @@ BEGIN
       )
     ) STORED;
 
-  -- Non-unique index: fast duplicate detection now, and the future UNIQUE
-  -- index (added post-cleanup) can be built CONCURRENTLY off this.
+  -- Non-unique index: fast duplicate detection now, which is all this
+  -- migration is for. The post-cleanup UNIQUE index does NOT build "off" this
+  -- one — CREATE UNIQUE INDEX CONCURRENTLY scans the table itself, and cannot
+  -- run inside a transaction, so it stays out of this file entirely (see NEXT
+  -- STEPS). Once it exists this index is redundant and can be dropped.
   CREATE INDEX IF NOT EXISTS idx_sandbox_payment_entries_content_hash
     ON sandbox.payment_entries (content_hash);
 END
