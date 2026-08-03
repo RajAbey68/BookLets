@@ -1,13 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import {
-  Server,
-  StdioServerTransport,
-  Tool,
-  ToolResult,
-  TextContent,
-  ResourceTemplate,
-} from '@modelcontextprotocol/sdk/server/index.js';
-import { CallToolRequest, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { resolveActiveContext } from '@/lib/auth-context';
 import { prisma } from '@/lib/prisma';
 import { runWithOrgContext } from '@/lib/org-context';
@@ -27,6 +18,12 @@ interface JsonRpcResponse {
   id: string | number | null;
   result?: unknown;
   error?: { code: number; message: string; data?: unknown };
+}
+
+interface Tool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
 }
 
 const TOOLS: Tool[] = [
