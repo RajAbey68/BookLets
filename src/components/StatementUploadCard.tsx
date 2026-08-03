@@ -60,9 +60,11 @@ export default function StatementUploadCard() {
 
   // A visible clock, for the same reason the receipts card has one: a long
   // import and a dead one look identical without it.
+  // The reset lives in `upload`, next to the status change that starts the
+  // clock, rather than here: setting state during effect execution trips
+  // react-hooks/set-state-in-effect and costs a second render for no gain.
   useEffect(() => {
     if (status !== 'UPLOADING') return;
-    setElapsedMs(0);
     const startedAt = Date.now();
     const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
     return () => clearInterval(id);
@@ -83,6 +85,7 @@ export default function StatementUploadCard() {
       return;
     }
 
+    setElapsedMs(0);
     setStatus('UPLOADING');
     const controller = new AbortController();
     const deadline = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);

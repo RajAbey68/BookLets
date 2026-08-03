@@ -21,10 +21,16 @@
  * second currency becomes real, this is the single symbol to widen into an
  * organisation-level setting — and the compiler will point at every use.
  *
- * NOTE: `Account.currency` and `JournalLine.currency` still carry a schema
- * default of "EUR" (prisma/schema.prisma). That default is wrong for this
- * deployment, but changing it is a migration and is tracked separately; the
- * write paths that matter all pass their currency explicitly.
+ * NOTE: `Account.currency` and `JournalLine.currency` now default to "LKR" in
+ * prisma/schema.prisma, via 20260802_currency_default_lkr — but that migration
+ * is NOT yet applied in production, where the column default is still "EUR".
+ *
+ * That matters because not every write path sets a currency. The two importers
+ * do, but zip-ingest posts lines with `currency: undefined`, so Postgres
+ * applies the column default and the row lands as EUR. Production already
+ * holds such rows. Existing rows are deliberately not rewritten by the
+ * migration: a genuinely-EUR row is indistinguishable from one that merely
+ * inherited the default, so that call needs eyes on real data first.
  */
 export const BOOKS_CURRENCY = 'LKR';
 

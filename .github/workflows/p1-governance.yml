@@ -32,7 +32,11 @@ jobs:
         run: |
           grep -q 'HIGH_VALUE_REVIEW_THRESHOLD = 3_500_000' src/lib/money-format.ts \
             || (echo "FAIL: high-value threshold changed or moved — this is a financial control; update the gate deliberately" && exit 1)
-          grep -q 'HIGH_VALUE_REVIEW_THRESHOLD' src/lib/revenue.service.ts \
+          # Match the comparison, not the identifier: a bare name check also
+          # matches the import on line 7, so deleting the control while leaving
+          # the import would pass a gate whose message claims it verifies the
+          # control is applied.
+          grep -qE '\.gt\(\s*HIGH_VALUE_REVIEW_THRESHOLD\s*\)' src/lib/revenue.service.ts \
             || (echo "FAIL: revenue.service.ts no longer applies the threshold" && exit 1)
           grep -q "BOOKS_CURRENCY = 'LKR'" src/lib/money-format.ts \
             || (echo "FAIL: books currency changed — the threshold above is denominated in it" && exit 1)

@@ -31,54 +31,89 @@
 -- Subtracting an epoch date yields an integer count of days, which is both
 -- immutable and setting-independent (20646 under any DateStyle). numeric::text
 -- and md5() are genuinely immutable and stay as they are.
-ALTER TABLE sandbox.payment_entries
-  ADD COLUMN IF NOT EXISTS content_hash TEXT GENERATED ALWAYS AS (
-    md5(
-      coalesce(source_type, '') || '|' ||
-      coalesce(source_ref, '')  || '|' ||
-      coalesce((payment_date - DATE '1970-01-01')::text, '') || '|' ||
-      coalesce(amount::text, '') || '|' ||
-      coalesce(description, '')
-    )
-  ) STORED;
+-- EXISTENCE GUARD: Prisma applies every folder here to every target database,
+-- and `sandbox.payment_entries` is not universal — it exists in production
+-- (verified) but not in a database built from migrations alone, which is what
+-- a fresh developer or preview environment gets. An unguarded ALTER TABLE
+-- there raises `relation "sandbox.payment_entries" does not exist`, failing
+-- this migration and every migration queued behind it: precisely the blockage
+-- the header above is written to avoid. CI never catches it because CI uses
+-- `prisma db push`, which does not replay this file.
+DO $do$
+BEGIN
+  IF to_regclass('sandbox.payment_entries') IS NULL THEN
+    RAISE NOTICE 'sandbox.payment_entries absent — skipping dedup groundwork.';
+    RETURN;
+  END IF;
 
--- Non-unique index: fast duplicate detection now, and the future UNIQUE
--- index (added post-cleanup) can be built CONCURRENTLY off this.
-CREATE INDEX IF NOT EXISTS idx_sandbox_payment_entries_content_hash
-  ON sandbox.payment_entries (content_hash);
+  ALTER TABLE sandbox.payment_entries
+    ADD COLUMN IF NOT EXISTS content_hash TEXT GENERATED ALWAYS AS (
+      md5(
+        coalesce(source_type, '') || '|' ||
+        coalesce(source_ref, '')  || '|' ||
+        coalesce((payment_date - DATE '1970-01-01')::text, '') || '|' ||
+        coalesce(amount::text, '') || '|' ||
+        coalesce(description, '')
+      )
+    ) STORED;
+
+  -- Non-unique index: fast duplicate detection now, and the future UNIQUE
+  -- index (added post-cleanup) can be built CONCURRENTLY off this.
+  CREATE INDEX IF NOT EXISTS idx_sandbox_payment_entries_content_hash
+    ON sandbox.payment_entries (content_hash);
+END
+$do$;
 
 -- Diagnostics: list every content_hash that appears more than once, with the
 -- row ids and how many batches they span. NO organization filter — the table
 -- has no organization_id column (single-tenant staging owned by the import
 -- pipeline). Returns empty when the table is clean.
-CREATE OR REPLACE FUNCTION sandbox.find_payment_duplicates()
-RETURNS TABLE (
-  content_hash TEXT,
-  copies       BIGINT,
-  batch_count  BIGINT,
-  entry_ids    UUID[],
-  sample_description TEXT,
-  total_amount NUMERIC
-)
-LANGUAGE sql STABLE AS $$
-  SELECT
-    pe.content_hash,
-    count(*)                        AS copies,
-    count(DISTINCT pe.batch_id)     AS batch_count,
-    array_agg(pe.id ORDER BY pe.created_at) AS entry_ids,
-    min(pe.description)             AS sample_description,
-    sum(pe.amount)                  AS total_amount
-  FROM sandbox.payment_entries pe
-  GROUP BY pe.content_hash
-  HAVING count(*) > 1;
-$$;
+-- Guarded for the same reason as the DDL above, and it needs the guard just as
+-- much: a LANGUAGE sql body is parsed and its references resolved at creation
+-- time, so this would fail on a database without the table even though nothing
+-- ever calls it there. EXECUTE keeps the body from being parsed until the
+-- table is known to exist.
+DO $do$
+BEGIN
+  IF to_regclass('sandbox.payment_entries') IS NULL THEN
+    RAISE NOTICE 'sandbox.payment_entries absent — skipping duplicate diagnostics.';
+    RETURN;
+  END IF;
 
-COMMENT ON FUNCTION sandbox.find_payment_duplicates() IS
-  'Pre-promotion diagnostic: returns every duplicated content_hash in '
-  'sandbox.payment_entries with row ids, batch spread, and summed amount. '
-  'Empty result = no duplicates. Nothing here is destructive — a human '
-  'reviews the output and decides which rows to keep before any UNIQUE '
-  'constraint or promotion runs.';
+  EXECUTE $fn$
+    CREATE OR REPLACE FUNCTION sandbox.find_payment_duplicates()
+    RETURNS TABLE (
+      content_hash TEXT,
+      copies       BIGINT,
+      batch_count  BIGINT,
+      entry_ids    UUID[],
+      sample_description TEXT,
+      total_amount NUMERIC
+    )
+    LANGUAGE sql STABLE AS $body$
+      SELECT
+        pe.content_hash,
+        count(*)                        AS copies,
+        count(DISTINCT pe.batch_id)     AS batch_count,
+        array_agg(pe.id ORDER BY pe.created_at) AS entry_ids,
+        min(pe.description)             AS sample_description,
+        sum(pe.amount)                  AS total_amount
+      FROM sandbox.payment_entries pe
+      GROUP BY pe.content_hash
+      HAVING count(*) > 1;
+    $body$;
+  $fn$;
+
+  EXECUTE $cm$
+    COMMENT ON FUNCTION sandbox.find_payment_duplicates() IS
+      'Pre-promotion diagnostic: returns every duplicated content_hash in '
+      'sandbox.payment_entries with row ids, batch spread, and summed amount. '
+      'Empty result = no duplicates. Nothing here is destructive — a human '
+      'reviews the output and decides which rows to keep before any UNIQUE '
+      'constraint or promotion runs.';
+  $cm$;
+END
+$do$;
 
 -- ── NEXT STEPS (NOT run here — human/Hermes-gated, destructive) ───────────
 -- 1. Review duplicates:

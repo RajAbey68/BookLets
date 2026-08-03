@@ -4,11 +4,12 @@ import LedgerPeriodFilter, { type LedgerPeriodOption } from '@/components/Ledger
 import {
   DRILLDOWN_METRIC_LABELS,
   computeDrilldownTotal,
+  drilldownCurrencies,
   entryLineMatches,
   getDrilldownFilter,
   parseDrilldownMetric,
 } from '@/lib/metric-drilldown';
-import { formatMoney } from '@/lib/money-format';
+import { BOOKS_CURRENCY, formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -66,17 +67,26 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
       ? allEntries
       : allEntries.filter((entry) => monthKey(entry.date) === selectedPeriod);
 
-  const drilldownTotal = drilldown
-    ? computeDrilldownTotal(
-        entries.flatMap((entry) =>
-          entry.lines.map((line) => ({
-            amount: line.amount.toString(),
-            isDebit: line.isDebit,
-            accountType: line.account.type,
-          })),
-        ),
+  const drilldownLines = drilldown
+    ? entries.flatMap((entry) =>
+        entry.lines.map((line) => ({
+          amount: line.amount.toString(),
+          isDebit: line.isDebit,
+          accountType: line.account.type,
+          currency: line.currency,
+        })),
       )
-    : null;
+    : [];
+
+  const drilldownTotal = drilldown ? computeDrilldownTotal(drilldownLines) : null;
+
+  // Which currencies the drilled-down lines are actually in. More than one and
+  // the aggregate is not a figure in any currency, so it is withheld rather
+  // than labelled — see drilldownCurrencies.
+  const drilldownCcys = drilldown
+    ? drilldownCurrencies(drilldownLines, BOOKS_CURRENCY)
+    : [];
+  const drilldownIsMixed = drilldownCcys.length > 1;
 
   // Per-line currency where the row has one. A ledger line stores its own
   // currency, and defaulting every row to the books' currency would relabel a
@@ -136,16 +146,18 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
               {DRILLDOWN_METRIC_LABELS[drilldown.metric]} — POSTED entries since {formatDate(drilldown.dateFrom)}
             </div>
             <div style={{ fontSize: '0.8125rem', color: 'var(--text-secondary)', marginTop: '0.25rem' }}>
-              Total below equals the dashboard figure for this metric.
+              {drilldownIsMixed
+                ? `These entries span ${drilldownCcys.join(' and ')}. No single total is shown — see the per-line amounts below.`
+                : 'Total below equals the dashboard figure for this metric.'}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
             <div style={{ fontSize: '1.5rem', fontWeight: '700', color: 'var(--accent-color)' }}>
-              {/* Aggregate: shown in the books' currency. Summing lines of
-                  different currencies would be meaningless, so if this ledger
-                  ever holds more than one, this total needs a policy rather
-                  than a label. */}
-              {formatCurrency(drilldownTotal.toNumber())}
+              {/* Aggregate: only meaningful when every line is denominated the
+                  same way. Production carries lines in more than one currency,
+                  so a mixed selection withholds the figure instead of putting
+                  one currency's label on a sum of two. */}
+              {drilldownIsMixed ? 'Mixed currencies' : formatCurrency(drilldownTotal.toNumber(), drilldownCcys[0])}
             </div>
             <Link
               href="/ledger"
@@ -232,10 +244,11 @@ export default async function LedgerPage({ searchParams }: { searchParams: Promi
             <tfoot>
               <tr style={{ borderTop: '2px solid var(--surface-border)' }}>
                 <td colSpan={5} style={{ textAlign: 'right', padding: '1rem', fontWeight: '700' }}>
-                  {DRILLDOWN_METRIC_LABELS[drilldown.metric]} — reconciled total
+                  {DRILLDOWN_METRIC_LABELS[drilldown.metric]}
+                  {drilldownIsMixed ? ' — no reconciled total across currencies' : ' — reconciled total'}
                 </td>
                 <td style={{ textAlign: 'right', padding: '1rem', fontWeight: '700', color: 'var(--accent-color)' }}>
-                  {formatCurrency(drilldownTotal.toNumber())}
+                  {drilldownIsMixed ? drilldownCcys.join(' / ') : formatCurrency(drilldownTotal.toNumber(), drilldownCcys[0])}
                 </td>
               </tr>
             </tfoot>

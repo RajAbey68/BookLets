@@ -78,6 +78,31 @@ export interface DrilldownLine {
   amount: string | number | { toString(): string };
   isDebit: boolean;
   accountType: string;
+  /**
+   * The line's own currency, where it has one. Optional because a line that
+   * carries none is taken to be in the books' currency by the caller.
+   */
+  currency?: string | null;
+}
+
+/**
+ * The distinct currencies present in a set of drilled-down lines.
+ *
+ * `computeDrilldownTotal` adds and subtracts raw amounts. That is only a
+ * number worth showing when every line is denominated the same way — summing
+ * rupees and euros produces a figure that is not money in any currency. This
+ * is not hypothetical: production carries lines written by a path that did not
+ * set a currency explicitly and so inherited the schema default, so the
+ * caller must check before it labels a total.
+ *
+ * A line with no currency is counted as `fallback` (the books' currency),
+ * which is how the rest of the display layer reads it.
+ */
+export function drilldownCurrencies(
+  lines: readonly DrilldownLine[],
+  fallback: string,
+): string[] {
+  return [...new Set(lines.map((line) => line.currency || fallback))].sort();
 }
 
 /**
