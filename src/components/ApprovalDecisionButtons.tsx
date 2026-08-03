@@ -7,6 +7,7 @@ import {
   decideDraftJournalEntry,
   type DecisionResult,
 } from '@/app/actions/approval.actions';
+import { settledDecisionFromError } from '@/lib/approval-decision-label';
 
 interface ApprovalDecisionButtonsProps {
   /** Which queue the item belongs to — routes to the matching server action. */
@@ -63,7 +64,10 @@ export default function ApprovalDecisionButtons({ kind, itemId }: ApprovalDecisi
         // ago) already decided this item. Show it as settled rather than as a
         // red error, which is alarming and suggests something needs fixing.
         if (/only (draft|pending)/i.test(result.error)) {
-          setDecided(decision);
+          // Show how it actually settled, not what this operator attempted.
+          // Falls back to the attempt only when the status cannot be read —
+          // router.refresh() below reconciles either way.
+          setDecided(settledDecisionFromError(result.error) ?? decision);
           router.refresh();
         } else {
           setError(result.error);
