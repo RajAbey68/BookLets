@@ -9,6 +9,7 @@ import {
 } from '@/app/actions/approval.actions';
 import ApprovalDecisionButtons from '@/components/ApprovalDecisionButtons';
 import DraftEditForm from '@/components/DraftEditForm';
+import { formatMoney } from '@/lib/money-format';
 
 interface DraftReviewQueueProps {
   items: DraftReviewItem[];
@@ -21,7 +22,32 @@ const formatDateTime = (iso: string) =>
   new Intl.DateTimeFormat('en-IE', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(iso));
 
 const formatCurrency = (amount: string) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
+  formatMoney(amount);
+
+/**
+ * The bank's own reference for a statement row, when one genuinely exists.
+ *
+ * `sourceId` carries `computeNaturalKey`'s output. When the export has an ID
+ * column — Wise and most banks do — that IS the bank's transaction reference,
+ * verbatim, and it is the value an operator needs in order to find the same
+ * line in their bank. When the export has no ID column, the natural key falls
+ * back to a sha256 of (date, amount, currency, description, balance): a
+ * perfectly good dedup key, but not a reference to anything the bank would
+ * recognise.
+ *
+ * A 64-character lowercase hex string is that fallback. Labelling it "Bank
+ * reference" would send someone looking for a number their bank has never
+ * heard of, so it is withheld rather than dressed up. Everything else is
+ * shown in full — the previous 12-character truncation was too short to match
+ * against a statement, which is the only reason to display it at all.
+ */
+const SYNTHETIC_KEY = /^[0-9a-f]{64}$/;
+
+function bankReferenceOf(sourceId: string | null): string | null {
+  const ref = sourceId?.trim();
+  if (!ref || SYNTHETIC_KEY.test(ref)) return null;
+  return ref;
+}
 
 const ORIGIN_LABELS: Record<DraftReviewItem['parsed']['origin'], string> = {
   'receipt-automation': 'Receipt OCR',
@@ -290,9 +316,23 @@ export default function DraftReviewQueue({ items }: DraftReviewQueueProps) {
                     </Field>
                     <Field label="Maker">{item.makerIdentity ?? '—'}</Field>
                     {item.source && (
-                      <Field label="Provenance">
-                        {item.source}
-                        {item.sourceId ? ` · ${item.sourceId.slice(0, 12)}…` : ''}
+                      <Field label="Provenance">{item.source}</Field>
+                    )}
+                    {bankReferenceOf(item.sourceId) && (
+                      <Field label="Bank reference">
+                        {/* Full, selectable, and monospaced: the whole point of
+                            this value is matching a line in the bank's own
+                            statement, which a truncated prefix cannot do. */}
+                        <span
+                          style={{
+                            fontFamily: 'var(--font-mono, ui-monospace, monospace)',
+                            fontSize: '0.8125rem',
+                            userSelect: 'all',
+                            wordBreak: 'break-all',
+                          }}
+                        >
+                          {bankReferenceOf(item.sourceId)}
+                        </span>
                       </Field>
                     )}
                   </div>

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { fetchBookings } from '@/app/actions/bookings.actions';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -11,7 +12,6 @@ const STATUS_BADGE: Record<string, string> = {
   CANCELLED: 'badge-danger',
 };
 
-const currency = new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' });
 const shortDate = new Intl.DateTimeFormat('en-IE', { month: 'short', day: '2-digit' });
 
 export default async function BookingsPage() {
@@ -69,7 +69,7 @@ export default async function BookingsPage() {
                   <td data-label="Check In">{shortDate.format(row.checkIn)}</td>
                   <td data-label="Check Out">{shortDate.format(row.checkOut)}</td>
                   <td data-label="Total" style={{ textAlign: 'right', fontWeight: '600' }}>
-                    {currency.format(Number(row.totalAmount))}
+                    {formatMoney(row.totalAmount)}
                   </td>
                   <td data-label="Status" style={{ textAlign: 'right' }}>
                     <span className={`badge ${STATUS_BADGE[row.status] ?? 'badge-success'}`}>

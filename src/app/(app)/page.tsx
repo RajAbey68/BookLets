@@ -14,6 +14,7 @@ import { drilldownHref } from '@/lib/metric-drilldown';
 import { getDefaultUploadContext } from '@/app/actions/context.actions';
 import { fetchPortfolioMetrics } from '@/app/actions/property.actions';
 import { fetchFiscalPeriods } from '@/app/actions/fiscal-period.actions';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
@@ -44,7 +45,7 @@ export default async function Home() {
   };
 
   const formatCurrency = (val: number) => 
-    new Intl.NumberFormat('en-IE', { style: 'currency', currency: 'EUR' }).format(val);
+    formatMoney(val);
 
   return (
     <>

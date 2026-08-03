@@ -41,3 +41,7 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 .screenshots/
+
+# Database snapshots: never in git. See docs/runs/HR5-STEP0-BACKUP.md.
+docs/runs/backups/*.json
+docs/runs/backups/*.sql

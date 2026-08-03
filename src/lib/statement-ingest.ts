@@ -636,16 +636,35 @@ export async function ingestStatement(
   // Fiscal-period gate on fresh rows only (deduped rows already booked once).
   // Memoized per UTC day; dates are NEVER clamped into a period — the row
   // skips until a human opens a covering period (ocr-bridge contract §7).
-  const periodKnownByDay = new Map<string, Promise<boolean>>();
+  // One probe per distinct UTC day, ALL in flight together.
+  //
+  // Memoizing by day was already here; the cost was awaiting inside the loop,
+  // which serialised the misses. A real Wise export spanning a quarter has ~73
+  // distinct days, so that was 73 round trips to Postgres end-to-end before a
+  // single row could be written — a large part of why a 219-row statement
+  // never finished inside the route's time budget and the client was left
+  // spinning. The queries are independent, so nothing about issuing them
+  // together changes which rows pass.
+  const probeByDay = new Map<string, Promise<boolean>>();
+  for (const candidate of fresh) {
+    const day = candidate.date.toISOString().slice(0, 10);
+    if (!probeByDay.has(day)) {
+      probeByDay.set(day, deps.hasOpenFiscalPeriod(ctx.organizationId, candidate.date));
+    }
+  }
+  const dayIsOpen = new Map<string, boolean>();
+  await Promise.all(
+    [...probeByDay].map(async ([day, probe]) => {
+      dayIsOpen.set(day, await probe);
+    }),
+  );
+
+  // Classification stays a separate pass over `fresh` so `skipped` keeps its
+  // original row order.
   const postable: RowCandidate[] = [];
   for (const candidate of fresh) {
     const day = candidate.date.toISOString().slice(0, 10);
-    let known = periodKnownByDay.get(day);
-    if (!known) {
-      known = deps.hasOpenFiscalPeriod(ctx.organizationId, candidate.date);
-      periodKnownByDay.set(day, known);
-    }
-    if (await known) {
+    if (dayIsOpen.get(day)) {
       postable.push(candidate);
     } else {
       skipped.push({ row: candidate.rowNumber, reason: 'NO_FISCAL_PERIOD' });

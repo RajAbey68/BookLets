@@ -106,7 +106,7 @@ export default function BookingForm({
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
         <div>
-          <label style={labelStyle} htmlFor="totalAmount">Total Amount (EUR)</label>
+          <label style={labelStyle} htmlFor="totalAmount">Total Amount (LKR)</label>
           <input id="totalAmount" name="totalAmount" type="number" min="0.01" step="0.01" required placeholder="0.00" style={fieldStyle} />
         </div>
         <div>

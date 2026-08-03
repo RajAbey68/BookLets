@@ -2,12 +2,13 @@ import Link from 'next/link';
 import PLPeriodFilter from '@/components/PLPeriodFilter';
 import { getPLStatementReport } from '@/lib/pl-statement-report';
 import type { PLRow, PLSection } from '@/lib/pl-statement';
+import { formatMoney } from '@/lib/money-format';
 
 // Reads from the database; cannot be rendered at build time.
 export const dynamic = 'force-dynamic';
 
 const formatCurrency = (amount: { toString(): string }) =>
-  new Intl.NumberFormat('de-DE', { style: 'currency', currency: 'EUR' }).format(Number(amount));
+  formatMoney(amount);
 
 const formatDay = (date: Date) =>
   date.toLocaleDateString('en-IE', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
