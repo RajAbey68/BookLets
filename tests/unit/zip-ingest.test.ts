@@ -359,6 +359,25 @@ describe('S5 zip-ingest — checkpoint 4b: text/image split on a 5-file sample',
     expect(report.skipped.map((s) => s.name)).toEqual(['voicenote.opus']);
   });
 
+  it('states LKR on every posted line instead of inheriting the column default', async () => {
+    // Regression: these lines used to omit `currency` entirely. postEntry
+    // passes undefined through, Postgres applies the JournalLine default, and
+    // in production that default is still "EUR" — so a rupee receipt landed in
+    // the ledger denominated in euro. It is a silent fault: the amount is
+    // right, only the currency is wrong, and the display layer then renders a
+    // euro sign faithfully. Asserting on the value, not merely on presence,
+    // because inheriting the right default by luck is not the same as saying it.
+    const deps = makeDeps();
+    await ingestZip(fiveFileZip(), CTX, deps);
+
+    expect(deps.postedInputs).toHaveLength(3);
+    const everyLine = deps.postedInputs.flatMap((input) => input.lines);
+    expect(everyLine).toHaveLength(6);
+    for (const line of everyLine) {
+      expect(line.currency).toBe('LKR');
+    }
+  });
+
   it('parses the chat text and records it as evidence metadata', async () => {
     const deps = makeDeps();
     const report = await ingestZip(fiveFileZip(), CTX, deps);

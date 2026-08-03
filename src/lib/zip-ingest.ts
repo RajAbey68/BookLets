@@ -27,6 +27,7 @@ import AdmZip from 'adm-zip';
 import { createHash } from 'node:crypto';
 import { assertImageMagicBytes, UploadGuardError } from './upload-guard';
 import { NO_OPEN_PERIOD_MESSAGE, dateOutsidePeriodsMessage } from './fiscal-period';
+import { BOOKS_CURRENCY } from './money-format';
 import { OcrError } from './ocr-errors';
 import { JournalStatus, type JournalEntryInput } from './types';
 import type { GeminiOcrResult } from './gemini-ocr';
@@ -666,9 +667,16 @@ export async function ingestZip(
         idempotencyKey,
         source: ZIP_INGEST_SOURCE,
         sourceId: image.sha256,
+        // Currency is stated, not left to the column default. Omitting it here
+        // is what put EUR-denominated lines into a rupee ledger: postEntry
+        // passes `currency: undefined` straight through, Postgres applies the
+        // Account/JournalLine default, and in production that default is still
+        // "EUR" — 20260802_currency_default_lkr is written but not applied.
+        // The other two importers (ocr-bridge, statement-ingest) have always
+        // stated theirs; this one is the path that did not.
         lines: [
-          { accountId: accounts!.expenseAccountId, amount: extraction.totalAmount, isDebit: true },
-          { accountId: accounts!.cashAccountId, amount: extraction.totalAmount, isDebit: false },
+          { accountId: accounts!.expenseAccountId, amount: extraction.totalAmount, isDebit: true, currency: BOOKS_CURRENCY },
+          { accountId: accounts!.cashAccountId, amount: extraction.totalAmount, isDebit: false, currency: BOOKS_CURRENCY },
         ],
       });
       journalEntryIds.push(entry.id);
