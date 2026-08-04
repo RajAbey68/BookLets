@@ -52,6 +52,7 @@ function bankReferenceOf(sourceId: string | null): string | null {
 const ORIGIN_LABELS: Record<DraftReviewItem['parsed']['origin'], string> = {
   'receipt-automation': 'Receipt OCR',
   'zip-ingest': 'ZIP ingest',
+  'statement-ingest': 'Bank statement',
   manual: 'Manual / system',
 };
 
@@ -304,7 +305,15 @@ export default function DraftReviewQueue({ items }: DraftReviewQueueProps) {
                 <div>
                   <div style={columnHeadingStyle}>Extracted fields</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.625rem' }}>
-                    <Field label="Vendor">{item.parsed.vendor ?? '—'}</Field>
+                    {/* A bank row has a description, not a vendor: an FX
+                        conversion has no counterparty and a fee refers to
+                        another transfer. Show whichever the row actually has
+                        rather than an em dash where the provenance should be. */}
+                    {item.parsed.description ? (
+                      <Field label="Bank description">{item.parsed.description}</Field>
+                    ) : (
+                      <Field label="Vendor">{item.parsed.vendor ?? '—'}</Field>
+                    )}
                     {item.parsed.category && <Field label="Category">{item.parsed.category}</Field>}
                     {item.parsed.fileName && <Field label="Source file">{item.parsed.fileName}</Field>}
                     <Field label="Amount">
