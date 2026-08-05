@@ -1,5 +1,6 @@
 import { PrismaClient, Prisma } from '@prisma/client';
 import { Decimal } from 'decimal.js';
+import crypto from 'crypto';
 
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
@@ -20,24 +21,36 @@ export const prisma = basePrisma.$extends({
     journalEntry: {
       async create({ args, query }: { args: Prisma.JournalEntryCreateArgs, query: (args: Prisma.JournalEntryCreateArgs) => Promise<any> }) {
         const { data } = args;
-        
-        // 1. Fiscal Period Validation (Locking)
-        if (data.date) {
-            const entryDate = new Date(data.date as string | Date);
-            const closedPeriod = await basePrisma.fiscalPeriod.findFirst({
-                where: {
-                    startDate: { lte: entryDate },
-                    endDate: { gte: entryDate },
-                    isClosed: true,
-                },
-            });
 
-            if (closedPeriod) {
-                throw new Error(`Fiscal Integrity Violation: The date ${entryDate.toLocaleDateString()} falls within the closed fiscal period "${closedPeriod.name}".`);
-            }
+        // 1. Idempotency Check: if sourceHash exists, return existing entry (don't re-post)
+        if (data.sourceHash) {
+          const existing = await basePrisma.journalEntry.findUnique({
+            where: { sourceHash: data.sourceHash },
+          });
+          if (existing) {
+            console.warn(`[JournalEntry] Idempotent re-post detected: sourceHash ${data.sourceHash} already exists. Returning existing entry.`);
+            return existing;
+          }
         }
 
-        // 2. Trial Balance Validation for immediate POSTED entries
+        // 2. Fiscal Period Validation (Locking) — database trigger is primary enforcement
+        if (data.date) {
+          const entryDate = new Date(data.date as string | Date);
+          const closedPeriod = await basePrisma.fiscalPeriod.findFirst({
+            where: {
+              organizationId: data.organizationId as string,
+              startDate: { lte: entryDate },
+              endDate: { gte: entryDate },
+              isClosed: true,
+            },
+          });
+
+          if (closedPeriod) {
+            throw new Error(`Fiscal Integrity Violation: Cannot post to ${entryDate.toLocaleDateString()} — it falls within closed fiscal period "${closedPeriod.name}".`);
+          }
+        }
+
+        // 3. Trial Balance Validation for immediate POSTED entries
         if (data.status === 'POSTED' && data.lines && typeof data.lines === 'object') {
           const lines = (data.lines as any).create;
           if (Array.isArray(lines)) {
@@ -51,10 +64,10 @@ export const prisma = basePrisma.$extends({
               }
             }
             if (!balance.isZero()) {
-              throw new Error(`Trial Balance Violation: Current entry is unbalanced by ${balance.toFixed(2)}. Debits must equal Credits.`);
+              throw new Error(`Trial Balance Violation: Entry is unbalanced by ${balance.toFixed(2)} LKR. Debits must equal Credits.`);
             }
             if (lines.length < 2) {
-              throw new Error('Trial Balance Violation: A journal entry must have at least two balancing lines.');
+              throw new Error('Trial Balance Violation: A journal entry must have at least 2 lines to enforce double-entry bookkeeping.');
             }
           }
         }

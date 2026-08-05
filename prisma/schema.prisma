@@ -91,6 +91,7 @@ model JournalEntry {
   makerIdentity   String?
   tenantId        String?
   agentConfidence Float?
+  sourceHash      String?  @unique // SHA256 hash for idempotency; prevents double-posting
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   createdBy       String?
