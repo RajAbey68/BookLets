@@ -9,8 +9,9 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 let basePrisma: PrismaClient;
 
 if (!globalForPrisma.prisma) {
+  const databaseUrl = process.env.DATABASE_URL || 'postgresql://user:password@localhost:5432/booklets';
   const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: databaseUrl,
   });
 
   basePrisma = new PrismaClient({
