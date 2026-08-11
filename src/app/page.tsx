@@ -15,6 +15,8 @@ const IconTrendingDown = () => (
 import { ReceiptUploader } from '../components/ReceiptUploader';
 import { getDashboardMetrics } from './actions/portfolio.actions';
 
+export const dynamic = 'force-dynamic';
+
 export default async function Home() {
   const metricsResult = await getDashboardMetrics();
   const metrics = (metricsResult.success && metricsResult.data) ? metricsResult.data : {

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { AutomationService } from '../lib/automation.service';
+import { processReceiptAction } from '@/app/actions/ledger.actions';
 
 interface ReceiptUploaderProps {
   organizationId: string;
@@ -37,7 +37,7 @@ export const ReceiptUploader: React.FC<ReceiptUploaderProps> = ({
 
       // 2. Process via AI Automation
       setStatus('ANALYZING');
-      const result = await AutomationService.processReceipt(organizationId, propertyId, base64);
+      const result = await processReceiptAction(organizationId, propertyId, base64);
       
       setStatus('SUCCESS');
       if (onSuccess) onSuccess(result);

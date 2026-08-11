@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.6.0",
     "@sentry/nextjs": "^10.70.0",
     "decimal.js": "^10.6.0",

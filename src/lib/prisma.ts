@@ -1,14 +1,25 @@
 import { PrismaClient, Prisma } from '@prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 import { Decimal } from 'decimal.js';
 import crypto from 'crypto';
 
 const globalForPrisma = global as unknown as { prisma: PrismaClient };
 
-const basePrisma =
-  globalForPrisma.prisma ||
-  new PrismaClient({
+let basePrisma: PrismaClient;
+
+if (!globalForPrisma.prisma) {
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+  });
+
+  basePrisma = new PrismaClient({
+    adapter: new PrismaPg(pool),
     log: ['query'],
   });
+} else {
+  basePrisma = globalForPrisma.prisma;
+}
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = basePrisma;
 

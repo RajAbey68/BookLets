@@ -1,5 +1,7 @@
 import { fetchLedgerEntries } from '@/app/actions/ledger.actions';
 
+export const dynamic = 'force-dynamic';
+
 export default async function LedgerPage() {
   const entries = await fetchLedgerEntries();
 
