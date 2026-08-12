@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 /**
  * PR #153 — HTTP improvements
  * Tests for findings #11, #12
