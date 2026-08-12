@@ -3,8 +3,6 @@
  * Tests for findings #2 and #3
  */
 
-import { describe, it, expect } from '@jest/globals';
-
 describe('PR #151 — Trigger Timing Fixes', () => {
   describe('Finding #2: Balance validation trigger timing', () => {
     it('balance trigger fires AFTER INSERT so it sees all lines', () => {
