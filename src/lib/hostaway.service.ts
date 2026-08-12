@@ -113,7 +113,7 @@ export class HostawayService {
 
   private static async refreshAccessToken(clientId: string, clientSecret: string): Promise<string | null> {
     try {
-      console.log(`[HostawayService] Authenticating with Hostaway (Client ID: ${clientId})...`);
+      console.log('[HostawayService] Authenticating with Hostaway...');
       const response = await fetchWithTimeout('https://api.hostaway.com/v1/access-tokens', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -126,18 +126,28 @@ export class HostawayService {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Token Exchange Failed: ${response.status} - ${errorText}`);
+        const statusCode = response.status;
+        // Never log raw error response — it may contain sensitive API details
+        throw new Error(`Token Exchange Failed: HTTP ${statusCode}`);
       }
 
       const data = await response.json();
+      if (!data.access_token) {
+        throw new Error('Token response missing access_token field');
+      }
+      if (!data.expires_in || typeof data.expires_in !== 'number') {
+        throw new Error('Token response missing valid expires_in field');
+      }
+
       this.CACHED_TOKEN = data.access_token;
-      // Hostaway tokens usually last 24h, but we handle the expiry provided by them
+      // Hostaway tokens usually last 24h, but we handle the expiry provided by them.
+      // Subtract 60s as buffer so we refresh before expiry.
       this.TOKEN_EXPIRY = Date.now() + (data.expires_in * 1000) - 60000;
 
       return this.CACHED_TOKEN;
     } catch (err) {
-      console.error('[HostawayService] OAuth2 Token Error:', err);
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      console.error('[HostawayService] OAuth2 Token Error:', message);
       return null;
     }
   }
