@@ -1,9 +1,8 @@
+/// <reference types="vitest" />
 /**
  * PR #151 — Trigger timing fixes
  * Tests for findings #2 and #3
  */
-
-import { describe, it, expect } from '@jest/globals';
 
 describe('PR #151 — Trigger Timing Fixes', () => {
   describe('Finding #2: Balance validation trigger timing', () => {
