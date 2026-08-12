@@ -1,9 +1,8 @@
+/// <reference types="vitest" />
 /**
  * PR #152 — Hostaway Service Security
  * Tests for findings #7 and #14
  */
-
-import { describe, it, expect } from '@jest/globals';
 
 describe('PR #152 — Hostaway Service Security', () => {
   describe('Finding #7: Token validation and sanitization', () => {
