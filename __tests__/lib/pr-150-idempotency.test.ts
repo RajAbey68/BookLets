@@ -1,9 +1,9 @@
+/// <reference types="vitest" />
 /**
  * PR #150 — Idempotency & Auth Validation
  * Tests for findings #1, #4, #5
  */
 
-import { describe, it, expect } from '@jest/globals';
 import { computeReceiptIdempotencyKey, computeZipIngestIdempotencyKey } from '@/lib/idempotency';
 
 describe('PR #150 — Idempotency & Auth', () => {
