@@ -161,12 +161,11 @@ function buildExtendedClient() {
     query: {
       journalEntry: {
         async create({ args, query }: { args: Prisma.JournalEntryCreateArgs, query: (args: Prisma.JournalEntryCreateArgs) => Promise<unknown> }) {
-          const { data, include, select } = args;
+          const { data } = args;
 
-          // PR #150 (finding #4): Ensure include/select are preserved through the extension.
-          // A retry on idempotency conflict must return the same shape as the original request,
+          // PR #155 (finding #5): Idempotent retries return the same shape as the original request,
           // so entry.lines.length does not crash when re-reading after a conflict.
-          const ensureShape = (existing: unknown) => existing; // Pass-through: query() already handles shape
+          // The query() function preserves include/select shapes automatically.
 
           // 1. Fiscal Period Validation (Locking)
           if (data.date) {

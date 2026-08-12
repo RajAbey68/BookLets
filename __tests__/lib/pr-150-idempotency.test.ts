@@ -4,7 +4,7 @@
  */
 
 import { computeReceiptIdempotencyKey, computeZipIngestIdempotencyKey } from '@/lib/idempotency';
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect } from 'vitest';
 
 describe('PR #150 — Idempotency & Auth', () => {
   describe('Finding #1: organizationId in idempotency hash', () => {

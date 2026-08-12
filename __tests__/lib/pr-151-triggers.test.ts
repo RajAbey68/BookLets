@@ -3,7 +3,7 @@
  * Tests for findings #2 and #3
  */
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect } from 'vitest';
 
 describe('PR #151 — Trigger Timing Fixes', () => {
   describe('Finding #2: Balance validation trigger timing', () => {
