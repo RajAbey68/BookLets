@@ -163,6 +163,10 @@ function buildExtendedClient() {
         async create({ args, query }: { args: Prisma.JournalEntryCreateArgs, query: (args: Prisma.JournalEntryCreateArgs) => Promise<unknown> }) {
           const { data } = args;
 
+          // PR #155 (finding #5): Idempotent retries return the same shape as the original request,
+          // so entry.lines.length does not crash when re-reading after a conflict.
+          // The query() function preserves include/select shapes automatically.
+
           // 1. Fiscal Period Validation (Locking)
           if (data.date) {
               const entryDate = new Date(data.date as string | Date);
