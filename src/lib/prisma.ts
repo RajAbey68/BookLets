@@ -74,17 +74,29 @@ function warnRlsDetectionUndetectableOnce(): void {
 }
 
 function buildExtendedClient() {
+  // Finding #10: Fail-fast on missing DATABASE_URL.
+  // Validate DATABASE_URL at client initialization, not at query time.
+  // This catches misconfiguration during build/deploy, not at runtime.
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
-    throw new Error('DATABASE_URL is not set; cannot construct PrismaClient.');
+    throw new Error(
+      'DATABASE_URL environment variable is required. ' +
+      'Set it in .env.local or your deployment environment.'
+    );
   }
   const adapter = new PrismaPg({
     connectionString,
     options: '-c search_path=booklets,public',
   });
+
+  // Finding #9: Gate query logging based on environment.
+  // In development, log all queries for debugging.
+  // In production, disable logging (performance overhead, sensitive data).
+  const queryLog: Prisma.LogLevel[] = process.env.NODE_ENV === 'production' ? [] : ['query'];
+
   const base = new PrismaClient({
     adapter,
-    log: ['query'],
+    log: queryLog,
   });
 
   /**
