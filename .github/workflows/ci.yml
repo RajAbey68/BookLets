@@ -36,8 +36,18 @@ jobs:
       # triggers — not duplicated here (RAJ-279).
       - name: Unit tests + coverage gate
         # Runs vitest with v8 coverage; thresholds live in vitest.config.ts
-        # (RAJ-279 ratchet — target 80%, see config comment for rationale).
+        # (RAJ-539 ratchet — floors of actual coverage, see config comment).
         run: npm run test:unit:coverage
+
+      - name: Enforce coverage ratchet
+        # Thresholds may only go up (RAJ-539). Fails the PR if any coverage
+        # threshold in vitest.config.ts was lowered or removed relative to the
+        # base branch. Fails closed: a missing/unparseable config is an error.
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          git show "origin/${{ github.base_ref }}:vitest.config.ts" > /tmp/base-vitest.config.ts
+          node scripts/coverage-ratchet.mjs /tmp/base-vitest.config.ts vitest.config.ts
 
       - name: Upload coverage report
         # Adopted from independent review (RAJ-279): keep the lcov report
