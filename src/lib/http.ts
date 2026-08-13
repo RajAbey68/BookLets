@@ -16,17 +16,28 @@ export async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutController = new AbortController();
+  const timeoutTimer = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  // Combine caller's signal (if any) with timeout signal using AbortSignal.any()
+  // to allow abort from either source: explicit caller abort OR timeout.
+  let signal: AbortSignal = timeoutController.signal;
+  if (init.signal) {
+    signal = AbortSignal.any([timeoutController.signal, init.signal]);
+  }
+
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, { ...init, signal });
   } catch (err) {
     if ((err as { name?: string }).name === 'AbortError') {
-      throw new FetchTimeoutError(input, timeoutMs);
+      // Check if it was our timeout that aborted, not the caller's signal.
+      if (timeoutController.signal.aborted) {
+        throw new FetchTimeoutError(input, timeoutMs);
+      }
     }
     throw err;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(timeoutTimer);
   }
 }
 
@@ -51,6 +62,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
  * fetchWithTimeout + bounded retry with full-jitter exponential backoff.
  * Retries network errors, timeouts, and 5xx responses (501 excluded).
  * Non-retryable responses (4xx, 2xx, 3xx) are returned to the caller as-is.
+ * Prevents socket leaks by consuming response bodies on failed retries.
  */
 export async function fetchWithRetry(
   input: string,
@@ -70,6 +82,11 @@ export async function fetchWithRetry(
     try {
       const res = await fetchWithTimeout(input, init, timeoutMs);
       if (attempt < retries && isRetryable(res, null)) {
+        // Drain response body to release socket before retrying.
+        // Prevents socket/connection leak when response is not consumed.
+        await res.body?.cancel().catch(() => {
+          /* ignore cancel errors */
+        });
         const delay = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
         await sleep(Math.random() * delay);
         continue;
