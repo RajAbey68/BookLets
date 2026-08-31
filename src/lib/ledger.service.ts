@@ -1,9 +1,11 @@
 import { createHash } from 'crypto';
 import { Decimal } from 'decimal.js';
 import { Prisma } from '@prisma/client';
+import * as Sentry from '@sentry/nextjs';
 import { prisma, setRlsOrgContext } from './prisma';
 import { runWithOrgContext } from './org-context';
 import { EvidenceLogService } from './evidence-log.service';
+import { logger } from './logger';
 import {
   JournalEntryInput,
   JournalStatus,
@@ -215,6 +217,15 @@ export class LedgerService {
       agentConfidence,
     } = input;
 
+    logger.info({
+      action: 'postEntry_start',
+      organizationId,
+      lineCount: lines.length,
+      status,
+      date: date.toISOString(),
+      makerIdentity,
+    }, 'Starting journal entry post');
+
     // RAJ-284: explicit key wins; otherwise derive from source + sourceId.
     const idempotencyKey = input.idempotencyKey
       ?? (input.source && input.sourceId
@@ -238,11 +249,21 @@ export class LedgerService {
     if (status === JournalStatus.POSTED) {
       const validation = this.validateTrialBalance(lines);
       if (!validation.isValid) {
+        logger.error({
+          action: 'postEntry_validation_failed',
+          organizationId,
+          balance: validation.balance.toString(),
+          error: validation.error,
+        }, 'Trial balance validation failed');
         throw new Error(`CRITICAL LEDGER ERROR: ${validation.error}`);
       }
 
       // Check for zero-amount lines (compliance)
       if (lines.some(l => new Decimal(l.amount.toString()).isZero())) {
+        logger.error({
+          action: 'postEntry_zero_amount',
+          organizationId,
+        }, 'Zero-amount line detected');
         throw new Error('CRITICAL LEDGER ERROR: Journal entries cannot contain zero-amount lines.');
       }
     }
@@ -312,31 +333,72 @@ export class LedgerService {
       return entry;
     };
 
-    // 3a. Transaction reuse: write inside the CALLER's open transaction so
-    // the entry is atomic with the caller's other writes. No P2002 recovery
-    // here — a unique-constraint error aborts the caller's transaction, so
-    // returning the winner would let the caller keep writing on a doomed tx;
-    // the conflict must surface at the caller's transaction boundary.
-    if (tx) {
-      return { entry: await persist(tx), created: true };
-    }
-
-    // 3b. Own transaction — entry + evidence row succeed or fail together.
     try {
-      const entry = await prisma.$transaction(async (txc) => persist(txc));
-      return { entry, created: true };
-    } catch (err) {
-      // Lost an idempotency race: a concurrent POST with the same key won and
-      // tripped the unique constraint. The winner is now persisted — return it
-      // rather than surfacing the conflict to the caller.
-      if (idempotencyKey && this.isIdempotencyConflict(err)) {
-        const existing = await prisma.journalEntry.findFirst({
-          where: { organizationId, idempotencyKey },
-          include: { lines: true },
-        });
-        if (existing) return { entry: existing, created: false };
+      // 3a. Transaction reuse: write inside the CALLER's open transaction so
+      // the entry is atomic with the caller's other writes. No P2002 recovery
+      // here — a unique-constraint error aborts the caller's transaction, so
+      // returning the winner would let the caller keep writing on a doomed tx;
+      // the conflict must surface at the caller's transaction boundary.
+      if (tx) {
+        const result = { entry: await persist(tx), created: true };
+        logger.info({
+          action: 'postEntry_success',
+          entryId: result.entry.id,
+          organizationId,
+          lineCount: result.entry.lines.length,
+          status: result.entry.status,
+        }, 'Journal entry posted successfully');
+        return result;
       }
-      throw err;
+
+      // 3b. Own transaction — entry + evidence row succeed or fail together.
+      try {
+        const entry = await prisma.$transaction(async (txc) => persist(txc));
+        logger.info({
+          action: 'postEntry_success',
+          entryId: entry.id,
+          organizationId,
+          lineCount: entry.lines.length,
+          status: entry.status,
+        }, 'Journal entry posted successfully');
+        return { entry, created: true };
+      } catch (err) {
+        // Lost an idempotency race: a concurrent POST with the same key won and
+        // tripped the unique constraint. The winner is now persisted — return it
+        // rather than surfacing the conflict to the caller.
+        if (idempotencyKey && this.isIdempotencyConflict(err)) {
+          const existing = await prisma.journalEntry.findFirst({
+            where: { organizationId, idempotencyKey },
+            include: { lines: true },
+          });
+          if (existing) return { entry: existing, created: false };
+        }
+        throw err;
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({
+        action: 'postEntry_failed',
+        organizationId,
+        error: errorMessage,
+        makerIdentity,
+      }, 'Journal entry post failed');
+
+      Sentry.captureException(error, {
+        tags: {
+          action: 'postEntry',
+          organizationId,
+        },
+        contexts: {
+          posting: {
+            lineCount: lines.length,
+            status,
+            makerIdentity,
+          },
+        },
+      });
+
+      throw error;
     }
   }
 
@@ -372,18 +434,32 @@ export class LedgerService {
     reason: string,
     makerIdentity?: string,
   ): Promise<{ id: string }> {
-    const originalEntry = await prisma.journalEntry.findFirst({
-      where: { id: entryId, organizationId },
-      include: { lines: true }
-    });
+    logger.info({
+      action: 'reverseEntry_start',
+      entryId,
+      reason,
+      organizationId,
+    }, 'Starting reversal of journal entry');
 
-    if (!originalEntry) {
-      throw new Error('Journal Entry not found.');
-    }
+    try {
+      const originalEntry = await prisma.journalEntry.findFirst({
+        where: { id: entryId, organizationId },
+        include: { lines: true }
+      });
 
-    if (originalEntry.status !== 'POSTED') {
-      throw new Error(`Cannot reverse an entry with status "${originalEntry.status}". Only POSTED entries can be reversed.`);
-    }
+      if (!originalEntry) {
+        logger.error({ action: 'reverseEntry_not_found', entryId, organizationId }, 'Journal entry not found');
+        throw new Error('Journal Entry not found.');
+      }
+
+      if (originalEntry.status !== 'POSTED') {
+        logger.error({
+          action: 'reverseEntry_invalid_status',
+          entryId,
+          status: originalEntry.status,
+        }, 'Cannot reverse non-POSTED entry');
+        throw new Error(`Cannot reverse an entry with status "${originalEntry.status}". Only POSTED entries can be reversed.`);
+      }
 
     // 1. Prepare reversed lines
     const reversedLines = originalEntry.lines.map(line => ({
@@ -434,8 +510,33 @@ export class LedgerService {
         },
       });
 
+      logger.info({
+        action: 'reverseEntry_success',
+        originalEntryId: entryId,
+        reversalEntryId: reversal.id,
+        organizationId,
+        lineCount: reversal.lines.length,
+      }, 'Journal entry reversed successfully');
+
       return reversal;
     });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({
+        action: 'reverseEntry_failed',
+        entryId,
+        error: errorMessage,
+      }, 'Journal entry reversal failed');
+
+      Sentry.captureException(error, {
+        tags: {
+          action: 'reverseEntry',
+          entryId,
+        },
+      });
+
+      throw error;
+    }
   }
 
   /**
