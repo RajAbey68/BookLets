@@ -1,0 +1,77 @@
+# CodeRabbit AI code-review configuration
+# Owner: Rajiv Abeysinghe (RajAbey68)
+# Stack: React 19 + TypeScript + Vite + Supabase (Postgres + RLS + Edge Functions).
+# Culture: four-eyes, TDD, tier-one sources, no hardcoded secrets, immutable data.
+
+reviews:
+  review_status: true
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_profile: assertive
+  auto_apply_labels: false
+  language: en-US
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - master
+  path_filters:
+    - "!**/node_modules/**"
+    - "!**/dist/**"
+    - "!**/build/**"
+    - "!**/.next/**"
+    - "!**/coverage/**"
+    - "!**/.turbo/**"
+    - "!**/out/**"
+    - "!**/*.lock"
+    - "!**/pnpm-lock.yaml"
+    - "!**/package-lock.json"
+    - "!**/yarn.lock"
+    - "!**/go.sum"
+    - "!**/composer.lock"
+    - "!**/vendor/**"
+    - "!**/*.min.js"
+    - "!**/*.min.css"
+  path_instructions:
+    - path: "**/*.{ts,tsx,js,jsx,mjs,cjs}"
+      instructions: |
+        Enforce: strict TypeScript (no `any` without justification), immutable patterns
+        (never mutate arguments; return new objects), explicit error handling at
+        boundaries, no silent catch. React 19: hooks rules, no unnecessary re-renders,
+        correct dependency arrays, semantic HTML over div stacks. Flag any hardcoded
+        secret, token, or URL-embedded credential.
+    - path: "**/*.py"
+      instructions: |
+        PEP 8, full type hints, no bare `except:` and no swallowed exceptions. Validate
+        all external input at system boundaries. Flag hardcoded secrets, `eval`/`exec`,
+        `subprocess(..., shell=True)`, and SQL built by string concatenation.
+    - path: "**/*.sql"
+      instructions: |
+        Every new Supabase/Postgres table MUST have Row Level Security enabled with
+        explicit policies. Flag missing `ENABLE ROW LEVEL SECURITY`, `SELECT *`,
+        unbounded queries without LIMIT, and N+1 patterns. Migration files must be
+        forward-only and reversible.
+    - path: "**/supabase/functions/**/*.{ts,js}"
+      instructions: |
+        Deno Edge Function: assert required env vars are present and non-empty at
+        startup. No secrets in code or URLs. Set explicit CORS. Return a structured
+        error envelope. Validate the request payload with a schema (e.g. zod) before
+        use. Non-blocking: keep cold-start work minimal.
+    - path: "**/*.{env,env.*,secrets.*}"
+      instructions: "Reject any commit adding real secrets. Only PLACEHOLDER values belong here; real keys go in Edge Function config / env / Keychain."
+    - path: "**/.github/workflows/*.{yml,yaml}"
+      instructions: "Pin actions by SHA, not floating tags. Flag secrets that could leak to logs and pull_request_target misuse."
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: local
+  issues:
+    scope: local
+  pull_requests:
+    scope: local
