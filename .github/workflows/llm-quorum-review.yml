@@ -34,7 +34,7 @@ jobs:
       # the PR head — this job holds bot secrets, and executing head-controlled
       # script code would let any branch exfiltrate them (pwn-request). The
       # script fetches the PR diff via the API, so it never needs head files.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
