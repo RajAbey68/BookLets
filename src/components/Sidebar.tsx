@@ -80,8 +80,17 @@ const IconLock = () => (
   </svg>
 );
 
+const IconMic = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <rect width="6" height="12" x="9" y="2" rx="3" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" x2="12" y1="19" y2="22" />
+  </svg>
+);
+
 const NAV_ITEMS = [
   { href: '/',           label: 'Dashboard',  Icon: IconDashboard },
+  { href: '/assistant',  label: 'Assistant',  Icon: IconMic       },
   { href: '/properties', label: 'Properties', Icon: IconBuilding  },
   { href: '/bookings',   label: 'Bookings',   Icon: IconCalendar  },
   { href: '/ledger',     label: 'Ledger',     Icon: IconBook      },
