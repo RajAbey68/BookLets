@@ -32,3 +32,11 @@ This version has breaking changes — APIs, conventions, and file structure may 
 - **Sandbox dedup is a hard gate.** Ko Lake payments were imported multiple
   times across batches; nothing may be promoted to `public.JournalEntry` until
   the dedup blocker migration is applied and duplicates are resolved.
+
+## 🛠️ Aider
+
+- **Installed:** `/opt/homebrew/bin/aider` (`0.86.2`)
+- **Config:** `~/.aider.conf.yml`
+- **Per-repo config:** not required; global config applies to all clones
+- **Usage:** run from repo root; non-interactive mode uses `--yes --no-auto-commits`
+- **Docs:** https://aider.chat/docs/usage/watch.html for IDE/editor workflow
