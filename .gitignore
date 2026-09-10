@@ -45,3 +45,6 @@ next-env.d.ts
 # Database snapshots: never in git. See docs/runs/HR5-STEP0-BACKUP.md.
 docs/runs/backups/*.json
 docs/runs/backups/*.sql
+
+# graft local graph cache — regenerable, not committed (run `graft build`).
+/graft/
