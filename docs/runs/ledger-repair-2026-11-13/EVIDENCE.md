@@ -237,3 +237,91 @@ Diff against base is this folder only; see the commit. No test, migration, serve
 ## CI
 
 No CI gate was verified from this session.
+
+---
+
+# Addendum — 14 Nov 2026: rules decided, tests and fix
+
+The owner answered six rule questions (`SIGNOFF.md`). The test plan passed the Implementation Gate on its third round (`REVIEW-LOG.md`). Then, in order:
+
+## Red (commit `3dd60b3`, tests only, source unfixed)
+
+```
+$ npm run test:unit
+ Test Files  3 failed | 62 passed (65)
+      Tests  18 failed | 980 passed (998)
+     Errors  1 error
+```
+
+Failing, exactly the plan's red list: R-1, R-3, R-5a, R-5b, R-6, R-7, R-8, R-9, R-10, R-12, R-13, R-14, R-15, R-16, C-1, C-2, C-6, C-8. Passing new tests (pin unchanged behaviour): R-2, R-4, R-11, C-3, C-4, C-5, C-7. No pre-existing test failed.
+
+## Green (commit `23aca91`, `src/lib/ledger.service.ts` only)
+
+```
+$ npm run test:unit
+ Test Files  65 passed (65)
+      Tests  998 passed (998)
+     Errors  1 error
+exit 1
+This error originated in "tests/unit/ingest-item-route.test.ts" test file.
+```
+
+998 = 974 baseline − 1 replaced + 25 new. Zero failed, zero skipped. The one error is the same pre-existing unhandled rejection as the baseline and is the only reason for exit 1.
+
+```
+$ npx tsc --noEmit                      exit 0, no output
+$ npm run lint                          exit 0, no findings
+$ npm run lint -- --max-warnings 0      exit 0
+```
+
+NOT RUN: `npm run build` (not inspected for offline use without production settings), integration, smoke and e2e suites (need live services). The candidate is unit-tested and type-checked, not app-verified.
+
+## What changed
+
+| File | Reason |
+|---|---|
+| `src/lib/ledger.service.ts` | `reverseEntry`: original stays POSTED; counter-entry copies currency, is linked (`source='reversal'`), dated today in an open period, once per original (repeat call returns the existing one). `validateTrialBalance`: rejects a line set not in one currency. |
+| `tests/unit/journal-reverse-entry.test.ts` | 17 new tests R-1..R-16; fixture and mock helper extended; one assertion replaced (below) |
+| `tests/unit/ledger-service.test.ts` | 7 new tests C-1..C-7; the 8 existing `validateTrialBalance` tests untouched |
+| `tests/unit/journal-idempotency.test.ts` | 1 new test C-8 |
+| `docs/runs/ledger-repair-2026-11-13/*` | run notes, test plan, review log, sign-off |
+
+Not changed: `src/lib/books-view.ts`, prisma schema and migrations, server actions, role logic, display code, configuration.
+
+## The one replaced assertion (flag for the independent reviewer)
+
+Removed from `tests/unit/journal-reverse-entry.test.ts`:
+
+```ts
+it('marks the original entry VOIDED', async () => {
+  ...
+  expect(update).toHaveBeenCalledWith(
+    expect.objectContaining({
+      where: { id: 'je-1' },
+      data: expect.objectContaining({ status: 'VOIDED' }),
+    })
+  );
+});
+```
+
+Why it encoded the defect: it pinned the write that takes the original out of the POSTED-only totals while the counter-entry stays in them. Replaced by R-1 (the update carries no `status`) and R-3 (original plus counter-entry net to zero over counted entries). The owner chose this rule (SIGNOFF answer 1).
+
+## Source hashes after the fix (SHA256)
+
+```
+77cb9cb13aa6293e4ec91671354fe45df7aca0379a58e7fa1c1d8678fb8fcabe  src/lib/ledger.service.ts
+8a6cad465dc34b5d2b88cbfa80fdb04dd017c64a7d2dd41e10dc2604af37239b  src/lib/books-view.ts   (unchanged from base)
+18f7706466dbef69701cb0bfab112725683476c9aee87078ee9112dd067b0e95  tests/unit/journal-reverse-entry.test.ts
+33dc2a504204e14217725cf05707e6c8efb097bd5365933351089e5ee94aaa4c  tests/unit/ledger-service.test.ts
+86f17959201009a76bced7feb475f7c2af79013fd7adc3661e9eb34e44ecfd36  tests/unit/journal-idempotency.test.ts
+```
+
+## Remote writes
+
+The owner instructed in the working session on 14 Nov: "synch the local code to GitHub repo so it can be reviewed". The work branch was pushed after that instruction (docs commits). No pull request, merge or deploy. A branch push runs no GitHub workflow in this repo (workflows trigger on `main` and pull requests); a Vercel preview check was observed on the pushed commit.
+
+## Still not done by this fix
+
+See `TEST-PLAN.md` sections 7 and 10: report totals and `getAccountBalance` still add across currencies; `/books` row totals; draft approval does not pass currency to the check; entries reversed under the old behaviour remain double-subtracted in the data; the second cancellation route in `revenue.service.ts`.
+
+Independent human review of the diff: NOT VERIFIED.

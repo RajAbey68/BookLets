@@ -51,3 +51,11 @@ The raw cross-currency sums that feed the Trial Balance, Balance Sheet, P&L and 
 ## Single next action
 
 Raj answers R1 and R3 (and supplies the held candidate's file list). Then resume at step 5: write the failing tests for the chosen rules, after an EGM design review.
+
+---
+
+## Update 14 Nov 2026 — supersedes the sections above
+
+The questions above were answered by the owner (`SIGNOFF.md`). Tests and fix are committed on `fix/ledger-repair-2026-11-13`: red tests `3dd60b3`, fix `23aca91`. Expected `git diff --stat main`: one source file (`src/lib/ledger.service.ts`), three unit test files, and this folder. Expected hashes are in the EVIDENCE.md addendum. Unit suite: 998 passed, plus the one pre-existing unrelated error.
+
+Single next action: an independent reviewer checks the diff against that shape and confirms no test was weakened beyond the one flagged replacement. Release, data correction and the held permissions work keep their own gates.
