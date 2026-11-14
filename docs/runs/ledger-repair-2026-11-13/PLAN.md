@@ -26,3 +26,7 @@ Run of the v5 prompt dated 13 Nov 2026 (prompt SHA256 `8d0fb4d3…65b7f942`, hel
 - Multi-currency raw addition: `BLOCKED: RULE-UNKNOWN`
 
 Both wait on decisions from Raj listed in RESUME.md.
+
+## Update 14 Nov 2026
+
+The owner said "proceed with your recommendations" and asked for EGM and Jev reviews. A test plan was written (`TEST-PLAN.md`) and reviewed (`REVIEW-LOG.md`). The Implementation Gate returned BLOCK: the rules need the owner's explicit confirmation (`SIGNOFF.md`). Dispositions above stand until sign-off; no source or test file has changed.
