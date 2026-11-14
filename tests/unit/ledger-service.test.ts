@@ -100,6 +100,64 @@ describe('LedgerService.validateTrialBalance', () => {
   });
 });
 
+// ─── validateTrialBalance: one denomination per entry (ledger repair, Nov 2026) ─
+// docs/runs/ledger-repair-2026-11-13/TEST-PLAN.md section 5. Amounts in different
+// currencies must never be added as raw numbers: a line set that is not all in
+// the same currency (or mixes stated and omitted currency) cannot be posted.
+
+describe('LedgerService.validateTrialBalance — currency', () => {
+  const line = (amount: string, isDebit: boolean, currency?: string) => ({
+    accountId: isDebit ? 'acc-dr' : 'acc-cr',
+    amount: new Decimal(amount),
+    isDebit,
+    ...(currency === undefined ? {} : { currency }),
+  });
+
+  it('C-1 rejects lines in two different currencies even when the raw numbers balance', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'EUR'), line('100', false, 'LKR')]);
+    expect(result.isValid).toBe(false);
+    expect(result.error).toMatch(/mixed currenc/i);
+    expect(result.error).toContain('EUR');
+    expect(result.error).toContain('LKR');
+  });
+
+  it('C-2 rejects a mix of stated and omitted currency', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'LKR'), line('100', false)]);
+    expect(result.isValid).toBe(false);
+    expect(result.error).toMatch(/mixed currenc/i);
+  });
+
+  it('C-3 accepts a balanced entry stated in one currency (unchanged)', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'LKR'), line('100', false, 'LKR')]);
+    expect(result.isValid).toBe(true);
+    expect(result.balance.isZero()).toBe(true);
+  });
+
+  it('C-4 accepts a balanced entry with no currency on any line (unchanged)', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true), line('100', false)]);
+    expect(result.isValid).toBe(true);
+  });
+
+  it('C-5 reports an unbalanced single-currency entry as unbalanced, not mixed (unchanged)', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'LKR'), line('60', false, 'LKR')]);
+    expect(result.isValid).toBe(false);
+    expect(result.error).toMatch(/unbalanced/i);
+    expect(result.error).not.toMatch(/mixed/i);
+  });
+
+  it('C-6 compares currency codes exactly (LKR vs lkr is mixed)', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'LKR'), line('100', false, 'lkr')]);
+    expect(result.isValid).toBe(false);
+    expect(result.error).toMatch(/mixed currenc/i);
+  });
+
+  it('C-7 still reports the line-count error first', () => {
+    const result = LedgerService.validateTrialBalance([line('100', true, 'EUR')]);
+    expect(result.isValid).toBe(false);
+    expect(result.error).toMatch(/at least two lines/);
+  });
+});
+
 // ─── Decimal precision guard ──────────────────────────────────────────────────
 
 describe('Decimal arithmetic precision (would fail with Float storage)', () => {

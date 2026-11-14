@@ -248,4 +248,33 @@ describe('LedgerService.postEntry — idempotency', () => {
 
     await expect(post(LedgerService, JournalStatus)).rejects.toThrow(/database on fire/);
   });
+
+  // Ledger repair (Nov 2026), docs/runs/ledger-repair-2026-11-13/TEST-PLAN.md C-8.
+  it('C-8 refuses to post an entry whose lines are in different currencies, before touching the database', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const periodFindFirst = vi.fn().mockResolvedValue(openPeriod);
+    const $transaction = vi.fn();
+    vi.doMock('../../src/lib/prisma', () => ({
+      prisma: {
+        journalEntry: { findFirst, create: vi.fn() },
+        fiscalPeriod: { findFirst: periodFindFirst },
+        $transaction,
+      },
+    }));
+    vi.doMock('../../src/lib/evidence-log.service', () => ({ EvidenceLogService: { record: vi.fn() } }));
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+    const { JournalStatus } = await import('../../src/lib/types');
+
+    const attempt = post(LedgerService, JournalStatus, {
+      lines: [
+        { accountId: 'a', amount: new Decimal('100.00'), isDebit: true, currency: 'EUR' },
+        { accountId: 'b', amount: new Decimal('100.00'), isDebit: false, currency: 'LKR' },
+      ],
+    });
+
+    await expect(attempt).rejects.toThrow(/CRITICAL LEDGER ERROR/);
+    await expect(attempt).rejects.toThrow(/mixed currenc/i);
+    expect($transaction).not.toHaveBeenCalled();
+    expect(periodFindFirst).not.toHaveBeenCalled();
+  });
 });
