@@ -30,3 +30,7 @@ Both wait on decisions from Raj listed in RESUME.md.
 ## Update 14 Nov 2026
 
 The owner said "proceed with your recommendations" and asked for EGM and Jev reviews. A test plan was written (`TEST-PLAN.md`) and reviewed (`REVIEW-LOG.md`). The Implementation Gate returned BLOCK: the rules need the owner's explicit confirmation (`SIGNOFF.md`). Dispositions above stand until sign-off; no source or test file has changed.
+
+The owner then answered six rule questions (`SIGNOFF.md`). From that point the two defects are no longer `BLOCKED: RULE-UNKNOWN`; they proceed to failing tests and a fix once the Implementation Gate returns PASS on the revised plan.
+
+This repair does not touch `src/lib/books-view.ts`. The stage table and disposition block above describe the state on 13 Nov and are superseded by this update.

@@ -55,3 +55,8 @@ IDs: C = Critic, N = Naive Reader, I = Implementation Gate.
 1. Owner answers the questions in `SIGNOFF.md`.
 2. Author folds the answers into `TEST-PLAN.md`.
 3. Implementation Gate reviewer re-runs on the revised plan and returns PASS.
+
+## Second and third rounds (14 Nov 2026)
+
+- Round 2, after the owner's first four answers: **IMPLEMENTATION GATE — BLOCK**, 7 findings (P1 1, P2 3, P3 3). The P1 was three rules still without an owner answer (reverse a mixed-currency original; reverse a counter-entry; stated-plus-blank currency). The owner answered the first two; the third was already covered by the wording of the option the owner chose. The other six findings were changed in the plan (mixed-original row R-16, sequenced lookup for R-10, exact total of 998, test-file range, R-1 wording, R-15 date tie).
+- Round 3: **IMPLEMENTATION GATE — PASS**, 4 non-blocking P3 findings; three changed (blank-string wording, stale pointers, books-view note), one deferred (sign-off sheet layout). The reviewer's stated limits: it takes the owner's answers as recorded by the author, and it executed nothing.
