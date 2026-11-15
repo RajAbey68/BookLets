@@ -97,4 +97,4 @@ The request was built but refused by the OpenRouter account's guardrail ("Model 
 
 ### CI on the pull request
 
-`Build & Lint` failed at its `npm audit` step (16 dependency advisories: next, sharp, postcss and others). The same job fails on `main` at the base commit, so it is not caused by this change. Because the job stops there, CI has not run type check, lint, unit tests or build for this branch. Integration tests, schema validation, governance gates, dependency review and Snyk passed.
+On commit `36d0189` the `Build & Lint` job ran Typecheck, Lint, Unit tests + coverage gate and Build successfully (Node 20), then failed at its last step, `npm audit` (16 dependency advisories: next, sharp, postcss and others). The same job fails on `main` at the base commit, so the failure is not caused by this change. Integration tests, schema validation, governance gates, dependency review and Snyk passed. The follow-up commit with the review fixes has its own CI run.
