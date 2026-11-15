@@ -421,7 +421,10 @@ export class LedgerService {
 
     // One reversal per original: a repeat call is an idempotent replay.
     const reversalWhere = { organizationId, source: 'reversal', sourceId: entryId };
-    const existingReversal = await prisma.journalEntry.findFirst({ where: reversalWhere });
+    const existingReversal = await prisma.journalEntry.findFirst({
+      where: reversalWhere,
+      include: { lines: true },
+    });
     if (existingReversal) {
       return existingReversal;
     }
@@ -432,7 +435,8 @@ export class LedgerService {
     await this.checkFiscalPeriod(organizationId, reversalDate);
 
     // Keyed on the ORIGINAL's date (not today) so the key is the same on any
-    // day — the unique index then rejects a concurrent second reversal.
+    // day — the unique index then rejects a concurrent second reversal
+    // (assuming the original's date is not edited between the two attempts).
     const idempotencyKey = this.computeIdempotencyKey('reversal', entryId, originalEntry.date, { organizationId });
 
     // 1. Prepare reversed lines — an exact mirror, currency included.
@@ -458,14 +462,8 @@ export class LedgerService {
             source: 'reversal',
             sourceId: entryId,
             idempotencyKey,
-            lines: {
-              create: reversedLines.map(line => ({
-                accountId: line.accountId,
-                amount: line.amount, // Decimal — do NOT call .toNumber() (loses precision)
-                isDebit: line.isDebit,
-                currency: line.currency,
-              }))
-            }
+            // amount stays a Decimal — do NOT call .toNumber() (loses precision)
+            lines: { create: reversedLines }
           },
           include: { lines: true }
         });
@@ -495,7 +493,10 @@ export class LedgerService {
       // Lost a race: a concurrent reversal of the same original won the
       // unique key. Return the winner's counter-entry rather than the conflict.
       if (this.isIdempotencyConflict(err)) {
-        const winner = await prisma.journalEntry.findFirst({ where: reversalWhere });
+        const winner = await prisma.journalEntry.findFirst({
+          where: reversalWhere,
+          include: { lines: true },
+        });
         if (winner) return winner;
       }
       throw err;

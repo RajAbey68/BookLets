@@ -250,7 +250,7 @@ describe('LedgerService.postEntry — idempotency', () => {
   });
 
   // Ledger repair (Nov 2026), docs/runs/ledger-repair-2026-11-13/TEST-PLAN.md C-8.
-  it('C-8 refuses to post an entry whose lines are in different currencies, before touching the database', async () => {
+  it('C-8 refuses to post an entry whose lines are in different currencies, before the fiscal-period check and before any write', async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
     const periodFindFirst = vi.fn().mockResolvedValue(openPeriod);
     const $transaction = vi.fn();
@@ -274,6 +274,9 @@ describe('LedgerService.postEntry — idempotency', () => {
 
     await expect(attempt).rejects.toThrow(/CRITICAL LEDGER ERROR/);
     await expect(attempt).rejects.toThrow(/mixed currenc/i);
+    // The only database call is the idempotency fast-path read, which runs
+    // before validation (a replayed key returns the existing entry unvalidated).
+    expect(findFirst).toHaveBeenCalledOnce();
     expect($transaction).not.toHaveBeenCalled();
     expect(periodFindFirst).not.toHaveBeenCalled();
   });

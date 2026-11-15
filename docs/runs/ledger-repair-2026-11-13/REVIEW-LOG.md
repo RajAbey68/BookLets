@@ -60,3 +60,41 @@ IDs: C = Critic, N = Naive Reader, I = Implementation Gate.
 
 - Round 2, after the owner's first four answers: **IMPLEMENTATION GATE — BLOCK**, 7 findings (P1 1, P2 3, P3 3). The P1 was three rules still without an owner answer (reverse a mixed-currency original; reverse a counter-entry; stated-plus-blank currency). The owner answered the first two; the third was already covered by the wording of the option the owner chose. The other six findings were changed in the plan (mixed-original row R-16, sequenced lookup for R-10, exact total of 998, test-file range, R-1 wording, R-15 date tie).
 - Round 3: **IMPLEMENTATION GATE — PASS**, 4 non-blocking P3 findings; three changed (blank-string wording, stale pointers, books-view note), one deferred (sign-off sheet layout). The reviewer's stated limits: it takes the owner's answers as recorded by the author, and it executed nothing.
+
+## Code review of the fix (15 Nov 2026)
+
+Three independent zero-context EGM reviewers read the diff (`main`..`36d0189`, source and tests) and the surrounding code. Read-only; none executed the suite.
+
+| Reviewer | Findings | Result |
+|---|---|---|
+| Critic (defects) | 6 (P2 2, P3 4) | no code change required for correctness against the rules; two database checks required before release |
+| Technical accuracy and test integrity | 9 (P2 2, P3 7) | no existing assertion weakened beyond the flagged replacement; one misleading test title, one untested branch |
+| Scope and simplicity | 4 (P2 1, P3 3) | SCOPE OK; plan wrongly said no rendered output changes |
+
+No P0 or P1 from any reviewer.
+
+| Finding | Disposition |
+|---|---|
+| Listings show a reversed entry as two POSTED rows; plan section 8 was wrong | changed — section 8 corrected, residual recorded (section 10); display change needs owner approval, outside permitted files |
+| One-reversal rule depends on the unique index under concurrency | deferred to owner — confirm the index in production; an in-transaction row lock was suggested and not added (new behaviour, not in the approved rules) |
+| Cancellation refused when no open period covers today | deferred to owner — consequence of the approved date rule; recorded in section 10 |
+| C-8 title claimed "before touching the database" | changed — retitled; now asserts the single idempotency read |
+| "P2002 with no winner is rethrown" untested; recovery lookup scope unasserted | changed — R-17 added; R-10 asserts the lookup's `where` |
+| P2002 without `meta.target` (driver adapter shape) untested | changed — R-18 added |
+| Repeat-call and lost-race results lacked `lines` | changed — both lookups now `include: { lines: true }` |
+| Line mapping duplicated inside `create` | changed — `reversedLines` passed directly |
+| R-15 could flake (clock read before a cold import) | changed — clock read around the call only |
+| C-7 and R-6 titles claimed more than shown | changed — retitled |
+| Key comment true only if the original's date is not edited | changed — comment qualified |
+| Period check outside the transaction; empty-string currency; duplicate currency definition; seed scripts bypass | deferred — recorded in section 10 |
+| Error-message wording unpinned | rejected — presentation only |
+
+After these changes: `npm run test:unit` 1000 passed (65 files), 0 failed, same single pre-existing unhandled error; `npx tsc --noEmit` exit 0; eslint on the changed files with `--max-warnings 0` exit 0.
+
+### Third-party model review (DeepSeek V4.1 Flash) — BLOCKED, not run
+
+The request was built but refused by the OpenRouter account's guardrail ("Model blocked by guardrail") for both `deepseek/deepseek-v4.1-flash` and `deepseek/deepseek-v4.1-flash-1017`. No other model was substituted. No direct DeepSeek key was found under the obvious keychain names.
+
+### CI on the pull request
+
+`Build & Lint` failed at its `npm audit` step (16 dependency advisories: next, sharp, postcss and others). The same job fails on `main` at the base commit, so it is not caused by this change. Because the job stops there, CI has not run type check, lint, unit tests or build for this branch. Integration tests, schema validation, governance gates, dependency review and Snyk passed.

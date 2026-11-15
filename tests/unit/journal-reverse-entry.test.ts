@@ -243,7 +243,7 @@ describe('LedgerService.reverseEntry (RAJ-455)', () => {
 
   // ── Linkage and one reversal per entry (D2) ───────────────────────────────
 
-  it('R-6 links the counter-entry to the original with a day-independent idempotency key', async () => {
+  it('R-6 links the counter-entry to the original, keyed on the original\'s date', async () => {
     const { create } = mockDeps(originalEntry);
     const { LedgerService } = await import('../../src/lib/ledger.service');
 
@@ -302,7 +302,7 @@ describe('LedgerService.reverseEntry (RAJ-455)', () => {
   });
 
   it('R-10 a lost race on the unique key resolves to the winner\'s counter-entry', async () => {
-    const { create, update, record } = mockDeps(originalEntry, [null, { id: 'je-rev-0' }]);
+    const { findFirst, create, update, record } = mockDeps(originalEntry, [null, { id: 'je-rev-0' }]);
     create.mockRejectedValue(
       new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
         code: 'P2002',
@@ -317,6 +317,39 @@ describe('LedgerService.reverseEntry (RAJ-455)', () => {
     expect(result.id).toBe('je-rev-0');
     expect(update).not.toHaveBeenCalled();
     expect(record).not.toHaveBeenCalled();
+    // the recovery re-read is scoped exactly like the first lookup
+    expect((findFirst.mock.calls.at(-1)![0] as { where: unknown }).where).toEqual({
+      organizationId: 'org-1',
+      source: 'reversal',
+      sourceId: 'je-1',
+    });
+  });
+
+  it('R-17 a unique-key conflict with no counter-entry to be found is rethrown unchanged', async () => {
+    const { create } = mockDeps(originalEntry, null);
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: { target: ['organizationId', 'idempotencyKey'] },
+    });
+    create.mockRejectedValue(p2002);
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+
+    await expect(LedgerService.reverseEntry('org-1', 'je-1', 'reason', 'user-1')).rejects.toBe(p2002);
+  });
+
+  it('R-18 a lost race is recovered when the conflict carries no field metadata', async () => {
+    // Driver adapters may not populate meta.target on P2002.
+    const { create, update } = mockDeps(originalEntry, [null, { id: 'je-rev-0' }]);
+    create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test' }),
+    );
+    const { LedgerService } = await import('../../src/lib/ledger.service');
+
+    const result = await LedgerService.reverseEntry('org-1', 'je-1', 'reason', 'user-1');
+
+    expect(result.id).toBe('je-rev-0');
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('R-11 rethrows any other create failure unchanged', async () => {
@@ -360,11 +393,12 @@ describe('LedgerService.reverseEntry (RAJ-455)', () => {
   });
 
   it('R-15 checks the period of the very date it stamps on the counter-entry', async () => {
-    const before = Date.now();
     const { create, periodFindFirst } = mockDeps(originalEntry);
     const { LedgerService } = await import('../../src/lib/ledger.service');
 
+    const before = Date.now();
     await LedgerService.reverseEntry('org-1', 'je-1', 'reason', 'user-1');
+    const after = Date.now();
 
     expect(periodFindFirst).toHaveBeenCalledOnce();
     expect(periodFindFirst.mock.invocationCallOrder[0]).toBeLessThan(create.mock.invocationCallOrder[0]);
@@ -378,7 +412,8 @@ describe('LedgerService.reverseEntry (RAJ-455)', () => {
     expect(where.organizationId).toBe('org-1');
     expect(where.startDate.lte.getTime()).toBe(stamped.getTime());
     expect(where.endDate.gte.getTime()).toBe(stamped.getTime());
-    expect(Math.abs(stamped.getTime() - before)).toBeLessThan(5000);
+    expect(stamped.getTime()).toBeGreaterThanOrEqual(before);
+    expect(stamped.getTime()).toBeLessThanOrEqual(after);
   });
 
   it('R-16 mirrors a mixed-currency original line for line', async () => {

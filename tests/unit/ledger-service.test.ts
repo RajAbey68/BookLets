@@ -151,7 +151,7 @@ describe('LedgerService.validateTrialBalance — currency', () => {
     expect(result.error).toMatch(/mixed currenc/i);
   });
 
-  it('C-7 still reports the line-count error first', () => {
+  it('C-7 a single line still gets the line-count error', () => {
     const result = LedgerService.validateTrialBalance([line('100', true, 'EUR')]);
     expect(result.isValid).toBe(false);
     expect(result.error).toMatch(/at least two lines/);

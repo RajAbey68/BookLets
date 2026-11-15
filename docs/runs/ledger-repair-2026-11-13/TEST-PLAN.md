@@ -101,7 +101,7 @@ Before/after proof for single-currency behaviour: the eight existing `validateTr
 |---|---|---|
 | C-8 | `status: POSTED`, lines as C-1 | rejects with `/CRITICAL LEDGER ERROR/` and `/mixed currenc/i`; `prisma.$transaction` not called; `prisma.fiscalPeriod.findFirst` not called |
 
-Test files: R-1 to R-16 in `tests/unit/journal-reverse-entry.test.ts`; C-1 to C-7 in `tests/unit/ledger-service.test.ts`; C-8 in `tests/unit/journal-idempotency.test.ts`. One `it` per ID, with the ID at the start of the test title. That is 17 reversal tests (R-1 to R-16, with R-5 as R-5a and R-5b) and 8 currency tests (C-1 to C-8): 25 new tests. Comment edits in those files are allowed where the old comment describes the replaced behaviour.
+Test files: R-1 to R-16 in `tests/unit/journal-reverse-entry.test.ts`; C-1 to C-7 in `tests/unit/ledger-service.test.ts`; C-8 in `tests/unit/journal-idempotency.test.ts`. One `it` per ID, with the ID at the start of the test title. That is 17 reversal tests (R-1 to R-16, with R-5 as R-5a and R-5b) and 8 currency tests (C-1 to C-8): 25 new tests. Code review on 15 Nov added R-17 (a unique-key conflict with no counter-entry found is rethrown) and R-18 (a lost race is recovered when the conflict carries no field metadata): 27 new tests, suite total 1000. Comment edits in those files are allowed where the old comment describes the replaced behaviour.
 
 ## 6. Red and green expectations
 
@@ -128,7 +128,7 @@ No test may be skipped, deleted or loosened to reach green, other than the one r
 
 ## 8. Visual checks
 
-None. No UI file, route or rendered output changes. Jev Vision typed visual acceptance does not apply.
+No UI file or route changes, so no visual test was defined. Correction after code review (15 Nov 2026): rendered output does change as a consequence of D1, see the first residual in section 10. An earlier version of this section said nothing rendered changes; that was wrong.
 
 ## 9. Rollback
 
@@ -136,6 +136,13 @@ Reverting the fix commit restores the old code. It is data-neutral only if no re
 
 ## 10. Known residuals raised by review (not fixed here, owner-visible)
 
+- **Listings now show a reversed entry as two ordinary rows.** Because the original stays `POSTED`, `/books`, `/ledger` and the ledger CSV export list both the original and its counter-entry as `POSTED` (before: the original showed as `VOIDED` or dropped out). `/books` shows the debit total unsigned, so a reversed 1250 booking reads as two positive 1250 rows; only the memo text (`| Reversed by …`, `AUTO-REVERSAL: …`) tells them apart. Totals are correct. A display follow-up is outside the permitted files.
+- **One reversal per original relies on the database unique index** `(organizationId, idempotencyKey)` when two calls overlap. The lookup runs outside the transaction and the original is not row-locked. If that index is missing in the target database, two overlapping cancellations can both post a counter-entry. Confirm the index exists in production before release.
+- **Booking cancellation is now refused when no open fiscal period covers today** (D6). The caller records a per-record sync failure and the liability stays on the books until a period exists. A period whose end date is stored as midnight at the start of its last day does not cover that last day.
+- The fiscal-period check runs before the transaction; if the period is closed or locked in between, the write is still refused but with the database's error text.
+- An empty-string currency (`''`) is treated as a stated currency, not as omitted. No current caller produces it.
+- "Distinct currencies of a line set" is defined here and, slightly differently, in `src/lib/metric-drilldown.ts`. Direct `journalEntry.create` calls that bypass `LedgerService` (seed scripts) are not bound by D5.
+- Observed, unrelated to this change: `prisma/migrations/20260812_0001_pr_151_triggers.sql` (a loose file, not a migration folder) defines a balance trigger that fires on `JournalEntry` insert before any line exists; applied as written it would reject every POSTED create.
 - Booking cancellation has two independent reversal routes in `revenue.service.ts` (`handleBookingCancellation` via `reverseEntry`, and `postCancellationReversal`) with no shared idempotency. If the first succeeds but the following `booking.update` fails, a later sync can post a second reversing entry through the other route, leaving the books at minus the amount. Outside the permitted files.
 - The `postEntry` idempotency fast path returns an existing entry whatever its status, including one already reversed (same-day cancel, reinstate, cancel).
 - The memo append on the original is an unguarded write (no version check); under D1 the original stays editable, so a concurrent memo edit can be overwritten.
