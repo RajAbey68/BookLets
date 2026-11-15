@@ -46,10 +46,28 @@ export class LedgerService {
   /**
    * Validates that the sum of debits equals the sum of credits.
    * Debits are treated as positive and credits as negative for the zero-sum check.
+   *
+   * Amounts in different currencies are never added as raw numbers: a line
+   * set that is not denominated uniformly is rejected before any arithmetic.
+   * "Uniform" means every line states the same currency code (compared
+   * exactly), or no line states one. A mix of stated and omitted currency is
+   * rejected too — an omitted currency takes the column default, which is not
+   * reliably the books' currency. No conversion is attempted.
    */
   static validateTrialBalance(lines: JournalEntryInput['lines']): LedgerValidationResult {
     if (lines.length < 2) {
       return { isValid: false, balance: new Decimal(0), error: 'A journal entry must have at least two lines.' };
+    }
+
+    const denominations = [...new Set(lines.map((line) => line.currency ?? null))];
+    if (denominations.length > 1) {
+      const labels = denominations.map((code) => code ?? '(none stated)').sort();
+      return {
+        isValid: false,
+        // A raw difference across currencies is not a money figure — report none.
+        balance: new Decimal(0),
+        error: `Journal entry has mixed currencies (${labels.join(', ')}). All lines must be in the same currency.`,
+      };
     }
 
     let balance = new Decimal(0);
@@ -343,6 +361,18 @@ export class LedgerService {
   /**
    * Reverses an existing Journal Entry by creating a new one with inverse debits/credits.
    *
+   * The original stays POSTED. Every report counts POSTED entries only, so
+   * the original and its counter-entry must BOTH be counted to net to zero;
+   * voiding the original as well would subtract the amount twice. The
+   * counter-entry:
+   *   - mirrors each line exactly (account, amount, currency), flipping isDebit;
+   *   - is linked structurally: source='reversal', sourceId=<original id>;
+   *   - is dated today, and today must fall in an open fiscal period;
+   *   - exists at most once per original. A repeat call returns the existing
+   *     counter-entry and writes nothing; a concurrent duplicate loses on the
+   *     (organizationId, idempotencyKey) unique index and gets the winner.
+   * A counter-entry cannot itself be reversed.
+   *
    * `makerIdentity` is the actor performing the reversal. The EvidenceLog
    * records this — not the original entry's maker — because a reversal is a
    * distinct accounting act and the audit trail must attribute it correctly.
@@ -385,57 +415,92 @@ export class LedgerService {
       throw new Error(`Cannot reverse an entry with status "${originalEntry.status}". Only POSTED entries can be reversed.`);
     }
 
-    // 1. Prepare reversed lines
+    if (originalEntry.source === 'reversal') {
+      throw new Error('Reversal entries cannot be reversed. Post a new entry instead.');
+    }
+
+    // One reversal per original: a repeat call is an idempotent replay.
+    const reversalWhere = { organizationId, source: 'reversal', sourceId: entryId };
+    const existingReversal = await prisma.journalEntry.findFirst({
+      where: reversalWhere,
+      include: { lines: true },
+    });
+    if (existingReversal) {
+      return existingReversal;
+    }
+
+    // The counter-entry is dated today; today must be in an open period. The
+    // original's own period is neither checked nor touched.
+    const reversalDate = new Date();
+    await this.checkFiscalPeriod(organizationId, reversalDate);
+
+    // Keyed on the ORIGINAL's date (not today) so the key is the same on any
+    // day — the unique index then rejects a concurrent second reversal
+    // (assuming the original's date is not edited between the two attempts).
+    const idempotencyKey = this.computeIdempotencyKey('reversal', entryId, originalEntry.date, { organizationId });
+
+    // 1. Prepare reversed lines — an exact mirror, currency included.
     const reversedLines = originalEntry.lines.map(line => ({
       accountId: line.accountId,
       amount: new Decimal(line.amount),
       isDebit: !line.isDebit, // Flip Debit/Credit
-      memo: `Reversal of Entry #${entryId}: ${reason}`
+      currency: line.currency,
     }));
 
     // 2. Create the reversal entry
-    return await prisma.$transaction(async (tx) => {
-      // S3 (rls-lock): transaction-local RLS org context — explicit org id
-      // (review finding #1: never rely on an ambient scope being open).
-      await setRlsOrgContext(tx, organizationId);
-      const reversal = await tx.journalEntry.create({
-        data: {
-          organizationId: originalEntry.organizationId,
-          date: new Date(),
-          memo: `AUTO-REVERSAL: [Original Entry ID: ${entryId}] - Reason: ${reason}`,
-          status: 'POSTED',
-          lines: {
-            create: reversedLines.map(line => ({
-              accountId: line.accountId,
-              amount: line.amount, // Decimal — do NOT call .toNumber() (loses precision)
-              isDebit: line.isDebit,
-            }))
-          }
-        },
-        include: { lines: true }
-      });
+    try {
+      return await prisma.$transaction(async (tx) => {
+        // S3 (rls-lock): transaction-local RLS org context — explicit org id
+        // (review finding #1: never rely on an ambient scope being open).
+        await setRlsOrgContext(tx, organizationId);
+        const reversal = await tx.journalEntry.create({
+          data: {
+            organizationId: originalEntry.organizationId,
+            date: reversalDate,
+            memo: `AUTO-REVERSAL: [Original Entry ID: ${entryId}] - Reason: ${reason}`,
+            status: 'POSTED',
+            source: 'reversal',
+            sourceId: entryId,
+            idempotencyKey,
+            // amount stays a Decimal — do NOT call .toNumber() (loses precision)
+            lines: { create: reversedLines }
+          },
+          include: { lines: true }
+        });
 
-      // 3. Mark the original as VOIDED (or similar, but I'll update it to VOIDED here)
-      // Note: My extension blocks delete, but update is allowed.
-      await tx.journalEntry.update({
-        where: { id: entryId },
-        data: { status: 'VOIDED', memo: (originalEntry.memo || '') + ` | Reversed by ${reversal.id}` }
-      });
+        // 3. Annotate the original. Its status is deliberately NOT changed:
+        // it must stay POSTED so it and the counter-entry cancel in reports.
+        await tx.journalEntry.update({
+          where: { id: entryId },
+          data: { memo: (originalEntry.memo || '') + ` | Reversed by ${reversal.id}` }
+        });
 
-      await EvidenceLogService.record(tx, {
-        eventType: 'JOURNAL_REVERSED',
-        tenantId: originalEntry.organizationId,
-        makerIdentity: makerIdentity ?? originalEntry.makerIdentity ?? 'system',
-        description: `Reversed entry ${entryId}: ${reason}`,
-        payload: {
-          reversalId: reversal.id,
-          originalEntryId: entryId,
-          reason,
-        },
-      });
+        await EvidenceLogService.record(tx, {
+          eventType: 'JOURNAL_REVERSED',
+          tenantId: originalEntry.organizationId,
+          makerIdentity: makerIdentity ?? originalEntry.makerIdentity ?? 'system',
+          description: `Reversed entry ${entryId}: ${reason}`,
+          payload: {
+            reversalId: reversal.id,
+            originalEntryId: entryId,
+            reason,
+          },
+        });
 
-      return reversal;
-    });
+        return reversal;
+      });
+    } catch (err) {
+      // Lost a race: a concurrent reversal of the same original won the
+      // unique key. Return the winner's counter-entry rather than the conflict.
+      if (this.isIdempotencyConflict(err)) {
+        const winner = await prisma.journalEntry.findFirst({
+          where: reversalWhere,
+          include: { lines: true },
+        });
+        if (winner) return winner;
+      }
+      throw err;
+    }
   }
 
   /**
