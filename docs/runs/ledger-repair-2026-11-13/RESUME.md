@@ -59,3 +59,17 @@ Raj answers R1 and R3 (and supplies the held candidate's file list). Then resume
 The questions above were answered by the owner (`SIGNOFF.md`). Tests and fix are committed on `fix/ledger-repair-2026-11-13`: red tests `3dd60b3`, fix `23aca91`. Expected `git diff --stat main`: one source file (`src/lib/ledger.service.ts`), three unit test files, and this folder. Expected hashes are in the EVIDENCE.md addendum. Unit suite: 998 passed, plus the one pre-existing unrelated error.
 
 Single next action: an independent reviewer checks the diff against that shape and confirms no test was weakened beyond the one flagged replacement. Release, data correction and the held permissions work keep their own gates.
+
+---
+
+## Update 15 Nov 2026 — handoff artifact
+
+`HANDOFF.md` in this folder records the base commit, branch, commit list, file
+manifest, the exact `git format-patch` invocation, and the verification route
+(clean worktree at `bc21477`, `git apply --check`, real apply, tree comparison,
+key tests re-run on the applied candidate, source-hash re-check).
+
+The patch itself and its SHA256 live outside the repository
+(`~/code/booklets-ledger-repair.patch`, `~/code/booklets-ledger-repair.patch.sha256`)
+because a patch cannot contain its own hash. Still open and still human-only: the
+independent reviewer sign-off on diff shape and test weakening.
