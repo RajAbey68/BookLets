@@ -308,6 +308,18 @@ Why it encoded the defect: it pinned the write that takes the original out of th
 
 ## Source hashes after the fix (SHA256)
 
+> **Superseded (17 Nov 2026).** These hashes were taken at `23aca91`. Commit `b4d2e58` later changed all four edited files, so a correct tree no longer matches them. Hashes of the merged tree (merge commit `f757d8a`, identical in `src/` and `tests/` on `main` at `6a604ae`):
+>
+> ```
+> 6f5a60e5e6b293b139ec03dcd8739d33745b378f71d4e17a6f9ec73f8b4be7dd  src/lib/ledger.service.ts
+> 8a6cad465dc34b5d2b88cbfa80fdb04dd017c64a7d2dd41e10dc2604af37239b  src/lib/books-view.ts   (unchanged from base)
+> cd1c4f887e4537f5da375f80231845307cbc2d0867530f9cf738e734ac142813  tests/unit/journal-reverse-entry.test.ts
+> 6280b7dffdc2fa4eecf62bdbc73426f9e1698ce4cf05ca88218728378333ce57  tests/unit/ledger-service.test.ts
+> 6263316d5e14642e2415cf92b0057f4f70c0336d0512b422451c937a7fd9b092  tests/unit/journal-idempotency.test.ts
+> ```
+>
+> Original record at `23aca91`, kept for history:
+
 ```
 77cb9cb13aa6293e4ec91671354fe45df7aca0379a58e7fa1c1d8678fb8fcabe  src/lib/ledger.service.ts
 8a6cad465dc34b5d2b88cbfa80fdb04dd017c64a7d2dd41e10dc2604af37239b  src/lib/books-view.ts   (unchanged from base)
@@ -318,7 +330,7 @@ Why it encoded the defect: it pinned the write that takes the original out of th
 
 ## Remote writes
 
-The owner instructed in the working session on 14 Nov: "synch the local code to GitHub repo so it can be reviewed". The work branch was pushed after that instruction (docs commits). No pull request, merge or deploy. A branch push runs no GitHub workflow in this repo (workflows trigger on `main` and pull requests); a Vercel preview check was observed on the pushed commit.
+The owner instructed in the working session on 14 Nov: "synch the local code to GitHub repo so it can be reviewed". The work branch was pushed after that instruction (docs commits). At the time of writing: no pull request, merge or deploy. **Superseded:** PR 181 was opened, CI ran on it, and it was merged on 15 Nov 2026 (`f757d8a`) and deployed to production by Vercel. At the time, a branch push ran no GitHub workflow in this repo (workflows trigger on `main` and pull requests); a Vercel preview check was observed on the pushed commit.
 
 ## Still not done by this fix
 

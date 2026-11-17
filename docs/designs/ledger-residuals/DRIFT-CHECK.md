@@ -2,6 +2,8 @@
 
 15 Nov 2026. Two zero-context EGM reviewers, static reading only (no test run, no git). Recorded here, on the roadmap branch, because the PR branch is frozen for review; nothing on the PR branch was changed.
 
+**Update 17 Nov 2026:** PR 181 was merged. Section B's six P1 statements were corrected in the run notes in the same docs PR that adds this file (HANDOFF.md had already been corrected on `main` in `6a604ae`). Section A's P2/P3 items and section B's P2/P3 items are not corrected.
+
 ## A. Specification vs code — no behavioural drift
 
 Verdict from the reviewer: P0 0, P1 0, P2 1, P3 7. The code does what owner decisions D1–D6 sign off. Every acceptance criterion (R-1…R-18, C-1…C-8) has a test, and no assertion is weaker than its criterion. No file under `src/` still assumes a reversed original becomes voided.

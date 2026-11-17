@@ -27,14 +27,33 @@ Branch: `docs/ledger-residuals-roadmap` (local only; it sits on top of the repai
 
 | Gate | What it means | State | Blocks |
 |---|---|---|---|
-| G-A | An independent person reviews the repair | Open | Merging the repair |
-| G-B | The repair is merged | Not merged. Two things the owner may want settled first: the pull request's `Build & Lint` check fails at the `npm audit` step (it fails on `main` too), and the third-party model review the owner asked for (DeepSeek) has not run. | G-F |
-| G-C | Production has the pieces the repair relies on: the unique index on organisation plus idempotency key, and the link-field columns. Also that the loose trigger file `20260812_0001_pr_151_triggers.sql` has **not** been applied (it would reject every counted entry). | Evidence from the repository only (migrations `20260701_journal_idempotency_key`, `20260703_journal_source_fields`). `AGENTS.md` says production is applied through `20260703_*`, but that file is stale in other respects, so this is weak evidence. Not checked against production. | Deploying the repair |
-| G-D | An open fiscal period covers today. A continuing condition, not a one-off: after the repair, a cancellation is refused on any day no open period covers. | Unknown. Note: a period whose end date is stored as midnight at the start of its last day does not cover that last day. | Deploying the repair; every later item that posts an entry |
+| G-A | An independent person reviews the repair | Owner posted a written reviewer sign-off on PR 181 (15 Nov); GitHub records no formal review | Merging the repair |
+| G-B | The repair is merged | **Done.** Merged by the owner 15 Nov 2026, 17:44 UTC (`f757d8a`). Still open: `Build & Lint` fails at the `npm audit` step, and the DeepSeek review never ran (blocked by the owner's OpenRouter guardrail). | G-F |
+| G-C | Production has the pieces the repair relies on: the unique index on organisation plus idempotency key, and the link-field columns. Also that the loose trigger file `20260812_0001_pr_151_triggers.sql` has **not** been applied (it would reject every counted entry). | Evidence from the repository only (migrations `20260701_journal_idempotency_key`, `20260703_journal_source_fields`). `AGENTS.md` says production is applied through `20260703_*`, but that file is stale in other respects, so this is weak evidence. **Pass — checked against production 17 Nov 2026** (read-only queries, see section 2a). | Deploying the repair |
+| G-D | An open fiscal period covers today. A continuing condition, not a one-off: after the repair, a cancellation is refused on any day no open period covers. | **Pass on 17 Nov 2026**: one open, unlocked period covers today (48 periods in total). Note: a period whose end date is stored as midnight at the start of its last day does not cover that last day. | Deploying the repair; every later item that posts an entry |
 | G-E | The sandbox duplicate-import guard is in place before any imported payment is promoted into the journal (`AGENTS.md`). | Not applied to production | Importing; not R0–R5 directly. Whether it also blocks correcting entries (R1) is owner question R1-Q6. |
-| G-F | The repair is **deployed to production** and the deployed commit is confirmed | Not deployed | R0 (final run), R1, R2, R4, R5 |
+| G-F | The repair is **deployed to production** and the deployed commit is confirmed | **Done.** Vercel deployed `f757d8a`, then `6a604ae`, to Production on 15 Nov 2026 (GitHub deployments record) | R0 (final run), R1, R2, R4, R5 |
 
 G-C and G-D each need a look at production. Who looks is owner question R0-Q1 (same answer applies).
+
+### 2a. Production check — 17 Nov 2026 (read-only)
+
+SELECT-only queries on the production Supabase project, run by an AI agent through the owner's signed-in Supabase CLI on the owner's instruction. Counts only; no ledger amounts or text were copied out. Nothing was written.
+
+| Check | Result |
+|---|---|
+| `JournalEntry.idempotencyKey`, `source`, `sourceId` columns | Present |
+| Unique index `JournalEntry_organizationId_idempotencyKey_key` | Present, unique |
+| Triggers on `JournalEntry` | Only `journal_entry_fiscal_lock` and `journal_entry_no_posted_delete`. No balance-validation trigger, so `20260812_0001_pr_151_triggers.sql` is not applied |
+| Migrations `20260701_journal_idempotency_key`, `20260703_journal_source_fields`, `20260703_fiscal_lock_and_posted_delete_triggers` | Applied, not rolled back |
+| Fiscal-lock trigger on a memo-only update | Allowed (it only checks when the date or organisation changes), so marking a reversed original works in a closed period |
+| `JournalLine.currency` default | Still `'EUR'` (`20260802_currency_default_lkr` not applied) |
+| Line currencies | All 786 lines are `LKR`; none blank, none `EUR` |
+| Journal activity | Newest entry created 4 Aug 2026, last update 4 Aug 2026. Nothing written since the 15 Nov deploy. Totals: 375 DRAFT, 16 POSTED, 2 VOIDED |
+| Legacy reversal pairs (pre-fix pattern: `AUTO-REVERSAL:` counter-entry, original VOIDED with `Reversed by`) | 0 counter-entries, 0 such originals. The 2 VOIDED entries are not reversals |
+| Production application logs (Vercel) since 15 Nov | **Not checked** — no Vercel access from the session |
+
+Consequences: R1 (correct legacy pairs) has nothing to correct today. The repair has not yet run against production data. The `EUR` default matters only for future lines written without a currency.
 
 Why G-F matters: until the repair is live, every booking cancellation in production keeps creating legacy pairs. A count taken before deployment goes stale.
 
@@ -143,7 +162,7 @@ Done when (tests), assuming the recommended answers (R2-Q1 yes, Q2 (a), Q4 full,
 
 The trial balance, balance sheet, profit and loss, dashboard metrics and account service add line amounts without reading the currency (`trial-balance-report.ts`, `balance-sheet-report.ts`, `pl-statement-report.ts`, `metrics.service.ts`, `account.service.ts`; `books.actions.ts` to be checked). The repair stops one entry mixing currencies; it does not stop two entries in different currencies being added together. The `/books` row total is a smaller case: it is only wrong for a single mixed entry. `getAccountBalance` has the same fault but nothing calls it; removing it is simpler than giving it a currency rule (owner question R3-Q5).
 
-Complication: booking entries are written without a currency and take the database default, which in production is reported in the repository's own migration notes as still `EUR` (migration `20260802_currency_default_lkr` not applied). A line that inherited `EUR` cannot be told apart from a line that is really in euros. The ledger screen already notes that production holds more than one currency.
+Complication: booking entries are written without a currency and take the database default, which in production is still `EUR` (confirmed 17 Nov 2026; migration `20260802_currency_default_lkr` not applied). No production line has taken that default yet: all 786 lines state `LKR`. A line that inherited `EUR` cannot be told apart from a line that is really in euros. The ledger screen already notes that production holds more than one currency.
 
 Owner questions:
 

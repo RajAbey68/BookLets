@@ -3,7 +3,7 @@
 Run of the v5 prompt dated 13 Nov 2026 (prompt SHA256 `8d0fb4d3…65b7f942`, held outside the repo).
 
 - Base: `bc2147734bc5ae792f0b451394e7875d3074cb46` (`main`), clean tree at start.
-- Branch: `fix/ledger-repair-2026-11-13` (local only, never pushed).
+- Branch: `fix/ledger-repair-2026-11-13` (pushed on the owner's instruction of 14 Nov; became PR 181, merged 15 Nov 2026).
 - Allowed edits: `src/lib/ledger.service.ts`, `src/lib/books-view.ts`, unit tests, this folder.
 
 ## Stages
