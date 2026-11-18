@@ -82,3 +82,18 @@ Verdict: **BLOCK**, narrowly: all eight round-2 findings confirmed fixed and the
 Verdict: **PASS** — "fit to put to the owner for sequencing and the first answers". N1–N5 confirmed fixed. Five P3 tidy-ups (F1–F5: leftover wording in R1 and section 6, option C scoping, the Jev figure, question order) applied after the verdict; they change no rule.
 
 This PASS covers the roadmap as a document to put to the owner. It authorises no item. Each of R1–R5 needs its own plan, reviews and owner sign-off. Not an independent human review.
+
+## R0 inventory queries — 18 Nov 2026
+
+Files: `R0-INVENTORY.sql` (part A, counts), `R0-INVENTORY-PARTB.sql` (part B, id list), `R0-INVENTORY-FIXTURE.sql` (synthetic cases and expected results). Drafted after the 17 Nov production check (section 2a of the roadmap), to cover what it did not record. Not run against production.
+
+Local check: schema generated from `prisma/schema.prisma` into a throwaway PostgreSQL 17.11, synthetic rows loaded, both parts run; every expected count and the 39 part B rows matched. The throwaway database was removed afterwards. It has no row-level-security policies, so Query 1's visibility check was exercised only in the "can see everything" case.
+
+Zero-context EGM technical review (codebase details), two rounds:
+
+| Round | Verdict | Findings and disposition |
+|---|---|---|
+| 1 | BLOCK | P1-1 route prediction did not follow the sync code (route one only sees linked pre-payments; an already-reversed pick writes nothing), and the fixture encoded the same mistake — FIXED, fixture B2 expectation corrected, B7 added. P1-2 old `Booking pre-payment: … (<8 chars>)` memos missed — FIXED, plus catch-all gap on the Guest Pre-payments account. P2-1 revenue recognition ignored — FIXED. P2-2 part B ran unconditionally — FIXED, separate file. P2-3 evidence check one-directional — FIXED. P2-4 prediction wording — FIXED. P3-1..4 (free text in output, org scoping, `#null`, reversed route-two entries) — FIXED. |
+| 2 | PASS | P2 row-level security could make every table look empty and read as an all-clear — FIXED, Query 1 visibility check (expects 393 entries / 786 lines). P3 legacy counter-entry invisible to route one — FIXED, new count and fixture B18. P3 memo suffix broke old-memo match — FIXED, fixture P13. P3 label mismatch — FIXED. Nit createdAt tie — tie-break by id added, limitation stated in header. |
+
+Not an independent human review.
