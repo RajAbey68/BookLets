@@ -10,7 +10,7 @@ Baseline `bc2147734bc5ae792f0b451394e7875d3074cb46`. Branch `fix/ledger-repair-2
 | Jev decision check | done — three answers in the "act" band, one REVIEW_PENDING (0.74) |
 | G3 plan revised | done for every finding the author can close |
 | G4 owner sign-off | six rule decisions answered by the owner 14 Nov 2026 |
-| Implementation | not started |
+| Implementation | done — PR 181, merged 15 Nov 2026 as `f757d8a` (was "not started" when this table was first written) |
 
 ## Owner decisions — answered 14 Nov 2026
 

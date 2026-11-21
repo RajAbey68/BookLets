@@ -56,7 +56,7 @@ Raj answers R1 and R3 (and supplies the held candidate's file list). Then resume
 
 ## Update 14 Nov 2026 — supersedes the sections above
 
-The questions above were answered by the owner (`SIGNOFF.md`). Tests and fix are committed on `fix/ledger-repair-2026-11-13`: red tests `3dd60b3`, fix `23aca91`. Expected `git diff --stat main`: one source file (`src/lib/ledger.service.ts`), three unit test files, and this folder. Expected hashes are in the EVIDENCE.md addendum. Unit suite: 998 passed, plus the one pre-existing unrelated error.
+The questions above were answered by the owner (`SIGNOFF.md`). **Superseded (17 Nov 2026):** the final state is PR 181, head `982e8e2` (12 commits, including the review-fix commit `b4d2e58`), merged as `f757d8a`; unit suite 1000 passed. See `HANDOFF.md`. Original text follows. Tests and fix are committed on `fix/ledger-repair-2026-11-13`: red tests `3dd60b3`, fix `23aca91`. Expected `git diff --stat main`: one source file (`src/lib/ledger.service.ts`), three unit test files, and this folder. Expected hashes are in the EVIDENCE.md addendum. Unit suite: 998 passed, plus the one pre-existing unrelated error.
 
 Single next action: an independent reviewer checks the diff against that shape and confirms no test was weakened beyond the one flagged replacement. Release, data correction and the held permissions work keep their own gates.
 
